@@ -48,10 +48,15 @@ sess = {r["sessionKey"]: r for r in rows
 ids = {k: f"a{i}" for i, k in enumerate(sess)}
 agents = []
 for k, r in sess.items():
+    kind = kind_of(r["displayName"] or "")
+    # a top-of-tree session whose name classifies as nothing else is an
+    # owner-level mind (e.g. a PO named after its product), not a worker
+    if kind == "coder" and not r["spawnedBy"]:
+        kind = "po"
     agents.append({
         "id": ids[k],
         "name": (r["displayName"] or k)[:48],
-        "kind": kind_of(r["displayName"] or ""),
+        "kind": kind,
         "parent": ids.get(r["spawnedBy"]),
         "retired": r["state"] != "active",
         "turn": None,
