@@ -104,8 +104,23 @@ let lastGen = 0, agentsHash = '';
 
 function disposeGroup(g){
   g.traverse(o=>{ if(o.geometry) o.geometry.dispose();
-    if(o.material){ edgeMats.delete(o.material); o.material.dispose?.(); } });
+    if(o.material){ edgeMats.delete(o.material); o.material.map?.dispose?.(); o.material.dispose?.(); } });
   g.clear();
+}
+/* name label as a camera-facing sprite */
+function labelSprite(text){
+  const c = document.createElement('canvas'), ctx = c.getContext('2d');
+  const font = '600 42px ui-sans-serif, -apple-system, "Helvetica Neue", Arial, sans-serif';
+  ctx.font = font;
+  c.width = Math.ceil(ctx.measureText(text).width) + 16; c.height = 60;
+  ctx.font = font; ctx.textBaseline = 'middle';
+  ctx.fillStyle = T.name==='light' ? '#26323c' : '#d8d6d1';
+  ctx.fillText(text, 8, c.height/2);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(c), transparent:true, opacity:.85, depthTest:false }));
+  sp.renderOrder = 10;
+  const h = 1.35; sp.scale.set(h*c.width/c.height, h, 1);
+  return sp;
 }
 /* hidden-line diagram mesh: background-colored fill that writes depth
    (occludes what's behind it) + visible edges in the stroke color */
@@ -185,6 +200,12 @@ function buildGround(agents){
     m.userData.type='agent'; m.userData.a=a; m.userData.phase=Math.random()*6.28;
     if (!a.retired && a.turn==='run'){ m.userData.lineMat.color.setHex(T.flashRun); m.userData.flash='run'; }
     else if (!a.retired && a.turn==='wait'){ m.userData.lineMat.color.setHex(T.flashWait); m.userData.flash='wait'; }
+    /* label the named layer — Main, owners, patrols, orchestrators;
+       the leaf-worker crowd stays tooltip-only */
+    if (!a.retired && ['main','po','patrol','orch'].includes(a.kind)){
+      const sp = labelSprite(a.name.length>28 ? a.name.slice(0,27)+'…' : a.name);
+      sp.position.set(0, 1.15, 0); m.add(sp);
+    }
     groundGroup.add(m); agentMeshes[a.id]=m;
   });
   agents.forEach(a=>{
