@@ -287,14 +287,17 @@ function msgCurve(a,b){
   mid.y = Math.min(mid.y + 1.6 + p.distanceTo(q)*.16, -.4);  /* wakes travel under the surface */
   return new THREE.QuadraticBezierCurve3(p, mid, q);
 }
+/* in-flight pulse count tracks real wake volume: busier ledger, busier sky */
 setInterval(()=>{
   if (document.hidden || !DATA || !DATA.messages || !DATA.messages.length) return;
+  const cap = Math.min(DATA.messages.length, 16);
+  if (pulses.length >= cap) return;
   const m = DATA.messages[Math.floor(Math.random()*DATA.messages.length)];
   if (!APOS[m.from] || !APOS[m.to]) return;
   const pu = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:T.pulse, transparent:true}));
   pu.userData={curve:msgCurve(m.from,m.to), t:0};
   scene.add(pu); pulses.push(pu);
-}, 1100);
+}, 300);
 
 /* ---------- live feed ---------- */
 async function refresh(){
