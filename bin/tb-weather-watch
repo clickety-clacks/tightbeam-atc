@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# tb-weather-watch — regenerate the snapshot when the Tightbeam database
+# changes (debounced), with a heartbeat fallback. Runs on the Tightbeam host.
+#
+# Config (environment):
+#   TB_BASE_DIR       Tightbeam base dir (default ~/.tightbeam)
+#   TB_WEATHER_GEN    path to tb-weather-gen (default: alongside this script)
+#   TB_WEATHER_MINGAP minimum seconds between regenerations (default 3)
+set -u
+BASE="${TB_BASE_DIR:-$HOME/.tightbeam}"
+WAL="$BASE/state.db-wal"
+GEN="${TB_WEATHER_GEN:-$(dirname "$0")/tb-weather-gen}"
+MIN_GAP="${TB_WEATHER_MINGAP:-3}"
+last=0
+regen(){ now=$(date +%s); [ $((now-last)) -lt "$MIN_GAP" ] && return; last=$now; "$GEN" >/dev/null 2>&1; }
+if command -v inotifywait >/dev/null 2>&1; then
+  regen
+  while true; do
+    inotifywait -qq -t 60 -e modify -e close_write "$WAL" 2>/dev/null
+    sleep 2   # debounce: let the write burst settle
+    regen
+  done
+else
+  # no inotify available: plain 5-second polling
+  while true; do regen; sleep 5; done
+fi

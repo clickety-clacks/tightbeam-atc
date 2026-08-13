@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""tb-weather-gen — generate the org-weather JSON snapshot from a Tightbeam
+instance's state.db (opened strictly read-only) and publish it next to the
+web page.
+
+Configuration (environment variables):
+  TB_BASE_DIR      Tightbeam base directory. Default: ~/.tightbeam
+  TB_WEATHER_OUT   Where to write data.json. Default: /tmp/tb-weather.json
+  TB_WEATHER_DEST  Optional scp destination (user@host:/path/data.json).
+                   If unset, the snapshot is only written to TB_WEATHER_OUT —
+                   use that when the web root is on the same machine.
+  TB_WEATHER_KEY   Optional ssh identity file for the scp push.
+
+Every signal is derived from durable rows: stages from attest kinds and
+verdicts, running turns from open rows in `turns`, queued turns from pending
+`wakes`, pulses from recently fired wakes. Nothing is estimated.
+"""
+import json, os, sqlite3, subprocess, time
+from pathlib import Path
+
+BASE = Path(os.environ.get("TB_BASE_DIR", str(Path.home() / ".tightbeam")))
+DB = f"file:{BASE}/state.db?mode=ro"
+OUT = os.environ.get("TB_WEATHER_OUT", "/tmp/tb-weather.json")
+DEST = os.environ.get("TB_WEATHER_DEST")
+KEY = os.environ.get("TB_WEATHER_KEY")
+
+def kind_of(name):
+    n = name.lower()
+    if n == "main": return "main"
+    if "product owner" in n: return "po"
+    if "patrol" in n or "watchdog" in n: return "patrol"
+    if "orchestrator" in n: return "orch"
+    if "coder" in n: return "coder"
+    if "review" in n: return "rev"
+    if "spec" in n: return "spec"
+    return "coder"
+
+con = sqlite3.connect(DB, uri=True)
+con.row_factory = sqlite3.Row
+q = lambda sql, *a: con.execute(sql, a).fetchall()
+
+# ---- agents: active sessions, plus retired ones still holding open cards
+rows = q("SELECT sessionKey, displayName, state, spawnedBy FROM sessions")
+holders_open = {r["holderKey"] for r in q(
+    "SELECT DISTINCT holderKey FROM assignments WHERE state='open'")}
+sess = {r["sessionKey"]: r for r in rows
+        if r["state"] == "active" or r["sessionKey"] in holders_open}
+ids = {k: f"a{i}" for i, k in enumerate(sess)}
+agents = []
+for k, r in sess.items():
+    agents.append({
+        "id": ids[k],
+        "name": (r["displayName"] or k)[:48],
+        "kind": kind_of(r["displayName"] or ""),
+        "parent": ids.get(r["spawnedBy"]),
+        "retired": r["state"] != "active",
+        "turn": None,
+    })
+mains = [a for a in agents if a["kind"] == "main"]
+root = mains[0]["id"] if mains else (agents[0]["id"] if agents else None)
+for a in agents:
+    if a["parent"] is None and a["id"] != root:
+        a["parent"] = root
+
+# ---- turn activity
+NOW = int(time.time() * 1000)
+running_sessions = {r["sessionKey"] for r in q(
+    "SELECT DISTINCT sessionKey FROM turns WHERE startedAt IS NOT NULL AND endedAt IS NULL")}
+item_running = {}
+for r in q("""SELECT t.sessionKey, a.workItemId FROM turns t
+              JOIN assignments a ON a.id = t.assignmentId
+              WHERE t.startedAt IS NOT NULL AND t.endedAt IS NULL"""):
+    item_running.setdefault(r["workItemId"], set()).add(r["sessionKey"])
+pending = {r["sessionKey"] for r in q(
+    "SELECT DISTINCT sessionKey FROM wakes WHERE state='pending'")}
+
+# ---- work items with evidence stages
+items = []
+for r in q("""SELECT id, title, state FROM work_items
+              WHERE state IN ('open','closed') ORDER BY createdAt DESC LIMIT 120"""):
+    wid = r["id"]
+    hs = q("SELECT DISTINCT holderKey FROM assignments WHERE workItemId=? AND state='open'", wid)
+    holders = [ids[h["holderKey"]] for h in hs if h["holderKey"] in ids]
+    ev = q("""SELECT t.kind, t.verdictKind FROM attests t
+              JOIN assignments a ON a.id=t.assignmentId WHERE a.workItemId=?""", wid)
+    kinds = {e["kind"] for e in ev}
+    verd = {e["verdictKind"] for e in ev if e["verdictKind"]}
+    if r["state"] == "closed":
+        stage = 6
+        if not holders:
+            continue
+    else:
+        stage = 0
+        if "progress" in kinds: stage = 1
+        if "tests-passed" in verd: stage = 2
+        if "completion" in kinds: stage = 3
+        if verd & {"reviewed-clean", "spec-reviewed", "verified"}: stage = 4
+        if "completion" in kinds and "reviewed-clean" in verd: stage = 5
+    turns = {}
+    for sk in item_running.get(wid, set()):
+        if sk in ids: turns[ids[sk]] = "run"
+    for h in hs:
+        sk = h["holderKey"]
+        if sk not in ids or ids[sk] in turns: continue
+        if sk in running_sessions: turns[ids[sk]] = "run"
+        elif sk in pending: turns[ids[sk]] = "wait"
+    items.append({"id": wid[:11], "title": (r["title"] or "")[:60],
+                  "stage": stage, "holders": holders, "turns": turns})
+open_items = [w for w in items if w["stage"] < 6][:60]
+landed = [w for w in items if w["stage"] >= 6][:12]
+
+# ---- recently fired wakes become the message pulses
+msgs = []
+for r in q("SELECT origin, sessionKey FROM wakes WHERE state='fired' AND firedAt > ? LIMIT 40",
+           NOW - 120000):
+    frm = r["origin"] or ""
+    src = next((ids[k] for k in sess if frm and frm in k), None)
+    dst = ids.get(r["sessionKey"])
+    if dst: msgs.append({"from": src or root, "to": dst})
+
+# ---- agent-level activity
+amap = {a["id"]: a for a in agents}
+for k in sess:
+    if k in running_sessions: amap[ids[k]]["turn"] = "run"
+    elif k in pending: amap[ids[k]]["turn"] = "wait"
+
+snap = {"generatedAt": NOW, "agents": agents,
+        "items": open_items + landed, "messages": msgs[:20]}
+json.dump(snap, open(OUT, "w"))
+if DEST:
+    cmd = ["scp", "-q"]
+    if KEY: cmd += ["-i", KEY, "-o", "IdentitiesOnly=yes"]
+    subprocess.run(cmd + [OUT, DEST], check=True)
+print(f"snapshot: {len(agents)} agents, {len(open_items)} open, "
+      f"{len(landed)} landed, {len(msgs)} msgs")

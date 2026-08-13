@@ -1,0 +1,21 @@
+# Example systemd unit for the snapshot watcher. Adjust paths, then:
+#   cp tb-weather.service /etc/systemd/system/   (or ~/.config/systemd/user/)
+#   systemctl daemon-reload && systemctl enable --now tb-weather
+[Unit]
+Description=Tightbeam org-weather snapshot watcher
+After=network.target
+
+[Service]
+Type=simple
+# The user that can read the Tightbeam base directory:
+User=<tightbeam-user>
+Environment=TB_BASE_DIR=/home/<tightbeam-user>/.tightbeam
+Environment=TB_WEATHER_OUT=/var/www/tightbeam-weather/data.json
+# For a remote web host instead, set TB_WEATHER_DEST and TB_WEATHER_KEY:
+# Environment=TB_WEATHER_DEST=<user>@<viz-host>:/var/www/tightbeam-weather/data.json
+# Environment=TB_WEATHER_KEY=/home/<tightbeam-user>/.ssh/<key>
+ExecStart=/usr/local/bin/tb-weather-watch
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

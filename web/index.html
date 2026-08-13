@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tight Beam — Org Weather</title>
+<style>
+  html,body { margin:0; height:100%; background:#101214; overflow:hidden;
+    font-family: ui-sans-serif,-apple-system,"Helvetica Neue",Arial,sans-serif; }
+  #hud { position:fixed; top:14px; left:18px; color:#9a9ea6; font-size:12px;
+    letter-spacing:.22em; text-transform:uppercase; pointer-events:none; }
+  #hud b { color:#b08d57; font-weight:600; }
+  #hud .live { color:#6fae4e; } #hud .sample { color:#c9a835; }
+  #legend { position:fixed; bottom:14px; left:18px; color:#7c8188; font-size:11px; line-height:1.9; pointer-events:none; }
+  .sw { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:-1px; }
+  #tip { position:fixed; display:none; background:#1b1e22ee; color:#d8d6d1;
+    border:1px solid #3a3d42; border-left:3px solid #b08d57; border-radius:4px;
+    padding:8px 12px; font-size:12.5px; line-height:1.5; pointer-events:none; max-width:320px; }
+  #tip .t { color:#b08d57; font-weight:600; }
+  #tip .seg { color:#9a9ea6; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
+  #themehint { position:fixed; top:14px; right:18px; color:#7c8188; font-size:10.5px; letter-spacing:.12em; text-transform:uppercase; }
+  body.light { background:#f2eee2; }
+  body.light #hud { color:#5c6b78; } body.light #hud b { color:#c23b22; }
+  body.light #hud .live { color:#2e7d5b; } body.light #hud .sample { color:#c9a227; }
+  body.light #legend { color:#5c6b78; }
+  body.light #tip { background:#faf7eeee; color:#26323c; border-color:#b8c7d9; border-left-color:#c23b22; }
+  body.light #tip .t { color:#c23b22; } body.light #tip .seg { color:#5c6b78; }
+  body.light #themehint { color:#8a97a3; }
+</style>
+</head>
+<body>
+<div id="hud">The <b>Tight&nbsp;Beam</b> Dispatch · org weather · <span id="mode" class="sample">connecting…</span></div>
+<div id="themehint">T — toggle theme</div>
+<div id="legend"></div>
+<div id="tip"></div>
+<script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from './addons/controls/OrbitControls.js';
+import { LineSegments2 } from './addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from './addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from './addons/lines/LineMaterial.js';
+const edgeMats = new Set();
+
+const STAGE_NAMES = ['specced','building','tests pass','reviewed','verdict clean','gate ready','merged'];
+const SEGS = ['spec bound','producer completion','tests + baselines','independent review','reviewed-clean verdict','merge attest'];
+const KIND_R = { main:1.7, po:1.25, patrol:1.15, orch:1.0, coder:.8, rev:.8, spec:.8 };
+
+const THEMES = {
+  dark: {
+    name:'dark', bg:0x101214, fill:0x14171b, fogNear:70, fogFar:190,
+    grid1:0x2a2d31, grid2:0x1c1f23,
+    stage:[0xc4453c,0xc97b35,0xc9a835,0xa3b23c,0x6fae4e,0x3f9d63,0x2c7a4b],
+    kind:{main:0xb08d57,po:0xa58968,patrol:0xc9a835,orch:0x8a8f96,coder:0x7f8890,rev:0x6b7684,spec:0x91836b},
+    retired:0x33363a, arcA:0xb08d57, arcB:0x22252a,
+    tetherRun:0x6fae4e, tetherWait:0xc9a835, pulse:0xb08d57,
+    discY:0xc9a835, discG:0x2c7a4b, shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
+    flashRun:0x6fae4e, flashWait:0xc9a835,
+    metalness:.55, roughness:.3, agentMetal:.75, agentRough:.35, baseEmissive:.25, edges:false,
+    amb:0x8a8a92, keyC:0xfff2dd, rimC:0x5b7285,
+  },
+  light: { /* NASA documentation / plotter paper */
+    name:'light', bg:0xf2eee2, fill:0xfaf7ee, fogNear:90, fogFar:230,
+    grid1:0xa9bccf, grid2:0xd8dfe6,
+    stage:[0xc23b22,0xd07a2a,0xc9a227,0x8a9a2e,0x4e8a4e,0x2e7d5b,0x1f5e46],
+    kind:{main:0xc23b22,po:0xb06a3b,patrol:0xc9a227,orch:0x5c6b78,coder:0x6e7b87,rev:0x52616e,spec:0x7a6a4f},
+    retired:0xcdc7b8, arcA:0x26323c, arcB:0xd8dfe6,
+    tetherRun:0x2e7d4f, tetherWait:0xb8860b, pulse:0xc23b22,
+    discY:0xc9a227, discG:0x2e7d5b, shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
+    flashRun:0x2e7d4f, flashWait:0xb8860b,
+    metalness:.05, roughness:.85, agentMetal:.05, agentRough:.9, baseEmissive:.0, edges:true,
+    amb:0xffffff, keyC:0xfff8ec, rimC:0xb8c7d9,
+  },
+};
+let T = matchMedia('(prefers-color-scheme: light)').matches ? THEMES.light : THEMES.dark;
+
+/* ---------- static scene ---------- */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, .1, 500);
+camera.position.set(0, 40, 62);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.maxPolarAngle = Math.PI*0.49;
+let userMoved = false; controls.addEventListener('start', ()=>userMoved=true);
+const amb = new THREE.AmbientLight(0xffffff, .55); scene.add(amb);
+const key = new THREE.DirectionalLight(0xffffff, 1.1); key.position.set(30,50,20); scene.add(key);
+const rim = new THREE.DirectionalLight(0xffffff, .5); rim.position.set(-30,20,-30); scene.add(rim);
+let grid = null;
+
+const groundGroup = new THREE.Group(), itemGroup = new THREE.Group(), tetherGroup = new THREE.Group();
+scene.add(groundGroup, itemGroup, tetherGroup);
+
+let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [];
+let flight = null, focused = false, orbitAngle = 0;
+const HOME_POS = new THREE.Vector3(0,40,62), HOME_TGT = new THREE.Vector3(0,4,0);
+function flyTo(pos, target, after){
+  flight = {p0:camera.position.clone(), p1:pos.clone(),
+            t0:controls.target.clone(), t1:target.clone(), k:0, after};
+}
+let lastGen = 0, agentsHash = '';
+
+function disposeGroup(g){
+  g.traverse(o=>{ if(o.geometry) o.geometry.dispose();
+    if(o.material){ edgeMats.delete(o.material); o.material.dispose?.(); } });
+  g.clear();
+}
+/* hidden-line diagram mesh: background-colored fill that writes depth
+   (occludes what's behind it) + visible edges in the stroke color */
+function diagramMesh(geo, strokeHex){
+  const pastel = new THREE.Color(strokeHex).lerp(new THREE.Color(T.fill), T.name==='light' ? .58 : .72);
+  const fill = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color: pastel, polygonOffset:true, polygonOffsetFactor:1, polygonOffsetUnits:1 }));
+  const eg = new THREE.EdgesGeometry(geo, 1);
+  const lg = new LineSegmentsGeometry().setPositions(Array.from(eg.attributes.position.array));
+  eg.dispose();
+  const lineMat = new LineMaterial({color:strokeHex, linewidth:2, transparent:true, opacity:.6});
+  lineMat.resolution.set(innerWidth, innerHeight);
+  edgeMats.add(lineMat);
+  fill.add(new LineSegments2(lg, lineMat));
+  fill.userData.lineMat = lineMat;
+  return fill;
+}
+
+function applyTheme(){
+  document.body.classList.toggle('light', T.name==='light');
+  scene.background = new THREE.Color(T.bg);
+  scene.fog = new THREE.Fog(T.bg, T.fogNear, T.fogFar);
+  amb.color.setHex(T.amb); key.color.setHex(T.keyC); rim.color.setHex(T.rimC);
+  if (grid){ scene.remove(grid); grid.geometry.dispose(); grid.material.dispose(); }
+  grid = new THREE.GridHelper(200, 50, T.grid1, T.grid2); grid.position.y=-0.01; scene.add(grid);
+  renderLegend();
+  if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); }
+}
+
+function renderLegend(){
+  const c = i => '#'+T.stage[i].toString(16).padStart(6,'0');
+  const hx = v => '#'+v.toString(16).padStart(6,'0');
+  document.getElementById('legend').innerHTML =
+    STAGE_NAMES.map((n,i)=>`<span class="sw" style="background:${c(i)};${i?'margin-left:10px':''}"></span>${n}`).join('') +
+    `<br><span style="color:${hx(T.tetherRun)}">━ green edge: turn in progress</span>` +
+    `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow edge: turn waiting</span>` +
+    `<span style="margin-left:12px">hedron flashing = turn waiting · strobing shell = turn running · agent discs flash the same way</span>` +
+    `<br><span>flat discs = agents · floating solids = work items (altitude = evidence remaining)</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow floor disc = mergeable</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discG)}">green floor disc = merged. we have landed</span>` +
+    `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring = orphaned</span>` +
+    `<span style="margin-left:10px;color:${hx(T.pulse)}">pulses = wakes (agent → agent)</span>`;
+}
+
+function buildGround(agents){
+  disposeGroup(groundGroup); agentMeshes = {}; APOS = {}; byId = {};
+  agents.forEach(a=>byId[a.id]=a);
+  const children = {};
+  agents.forEach(a=>{ if(a.parent && byId[a.parent]) (children[a.parent] ??= []).push(a.id); });
+  const leaves = id => (children[id]?.length) ? children[id].reduce((n,c)=>n+leaves(c),0) : 1;
+  const DEPTH = {};
+  function place(id, a0, a1, d){
+    const mid=(a0+a1)/2, R=d*12;
+    DEPTH[id] = d;
+    APOS[id] = d===0 ? new THREE.Vector3(0,0,0)
+                     : new THREE.Vector3(Math.cos(mid)*R, 0, Math.sin(mid)*R);
+    const kids = children[id]||[]; if(!kids.length) return;
+    const total = kids.reduce((n,c)=>n+leaves(c),0);
+    let a=a0;
+    kids.forEach(cid=>{ const w=(a1-a0)*leaves(cid)/total; place(cid, a, a+w, d+1); a+=w; });
+  }
+  const roots = agents.filter(a=>!a.parent || !byId[a.parent]);
+  roots.forEach((r,i)=>place(r.id, i*(Math.PI*2/roots.length), (i+1)*(Math.PI*2/roots.length), 0));
+  agents.forEach(a=>{
+    const d = DEPTH[a.id] ?? 2;
+    const r = (KIND_R[a.kind] || KIND_R.coder) * 1.9 * Math.pow(.72, d);
+    const col = a.retired ? T.retired : (T.kind[a.kind] ?? T.kind.coder);
+    const geo = new THREE.CircleGeometry(Math.max(r, .45), 40).rotateX(-Math.PI/2);
+    const m = diagramMesh(geo, col);
+    m.position.copy(APOS[a.id]); m.position.y=.04;
+    m.userData.type='agent'; m.userData.a=a; m.userData.phase=Math.random()*6.28;
+    if (!a.retired && a.turn==='run'){ m.userData.lineMat.color.setHex(T.flashRun); m.userData.flash='run'; }
+    else if (!a.retired && a.turn==='wait'){ m.userData.lineMat.color.setHex(T.flashWait); m.userData.flash='wait'; }
+    groundGroup.add(m); agentMeshes[a.id]=m;
+  });
+  agents.forEach(a=>{
+    if(!a.parent || !APOS[a.parent]) return;
+    const p=APOS[a.parent], q=APOS[a.id];
+    const mid=p.clone().add(q).multiplyScalar(.5); mid.y=p.distanceTo(q)*.14+.8;
+    const curve=new THREE.QuadraticBezierCurve3(p.clone().setY(.4), mid, q.clone().setY(.4));
+    const pts=curve.getPoints(24);
+    const geo=new THREE.BufferGeometry().setFromPoints(pts);
+    const cols=new Float32Array(pts.length*3);
+    const c0=new THREE.Color(T.arcA), c1=new THREE.Color(T.arcB);
+    pts.forEach((_,i)=>{ const c=c0.clone().lerp(c1,i/(pts.length-1)); cols.set([c.r,c.g,c.b],i*3); });
+    geo.setAttribute('color', new THREE.BufferAttribute(cols,3));
+    groundGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({vertexColors:true, transparent:true, opacity:.9})));
+  });
+}
+
+function buildItems(items){
+  disposeGroup(itemGroup); disposeGroup(tetherGroup); itemMeshes = [];
+  items.forEach((w,idx)=>{
+    const active = (w.holders||[]).filter(h=>byId[h] && !byId[h].retired);
+    const anchor = new THREE.Vector3();
+    if (active.length){ active.forEach(h=>anchor.add(APOS[h])); anchor.multiplyScalar(1/active.length); }
+    else { anchor.set(-55 + (idx%24)*4.6, 0, 62 + Math.floor(idx/24)*5); }
+    const col = T.stage[w.stage];
+    const landed = w.stage >= 5;
+    const j = (idx%5)-2;
+    const pos = landed
+      ? new THREE.Vector3(anchor.x + j*1.5, 1.05, anchor.z + 3.4 + ((idx*7)%3))
+      : new THREE.Vector3(anchor.x, 6 + (4 - w.stage)*4.2 + (idx%3)*.8, anchor.z);
+    const igeo = new THREE.IcosahedronGeometry(landed? .95 : 1.05, 0);
+    const mesh = diagramMesh(igeo, col);
+    mesh.position.copy(pos);
+    Object.assign(mesh.userData, {type:'item', w, phase:idx*1.3, landed, baseY: landed? null : pos.y});
+    itemGroup.add(mesh); itemMeshes.push(mesh);
+    if (landed){
+      const dcol = w.stage>=6 ? T.discG : T.discY;
+      const dgeo = new THREE.CylinderGeometry(1.65,1.75,.14,24);
+      const disc = diagramMesh(dgeo, dcol);
+      disc.position.set(pos.x,.07,pos.z);
+      Object.assign(disc.userData, {type:'item', w});
+      itemGroup.add(disc); itemMeshes.push(disc);
+    }
+    const vals = Object.values(w.turns||{});
+    const act = vals.includes('run') ? 'run' : vals.includes('wait') ? 'wait' : null;
+    if (act==='run' && w.stage<6){
+      const shell = new THREE.Mesh(new THREE.SphereGeometry(1.45, 28, 20),
+        new THREE.MeshBasicMaterial({color:T.shell, transparent:true, opacity:.1, depthWrite:false}));
+      shell.userData={act:'run'}; mesh.add(shell);
+    }
+    if (act==='wait' && w.stage<6) mesh.userData.waitFlash = true;
+    Object.entries(w.turns||{}).forEach(([hid,st])=>{
+      if (!byId[hid] || byId[hid].retired) return;
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([mesh.position, APOS[hid].clone().setY(.3)]),
+        new THREE.LineBasicMaterial({color: st==='run'?T.tetherRun:T.tetherWait, transparent:true, opacity: st==='run'? .9:.45}));
+      line.userData={itemMesh:mesh, hid, state:st};
+      tetherGroup.add(line);
+    });
+    if (w.stalled){
+      const halo = new THREE.Mesh(new THREE.RingGeometry(1.5,1.85,32),
+        new THREE.MeshBasicMaterial({color:T.halo, side:THREE.DoubleSide, transparent:true, opacity:.7}));
+      halo.userData={pulse:true}; mesh.add(halo);
+    }
+    if (!active.length){
+      const ring = new THREE.Mesh(new THREE.RingGeometry(1.5,1.7,32),
+        new THREE.MeshBasicMaterial({color:T.orphan, side:THREE.DoubleSide, transparent:true, opacity:.5}));
+      ring.rotation.x = Math.PI/2; ring.position.y = -1.2; mesh.add(ring);
+    }
+  });
+}
+
+/* ---------- wake pulses ---------- */
+const pulseGeo = new THREE.SphereGeometry(.28, 10, 10);
+function msgCurve(a,b){
+  const p=APOS[a].clone().setY(.35), q=APOS[b].clone().setY(.35);
+  const mid=p.clone().add(q).multiplyScalar(.5); mid.y = 2 + p.distanceTo(q)*.22;
+  return new THREE.QuadraticBezierCurve3(p, mid, q);
+}
+setInterval(()=>{
+  if (document.hidden || !DATA || !DATA.messages || !DATA.messages.length) return;
+  const m = DATA.messages[Math.floor(Math.random()*DATA.messages.length)];
+  if (!APOS[m.from] || !APOS[m.to]) return;
+  const pu = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:T.pulse, transparent:true}));
+  pu.userData={curve:msgCurve(m.from,m.to), t:0};
+  scene.add(pu); pulses.push(pu);
+}, 1100);
+
+/* ---------- live feed ---------- */
+async function refresh(){
+  try {
+    const r = await fetch('./data.json?ts='+Date.now(), {cache:'no-store'});
+    if (!r.ok) throw 0;
+    const d = await r.json();
+    if (d.generatedAt === lastGen) return;
+    lastGen = d.generatedAt; DATA = d;
+    const h = d.agents.map(a=>a.id+(a.retired?1:0)+(a.turn||'')).join('|');
+    if (h !== agentsHash){ agentsHash = h; buildGround(d.agents); }
+    buildItems(d.items);
+    const age = Math.round((Date.now()-d.generatedAt)/1000);
+    const el = document.getElementById('mode');
+    el.textContent = 'live · '+d.agents.length+' agents · '+d.items.length+' items · '+age+'s ago';
+    el.className = 'live';
+  } catch(e){
+    if (!DATA){
+      DATA = { agents:[{id:'m',name:'Main',kind:'main',parent:null}], items:[], messages:[] };
+      buildGround(DATA.agents); buildItems(DATA.items);
+      const el = document.getElementById('mode');
+      el.textContent='feed unavailable'; el.className='sample';
+    }
+  }
+}
+
+/* ---------- theme toggle ---------- */
+addEventListener('keydown', e=>{
+  if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
+});
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', ev=>{
+  T = ev.matches ? THEMES.light : THEMES.dark; applyTheme();
+});
+
+applyTheme();
+refresh(); setInterval(refresh, 5000);
+
+/* ---------- click: focus an item, background zooms out ---------- */
+let downXY = null;
+addEventListener('pointerdown', e=>{ downXY=[e.clientX,e.clientY]; });
+addEventListener('pointerup', e=>{
+  if (!downXY) return;
+  const moved = Math.hypot(e.clientX-downXY[0], e.clientY-downXY[1]); downXY=null;
+  if (moved > 6) return;                       /* it was a drag, not a click */
+  mouse.set((e.clientX/innerWidth)*2-1, -(e.clientY/innerHeight)*2+1);
+  ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], false)[0];
+  if (hit && hit.object.userData.type){
+    const pt = hit.object.position.clone();
+    const dir = camera.position.clone().sub(pt); dir.y = 0;
+    if (dir.lengthSq() < .01) dir.set(1,0,1);
+    dir.normalize().multiplyScalar(9);
+    const camPos = pt.clone().add(dir); camPos.y = pt.y + 4.5;
+    focused = true; userMoved = true;
+    flyTo(camPos, pt);
+  } else {
+    focused = false;
+    const ang = Math.atan2(camera.position.x, camera.position.z);
+    const home = new THREE.Vector3(Math.sin(ang)*64, 40, Math.cos(ang)*64);
+    flyTo(home, HOME_TGT, ()=>{ orbitAngle = ang; userMoved = false; });
+  }
+});
+
+/* ---------- tooltip ---------- */
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2(), tip = document.getElementById('tip');
+addEventListener('pointermove', e=>{
+  mouse.set((e.clientX/innerWidth)*2-1, -(e.clientY/innerHeight)*2+1);
+  ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], false)[0];
+  if (!hit){ tip.style.display='none'; return; }
+  const u = hit.object.userData;
+  if (!u.type){ tip.style.display='none'; return; }
+  tip.style.display='block'; tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY+10)+'px';
+  if (u.type==='item'){
+    const w=u.w;
+    const segs = SEGS.map((s,i)=>(i<w.stage?'●':'○')+' '+s).join('<br>');
+    const acts = Object.entries(w.turns||{}).map(([h,st])=>
+      (st==='run'?'▶ ':'⏸ ')+(byId[h]?byId[h].name:h)
+    ).join('<br>') || 'no turns active';
+    tip.innerHTML = '<div class="t">'+w.id+' — '+w.title+'</div>'
+      +'<div>'+STAGE_NAMES[w.stage]+(!(w.holders||[]).length?' · ORPHANED':'')+'</div>'
+      +'<div class="seg">'+segs+'</div><div style="margin-top:4px" class="seg">'+acts+'</div>';
+  } else {
+    const a=u.a;
+    const held = ((DATA&&DATA.items)||[]).filter(w=>(w.holders||[]).includes(a.id) && w.stage<6).length;
+    tip.innerHTML = '<div class="t">'+a.name+'</div><div>'+(a.retired?'retired (holds open cards)':'active')
+      +(a.turn==='run'?' · turn running':a.turn==='wait'?' · turn queued':'')
+      +' · on '+held+' open item'+(held===1?'':'s')+'</div>';
+  }
+});
+
+/* ---------- animate ---------- */
+const clock = new THREE.Clock();
+function tickFrame(){
+  requestAnimationFrame(tickFrame);
+  const t = clock.getElapsedTime();
+  if (flight){
+    flight.k = Math.min(1, flight.k + .03);
+    const e = flight.k*flight.k*(3-2*flight.k);   /* smoothstep */
+    camera.position.lerpVectors(flight.p0, flight.p1, e);
+    controls.target.lerpVectors(flight.t0, flight.t1, e);
+    if (flight.k >= 1){ flight.after?.(); flight = null; }
+  } else if (!userMoved && !focused){
+    orbitAngle += .00085;
+    camera.position.set(Math.sin(orbitAngle)*64, 40, Math.cos(orbitAngle)*64);
+    controls.target.copy(HOME_TGT); camera.lookAt(HOME_TGT);
+  }
+  groundGroup.children.forEach(m=>{
+    const u=m.userData;
+    if (u && u.flash && u.lineMat){
+      const fast = u.flash==='run';
+      u.lineMat.opacity = .18 + (0.5+0.5*Math.sin(t*(fast?5.5:2.2)+u.phase)) * .55;
+    }
+  });
+  itemGroup.children.forEach(m=>{
+    const u=m.userData;
+    if (u.baseY){ m.position.y = u.baseY + Math.sin(t*1.2+u.phase)*.5; m.rotation.y += .004; }
+    if (u.landed){ m.rotation.y += .0015; }
+    if (u.waitFlash && u.lineMat){ u.lineMat.opacity = .15 + (0.5+0.5*Math.sin(t*2.6+u.phase))*.6; }
+    m.children.forEach(ch=>{
+      if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=.4+Math.abs(Math.sin(t*3))*.5; const sc=1+Math.sin(t*3)*.18; ch.scale.set(sc,sc,sc); }
+      if (ch.userData.act==='run'){ ch.material.opacity = .04 + (0.5+0.5*Math.sin(t*2.2))*.18; }
+    });
+  });
+  tetherGroup.children.forEach(l=>{
+    const m=l.userData.itemMesh;
+    if (APOS[l.userData.hid]) l.geometry.setFromPoints([m.position, APOS[l.userData.hid].clone().setY(.3)]);
+    if (l.userData.state==='run') l.material.opacity = .65 + Math.sin(t*4+(m.userData.phase||0))*.3;
+  });
+  for (let i=pulses.length-1;i>=0;i--){
+    const p=pulses[i]; p.userData.t += .012;
+    if (p.userData.t>=1){ scene.remove(p); pulses.splice(i,1); continue; }
+    p.position.copy(p.userData.curve.getPoint(p.userData.t));
+    p.material.opacity = 1-p.userData.t;
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+tickFrame();
+addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); edgeMats.forEach(m=>m.resolution.set(innerWidth,innerHeight)); });
+</script>
+</body>
+</html>
