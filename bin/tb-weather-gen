@@ -89,7 +89,7 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
               WHERE w.state='open'
                  OR (w.state='closed' AND (SELECT max(a.closedAt)
                      FROM assignments a WHERE a.workItemId=w.id) > ?)
-              ORDER BY w.createdAt DESC LIMIT 160""", NOW - LANDED_WINDOW):
+              ORDER BY w.createdAt DESC LIMIT 400""", NOW - LANDED_WINDOW):
     wid = r["id"]
     hs = q("SELECT DISTINCT holderKey FROM assignments WHERE workItemId=? AND state='open'", wid)
     holders = [ids[h["holderKey"]] for h in hs if h["holderKey"] in ids]
@@ -97,8 +97,11 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
               JOIN assignments a ON a.id=t.assignmentId WHERE a.workItemId=?""", wid)
     kinds = {e["kind"] for e in ev}
     verd = {e["verdictKind"] for e in ev if e["verdictKind"]}
+    closed_at = None
     if r["state"] == "closed":
         stage = 6
+        lc = q("SELECT max(closedAt) m FROM assignments WHERE workItemId=?", wid)
+        closed_at = lc[0]["m"] if lc else None
     else:
         stage = 0
         if "progress" in kinds: stage = 1
@@ -115,9 +118,12 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
         if sk in running_sessions: turns[ids[sk]] = "run"
         elif sk in pending: turns[ids[sk]] = "wait"
     items.append({"id": wid[:11], "title": (r["title"] or "")[:60],
-                  "stage": stage, "holders": holders, "turns": turns})
-open_items = [w for w in items if w["stage"] < 6][:60]
-landed = [w for w in items if w["stage"] >= 6][:12]
+                  "stage": stage, "holders": holders, "turns": turns,
+                  "closedAt": closed_at})
+# show the whole open sky so drainage is visible; landings by closure recency
+open_items = [w for w in items if w["stage"] < 6][:240]
+landed = sorted((w for w in items if w["stage"] >= 6),
+                key=lambda w: w["closedAt"] or 0, reverse=True)[:16]
 
 # ---- recently fired wakes become the message pulses
 msgs = []
