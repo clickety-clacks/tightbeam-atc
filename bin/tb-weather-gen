@@ -76,8 +76,15 @@ pending = {r["sessionKey"] for r in q(
 
 # ---- work items with evidence stages
 items = []
-for r in q("""SELECT id, title, state FROM work_items
-              WHERE state IN ('open','closed') ORDER BY createdAt DESC LIMIT 120"""):
+# open items, plus items that landed recently (their cards are all closed by
+# definition — a resolved item holds no open assignments, so keying landed
+# visibility off holders would hide every merge)
+LANDED_WINDOW = 72 * 3600 * 1000
+for r in q("""SELECT w.id, w.title, w.state FROM work_items w
+              WHERE w.state='open'
+                 OR (w.state='closed' AND (SELECT max(a.closedAt)
+                     FROM assignments a WHERE a.workItemId=w.id) > ?)
+              ORDER BY w.createdAt DESC LIMIT 160""", NOW - LANDED_WINDOW):
     wid = r["id"]
     hs = q("SELECT DISTINCT holderKey FROM assignments WHERE workItemId=? AND state='open'", wid)
     holders = [ids[h["holderKey"]] for h in hs if h["holderKey"] in ids]
@@ -87,8 +94,6 @@ for r in q("""SELECT id, title, state FROM work_items
     verd = {e["verdictKind"] for e in ev if e["verdictKind"]}
     if r["state"] == "closed":
         stage = 6
-        if not holders:
-            continue
     else:
         stage = 0
         if "progress" in kinds: stage = 1
