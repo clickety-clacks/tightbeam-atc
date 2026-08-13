@@ -126,13 +126,14 @@ landed = sorted((w for w in items if w["stage"] >= 6),
                 key=lambda w: w["closedAt"] or 0, reverse=True)[:16]
 
 # ---- recently fired wakes become the message pulses
+# creatorSessionKey is the true sender; origin is a role path, and
+# process:* wakes are substrate machinery, not agent-to-agent traffic
 msgs = []
-for r in q("SELECT origin, sessionKey FROM wakes WHERE state='fired' AND firedAt > ? LIMIT 40",
-           NOW - 120000):
-    frm = r["origin"] or ""
-    src = next((ids[k] for k in sess if frm and frm in k), None)
+for r in q("""SELECT creatorSessionKey, sessionKey FROM wakes
+              WHERE state='fired' AND firedAt > ? LIMIT 60""", NOW - 120000):
+    src = ids.get(r["creatorSessionKey"])
     dst = ids.get(r["sessionKey"])
-    if dst: msgs.append({"from": src or root, "to": dst})
+    if src and dst and src != dst: msgs.append({"from": src, "to": dst})
 
 # ---- agent-level activity
 amap = {a["id"]: a for a in agents}
