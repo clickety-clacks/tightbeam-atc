@@ -31,11 +31,11 @@
     box-shadow:0 0 0 1px rgba(0,0,0,.25) inset; }
   #selcursor.unsel { border-color:#c4453c; border-style:dashed; }
   body.light #selcursor { border-color:#c23b22; }
-  #selui { position:fixed; top:38px; right:18px; display:none; z-index:6;
+  #selui { position:fixed; top:38px; right:18px; display:none; z-index:6; pointer-events:none;
     background:#1b1e22dd; border:1px solid #3a3d42; border-radius:5px;
     padding:8px 11px; color:#9a9ea6; font-size:11px; letter-spacing:.08em;
     text-transform:uppercase; }
-  #selui input { width:130px; vertical-align:middle; }
+  #selui input { width:130px; vertical-align:middle; pointer-events:auto; }
   #selui b { color:#b08d57; }
   body.light #selui { background:#faf7eeee; border-color:#b8c7d9; color:#5c6b78; }
   body.light #selui b { color:#c23b22; }
@@ -47,7 +47,7 @@
 <div id="legend"></div>
 <div id="tip"></div>
 <div id="selcursor"></div>
-<div id="selui">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> &nbsp;·&nbsp; <span id="selcount">0</span> selected &nbsp;·&nbsp; [ ] resize · f fit · d clear · s exit</div>
+<div id="selui">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> &nbsp;·&nbsp; <span id="selcount">0</span> selected &nbsp;·&nbsp; [ ] resize · f fit · d clear · esc/s exit</div>
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
@@ -520,6 +520,11 @@ addEventListener('keydown', e=>{
   else if (e.key==='s' || e.key==='S'){ setSelectMode(!selectMode); }
   else if (e.key==='d' || e.key==='D'){
     selected.clear(); reapplySelection();
+    focusObj = null; focusStage = 0; hiAgents = hiItems = null;
+  }
+  else if (e.key==='Escape'){
+    focusObj = null; focusStage = 0; hiAgents = hiItems = null;
+    if (selectMode) setSelectMode(false);
   }
   else if (e.key==='f' || e.key==='F' || e.key===' '){
     if (fitSelection()) e.preventDefault();
@@ -595,7 +600,7 @@ addEventListener('pointermove', e=>{
   if (!hit){ tip.style.display='none'; return; }
   const u = hit.object.userData;
   if (!u.type){ tip.style.display='none'; return; }
-  if (focusStage === 2 && hiAgents){          /* outside the neighbourhood: dead to hover */
+  if (!selectMode && focusStage === 2 && hiAgents){   /* outside the neighbourhood: dead to hover */
     const inside = u.type === 'item' ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
     if (!inside){ tip.style.display='none'; return; }
   }
@@ -695,6 +700,7 @@ function paintAt(px, py){
 }
 function setSelectMode(on){
   selectMode = on;
+  if (on){ focusObj = null; focusStage = 0; hiAgents = hiItems = null; }
   controls.enabled = !on;
   selUI.style.display = on ? 'block' : 'none';
   selCursor.style.display = on ? 'block' : 'none';
