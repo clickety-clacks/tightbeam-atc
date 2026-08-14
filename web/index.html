@@ -26,13 +26,28 @@
   body.light #tip { background:#faf7eeee; color:#26323c; border-color:#b8c7d9; border-left-color:#c23b22; }
   body.light #tip .t { color:#c23b22; } body.light #tip .seg { color:#5c6b78; }
   body.light #themehint { color:#8a97a3; }
+  #selcursor { position:fixed; border:1.5px solid #b08d57; border-radius:50%;
+    pointer-events:none; display:none; transform:translate(-50%,-50%); z-index:5;
+    box-shadow:0 0 0 1px rgba(0,0,0,.25) inset; }
+  #selcursor.unsel { border-color:#c4453c; border-style:dashed; }
+  body.light #selcursor { border-color:#c23b22; }
+  #selui { position:fixed; top:38px; right:18px; display:none; z-index:6;
+    background:#1b1e22dd; border:1px solid #3a3d42; border-radius:5px;
+    padding:8px 11px; color:#9a9ea6; font-size:11px; letter-spacing:.08em;
+    text-transform:uppercase; }
+  #selui input { width:130px; vertical-align:middle; }
+  #selui b { color:#b08d57; }
+  body.light #selui { background:#faf7eeee; border-color:#b8c7d9; color:#5c6b78; }
+  body.light #selui b { color:#c23b22; }
 </style>
 </head>
 <body>
 <div id="hud">The <b>Tight&nbsp;Beam</b> Dispatch · org weather · <span id="mode" class="sample">connecting…</span></div>
-<div id="themehint">T — toggle theme</div>
+<div id="themehint">T theme · S select</div>
 <div id="legend"></div>
 <div id="tip"></div>
+<div id="selcursor"></div>
+<div id="selui">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> &nbsp;·&nbsp; <span id="selcount">0</span> selected &nbsp;·&nbsp; [ ] resize · d clear · s exit</div>
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
@@ -160,7 +175,8 @@ function applyTheme(){
   grid.material.transparent = true; grid.material.opacity = .35;
   grid.position.y = 0; scene.add(grid);
   renderLegend();
-  if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); buildLinks(DATA.links); }
+  if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); buildLinks(DATA.links);
+             if (typeof reapplySelection === 'function') reapplySelection(); }
 }
 
 function computeHighlight(){
@@ -349,7 +365,7 @@ function buildItems(items){
         color: dcol, side: THREE.DoubleSide, transparent: true, opacity: .5 }));
       disc.userData.baseFill = disc.material.color.clone();   /* so ghosting shades it */
       disc.position.set(pos.x,.06,pos.z);
-      Object.assign(disc.userData, {type:'item', w});
+      Object.assign(disc.userData, {type:'item', w, isDisc:true});
       itemGroup.add(disc); itemMeshes.push(disc);
     }
     const vals = Object.values(w.turns||{});
@@ -482,6 +498,7 @@ async function refresh(){
     if (h !== agentsHash){ agentsHash = h; buildGround(d.agents); }
     buildItems(d.items);
     buildLinks(d.links);
+    reapplySelection();
     spawnWakes(); spawnMessages();
     const age = Math.round((Date.now()-d.generatedAt)/1000);
     const el = document.getElementById('mode');
@@ -500,6 +517,12 @@ async function refresh(){
 /* ---------- theme toggle ---------- */
 addEventListener('keydown', e=>{
   if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
+  else if (e.key==='s' || e.key==='S'){ setSelectMode(!selectMode); }
+  else if (e.key==='d' || e.key==='D'){
+    selected.clear(); reapplySelection();
+  }
+  else if (e.key==='['){ setRadius(selRadius - Math.max(4, selRadius*.15)); }
+  else if (e.key===']'){ setRadius(selRadius + Math.max(4, selRadius*.15)); }
 });
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', ev=>{
   T = ev.matches ? THEMES.light : THEMES.dark; applyTheme();
@@ -510,8 +533,9 @@ refresh(); setInterval(refresh, 5000);
 
 /* ---------- click: focus an item, background zooms out ---------- */
 let downXY = null;
-addEventListener('pointerdown', e=>{ downXY=[e.clientX,e.clientY]; });
+addEventListener('pointerdown', e=>{ if (selectMode) return; downXY=[e.clientX,e.clientY]; });
 addEventListener('pointerup', e=>{
+  if (selectMode) return;
   if (!downXY) return;
   const moved = Math.hypot(e.clientX-downXY[0], e.clientY-downXY[1]); downXY=null;
   if (moved > 6) return;                       /* it was a drag, not a click */
@@ -595,6 +619,109 @@ addEventListener('pointermove', e=>{
   }
 });
 
+/* ---------- select mode ----------
+   's' toggles. While on, the camera is frozen and a circular cursor selects
+   whatever it touches; the first thing it touches on a drag decides whether the
+   stroke selects or deselects. Selection survives leaving the mode. */
+let selectMode = false, selecting = false, selOp = null, selRadius = 46;
+const selected = new Set();
+const selCursor = document.getElementById('selcursor');
+const selUI = document.getElementById('selui');
+const selRad = document.getElementById('selrad');
+const _sv = new THREE.Vector3();
+
+function selKey(o){
+  const u = o.userData;
+  return u.w ? 'i:' + u.w.id : (u.a ? 'a:' + u.a.id : null);
+}
+function selectables(){
+  const out = [];
+  itemMeshes.forEach(m => { if (!m.userData.isDisc) out.push(m); });
+  Object.values(agentMeshes).forEach(m => out.push(m));
+  return out;
+}
+function screenXY(o){
+  _sv.copy(o.position); _sv.project(camera);
+  return [(_sv.x*.5+.5)*innerWidth, (-_sv.y*.5+.5)*innerHeight, _sv.z];
+}
+function shadeSelected(mesh, on){
+  const u = mesh.userData;
+  u.selected = on;
+  if (on){
+    if (!u.origMat) u.origMat = mesh.material;
+    if (!u.selMat){
+      const c = (u.baseStroke || u.baseFill || new THREE.Color(0x999999)).clone();
+      u.selMat = new THREE.MeshPhongMaterial({color:c, shininess:26,
+                                              specular:new THREE.Color(0x2e2e2e)});
+    }
+    mesh.material = u.selMat;
+    if (u.lineMat) u.lineMat.visible = false;
+  } else {
+    if (u.origMat) mesh.material = u.origMat;
+    if (u.lineMat) u.lineMat.visible = true;
+  }
+}
+function reapplySelection(){          /* meshes are rebuilt every refresh */
+  selectables().forEach(m => {
+    const k = selKey(m);
+    if (k) shadeSelected(m, selected.has(k));
+  });
+  document.getElementById('selcount').textContent = selected.size;
+}
+function paintAt(px, py){
+  const r2 = selRadius * selRadius;
+  const hits = [];
+  selectables().forEach(m => {
+    const [x, y, z] = screenXY(m);
+    if (z > 1) return;                                  /* behind the camera */
+    const dx = x - px, dy = y - py;
+    if (dx*dx + dy*dy <= r2) hits.push(m);
+  });
+  if (!hits.length) return;
+  if (!selOp){
+    const k0 = selKey(hits[0]);
+    selOp = selected.has(k0) ? 'unselect' : 'select';
+    selCursor.classList.toggle('unsel', selOp === 'unselect');
+  }
+  hits.forEach(m => {
+    const k = selKey(m); if (!k) return;
+    if (selOp === 'select') selected.add(k); else selected.delete(k);
+    shadeSelected(m, selOp === 'select');
+  });
+  document.getElementById('selcount').textContent = selected.size;
+}
+function setSelectMode(on){
+  selectMode = on;
+  controls.enabled = !on;
+  selUI.style.display = on ? 'block' : 'none';
+  selCursor.style.display = on ? 'block' : 'none';
+  if (!on){ selecting = false; selOp = null; selCursor.classList.remove('unsel'); }
+}
+function setRadius(px){
+  selRadius = Math.max(8, Math.min(220, Math.round(px)));
+  selRad.value = selRadius;
+  document.getElementById('selradv').textContent = selRadius;
+  selCursor.style.width = selCursor.style.height = (selRadius*2) + 'px';
+}
+setRadius(selRadius);
+selRad.addEventListener('input', e => setRadius(+e.target.value));
+
+addEventListener('pointermove', e => {
+  if (!selectMode) return;
+  selCursor.style.left = e.clientX + 'px';
+  selCursor.style.top  = e.clientY + 'px';
+  if (selecting) paintAt(e.clientX, e.clientY);
+}, true);
+addEventListener('pointerdown', e => {
+  if (!selectMode) return;
+  selecting = true; selOp = null;
+  paintAt(e.clientX, e.clientY);
+}, true);
+addEventListener('pointerup', () => {
+  if (!selectMode) return;
+  selecting = false; selOp = null; selCursor.classList.remove('unsel');
+}, true);
+
 /* ---------- animate ---------- */
 const clock = new THREE.Clock();
 function tickFrame(){
@@ -606,7 +733,7 @@ function tickFrame(){
     camera.position.lerpVectors(flight.p0, flight.p1, e);
     controls.target.lerpVectors(flight.t0, flight.t1, e);
     if (flight.k >= 1){ flight.after?.(); flight = null; }
-  } else if (!userMoved && !focused){
+  } else if (!userMoved && !focused && !selectMode){
     orbitAngle += .00085;
     camera.position.set(orbitTgt.x + Math.sin(orbitAngle)*orbitR,
                         orbitTgt.y + orbitH,
@@ -623,8 +750,7 @@ function tickFrame(){
     if (u.arc){ m.material.opacity = (!dimming || (hiAgents.has(u.from) && hiAgents.has(u.to))) ? .9 : .12; return; }
     if (u.a){
       const f = fa(u.a.id);
-      shade(m.material, u.baseFill, f);
-      if (u.lineMat) shade(u.lineMat, u.baseStroke, f);
+      if (!u.selected){ shade(m.material, u.baseFill, f); if (u.lineMat) shade(u.lineMat, u.baseStroke, f); }
       u.dim = f;
       m.children.forEach(ch => { if (ch.isSprite) ch.material.opacity = .85 * f; });
     }
@@ -637,8 +763,7 @@ function tickFrame(){
     const u=m.userData;
     if (u.w){
       const f = fi(u.w.id);
-      shade(m.material, u.baseFill, f);
-      if (u.lineMat) shade(u.lineMat, u.baseStroke, f);
+      if (!u.selected){ shade(m.material, u.baseFill, f); if (u.lineMat) shade(u.lineMat, u.baseStroke, f); }
       u.dim = f;
     }
     if (u.baseY){ m.position.y = u.baseY + Math.sin(t*1.2+u.phase)*.5; m.rotation.y += .004; }
