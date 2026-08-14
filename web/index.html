@@ -206,7 +206,7 @@ function renderLegend(){
     `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = reviewed, not merged yet</span>` +
     `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = in the branch. we have landed</span>` +
     `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = nothing to merge</span>` +
-    `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring = orphaned</span>` +
+    `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring around an item = orphaned, no live holder</span>` +
     `<span style="margin-left:10px;color:${hx(T.pulse)}">traveling dot = wake</span>` +
     `<span style="margin-left:8px;color:${hx(T.pulse)}">strobing line = message</span>` +
     `<span style="margin-left:8px;color:${hx(T.pulseSub)}">substrate (from below)</span>` +
@@ -362,9 +362,13 @@ function buildItems(items){
       halo.userData={pulse:true}; mesh.add(halo);
     }
     if (!active.length){
-      const ring = new THREE.Mesh(new THREE.RingGeometry(1.5,1.7,32),
-        new THREE.MeshBasicMaterial({color:T.orphan, side:THREE.DoubleSide, transparent:true, opacity:.5}));
-      ring.rotation.x = Math.PI/2; ring.position.y = -1.2; mesh.add(ring);
+      /* orphan mark: a billboard ring AROUND the item, so it never reads as a
+         landing marker on the ground */
+      const ring = new THREE.Mesh(new THREE.RingGeometry(1.5,1.68,48),
+        new THREE.MeshBasicMaterial({color:T.orphan, side:THREE.DoubleSide,
+                                     transparent:true, opacity:.55, depthWrite:false}));
+      ring.userData = {orphanRing:true};
+      mesh.add(ring);
     }
   });
 }
@@ -613,6 +617,7 @@ function tickFrame(){
     m.children.forEach(ch=>{
       if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=(.4+Math.abs(Math.sin(t*3))*.5)*(u.dim ?? 1); const sc=1+Math.sin(t*3)*.18; ch.scale.set(sc,sc,sc); }
       if (ch.userData.act==='run'){ ch.material.opacity = (.04 + (0.5+0.5*Math.sin(t*2.2))*.18) * (u.dim ?? 1); }
+      if (ch.userData.orphanRing){ ch.lookAt(camera.position); ch.material.opacity = .55 * (u.dim ?? 1); }
     });
   });
   const _end = new THREE.Vector3();
