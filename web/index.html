@@ -323,9 +323,13 @@ function buildItems(items){
          grey: nothing to merge (a ruling, recon, guidance) */
       const dcol = (w.stage>=6 || w.merged===true) ? T.discG
                  : (w.code && w.merged===false)    ? T.discY : T.discN;
-      const dgeo = new THREE.RingGeometry(1.35, 1.95, 56).rotateX(-Math.PI/2);
-      const disc = diagramMesh(dgeo, dcol);
-      disc.material.side = THREE.DoubleSide;
+      /* solid ring, not a wireframe: the named radius is the OUTER edge and
+         the band runs inward from it */
+      const R = 1.8, BAND = .38;
+      const dgeo = new THREE.RingGeometry(R - BAND, R, 64).rotateX(-Math.PI/2);
+      const disc = new THREE.Mesh(dgeo, new THREE.MeshBasicMaterial({
+        color: dcol, side: THREE.DoubleSide }));
+      disc.userData.baseFill = disc.material.color.clone();   /* so ghosting shades it */
       disc.position.set(pos.x,.06,pos.z);
       Object.assign(disc.userData, {type:'item', w});
       itemGroup.add(disc); itemMeshes.push(disc);
