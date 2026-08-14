@@ -199,13 +199,13 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
         # item is back in review, not ready to merge.
         last_clean = max((e["ts"] for e in ev if e["verdictKind"] == "reviewed-clean"),
                          default=None)
-        # only the PRODUCER's completions count: a reviewer files one to close
-        # its own review card, which would make every reviewed item look stale
-        last_done = max((e["ts"] for e in ev
-                         if e["kind"] == "completion" and e["reviews"] is None),
-                        default=None)
-        stale_review = (last_clean is not None and last_done is not None
-                        and last_done > last_clean)
+        # Completion AFTER a review is the normal sequence — the completion rail
+        # requires a linked review, so it always lands just after the verdict.
+        # What makes a review stale is new code TESTED after it.
+        last_tested = max((e["ts"] for e in ev
+                           if e["verdictKind"] == "tests-passed"), default=None)
+        stale_review = (last_clean is not None and last_tested is not None
+                        and last_tested > last_clean + 300_000)
         if "completion" in kinds and "reviewed-clean" in verd and not stale_review:
             stage = 5
     # green = a turn is executing on this card; yellow = a turn is queued for it
