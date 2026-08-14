@@ -199,7 +199,7 @@ function renderLegend(){
   document.getElementById('legend').innerHTML =
     STAGE_NAMES.map((n,i)=>`<span class="sw" style="background:${c(i)};${i?'margin-left:10px':''}"></span>${n}`).join('') +
     `<br><span style="color:${hx(T.tetherRun)}">━ green: turn executing now</span>` +
-    `<span style="margin-left:12px">(no line = no turn on that item)</span>` +
+    `<span style="margin-left:12px;color:${hx(T.tetherSched)}">━ faint: holds an open card, no turn</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow: turn queued, not started</span>` +
     `<span style="margin-left:12px">hedron flashing = turn waiting · strobing shell = turn running · agent discs flash the same way</span>` +
     `<br><span>flat discs = agents, hanging below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
@@ -343,6 +343,19 @@ function buildItems(items){
       shell.userData={act:'run'}; mesh.add(shell);
     }
     if (act==='wait' && w.stage<6) mesh.userData.waitFlash = true;
+    /* custody: an agent holding an open card on this item. Drawn for every
+       holder that has no live turn — a turn tether supersedes it. */
+    (w.holders||[]).forEach(hid=>{
+      if (!byId[hid] || byId[hid].retired) return;
+      if ((w.turns||{})[hid]) return;
+      const lm = new LineMaterial({color:T.tetherSched, linewidth:1, transparent:true, opacity:.22});
+      lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
+      const lg = new LineSegmentsGeometry().setPositions([0,0,0, 0,0,0]);
+      const seg = new LineSegments2(lg, lm);
+      seg.frustumCulled = false;
+      seg.userData = {itemMesh:mesh, hid, state:'hold', mat:lm, geo:lg};
+      tetherGroup.add(seg);
+    });
     Object.entries(w.turns||{}).forEach(([hid,st])=>{
       if (!byId[hid] || byId[hid].retired) return;
       const col = st==='run' ? T.tetherRun : T.tetherWait;
@@ -626,7 +639,7 @@ function tickFrame(){
     const a = APOS[u.hid]; if (!a) return;
     const p = u.itemMesh.position;
     _end.copy(a).add(new THREE.Vector3(0,.25,0));
-    u.mat.opacity = .4 * Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
+    u.mat.opacity = (u.state==='hold' ? .22 : .4) * Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
     u.geo.setPositions([p.x,p.y,p.z, _end.x,_end.y,_end.z]);
   });
   /* agent-to-agent links carry the travelling pulse: white crest running from
