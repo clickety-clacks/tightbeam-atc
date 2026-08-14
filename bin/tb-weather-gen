@@ -278,24 +278,18 @@ for r in q("""SELECT wakeId, creatorSessionKey, sessionKey FROM wakes
 
 # ---- agent-to-agent links: a pending wake IS an obligation between two
 # agents. Green when the receiver is in a turn, yellow when it still owes one.
-links, seen_link = [], set()
-# yellow: the wake is still pending, so the receiver owes a turn
-for r in q("""SELECT wakeId, creatorSessionKey, sessionKey FROM wakes
-              WHERE state='pending' ORDER BY dueAt LIMIT 300"""):
+# Agent-to-agent links follow the TURN the wake produced, not the wake.
+# A wake fires within seconds of its due time (p50 0s), so "pending" only means
+# "not due yet". The real waiting is the turn sitting in the receiver's queue
+# behind earlier prompts: p90 is about fourteen minutes, and it runs to an hour.
+links = []
+for r in q("""SELECT t.wakeId, w.creatorSessionKey, t.sessionKey, t.startedAt
+              FROM turns t JOIN wakes w ON w.wakeId = t.wakeId
+              WHERE t.endedAt IS NULL"""):
     src, dst = ids.get(r["creatorSessionKey"]), ids.get(r["sessionKey"])
     if src and dst and src != dst:
-        links.append({"id": r["wakeId"], "from": src, "to": dst, "state": "wait"})
-        seen_link.add(r["wakeId"])
-# green: the wake fired and the turn it started is executing right now. Without
-# this the line vanished at the moment of delivery, which is exactly when the
-# work begins.
-for r in q("""SELECT t.wakeId, w.creatorSessionKey, t.sessionKey FROM turns t
-              JOIN wakes w ON w.wakeId = t.wakeId
-              WHERE t.endedAt IS NULL AND t.startedAt IS NOT NULL"""):
-    src, dst = ids.get(r["creatorSessionKey"]), ids.get(r["sessionKey"])
-    if src and dst and src != dst and r["wakeId"] not in seen_link:
-        links.append({"id": r["wakeId"], "from": src, "to": dst, "state": "run"})
-        seen_link.add(r["wakeId"])
+        links.append({"id": r["wakeId"], "from": src, "to": dst,
+                      "state": "run" if r["startedAt"] else "wait"})
 
 snap = {"generatedAt": NOW, "agents": agents, "links": links,
         "items": open_items + landed, "messages": msgs, "wakes": wakes_out}
