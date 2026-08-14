@@ -5,39 +5,52 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tight Beam — Org Weather</title>
 <style>
-  html,body { margin:0; padding:0; background:#101214; overflow:hidden;
-    position:fixed; inset:0; width:100%; height:100%;
+  /* CSS is the single source of geometry: it sizes the canvas box and the
+     renderer matches its buffer to the measured box, so the two cannot
+     disagree. html carries the background so a light theme shows no gutter. */
+  html { background:#101214; }
+  html,body { margin:0; padding:0; width:100%; height:100%; overflow:hidden;
     font-family: ui-sans-serif,-apple-system,"Helvetica Neue",Arial,sans-serif; }
-  /* an inline canvas adds descender space and makes the document taller than
-     the window, which scrolls the fixed chrome out of view */
-  canvas { display:block; position:fixed; inset:0; }
+  body { position:relative; background:#101214; }
+  canvas { display:block; position:absolute; inset:0; width:100%; height:100%; z-index:0; }
   /* one top bar owns the top edge; children never position themselves */
   #topbar { position:fixed; top:0; left:0; right:0; z-index:6; display:flex;
     flex-wrap:wrap; align-items:flex-start; justify-content:space-between;
-    gap:8px 10px; padding:14px 18px; pointer-events:none; box-sizing:border-box; }
+    gap:8px 10px; pointer-events:none; box-sizing:border-box;
+    padding:calc(14px + env(safe-area-inset-top)) calc(18px + env(safe-area-inset-right))
+            14px calc(18px + env(safe-area-inset-left)); }
   #topright { display:flex; flex-direction:column; align-items:flex-end; gap:8px;
     flex:0 1 auto; min-width:0; max-width:100%; }
   #hud { color:#9a9ea6; font-size:12px; letter-spacing:.22em; text-transform:uppercase;
     background:#101214e6; border:1px solid #2a2d31; border-radius:5px; padding:7px 11px;
-    flex:1 1 auto; min-width:0; max-width:100%; }
+    flex:1 1 auto; min-width:0; max-width:100%; box-sizing:border-box;
+    overflow-wrap:anywhere; }
   #hud b { color:#b08d57; font-weight:600; }
   #hud .live { color:#6fae4e; } #hud .sample { color:#c9a835; }
   /* the bottom bar spans both edges, so it can never run off either side */
-  #legend { position:fixed; bottom:14px; left:18px; right:18px; z-index:6;
+  #legend { position:fixed; z-index:6;
+    bottom:calc(14px + env(safe-area-inset-bottom));
+    left:calc(18px + env(safe-area-inset-left)); right:calc(18px + env(safe-area-inset-right));
     color:#7c8188; font-size:11px; line-height:1.9; pointer-events:none;
     background:#101214e6; border:1px solid #2a2d31; border-radius:5px;
-    padding:8px 12px; box-sizing:border-box; max-height:32vh; overflow:hidden; }
+    padding:8px 12px; box-sizing:border-box; max-height:32dvh; overflow:auto;
+    scrollbar-width:thin; }
   #legend.collapsed { display:none; }
+  @supports not (max-height: 1dvh){ #legend { max-height:32vh; } }
   .sw { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:-1px; }
   #tip { position:fixed; display:none; background:#1b1e22ee; color:#d8d6d1;
     border:1px solid #3a3d42; border-left:3px solid #b08d57; border-radius:4px;
-    padding:8px 12px; font-size:12.5px; line-height:1.5; pointer-events:none; max-width:320px; }
+    padding:8px 12px; font-size:12.5px; line-height:1.5; pointer-events:none;
+    max-width:min(320px, calc(100vw - 24px)); box-sizing:border-box; z-index:8;
+    overflow-wrap:anywhere; }
   #tip .t { color:#b08d57; font-weight:600; }
   #tip .seg { color:#9a9ea6; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
   #themehint { color:#7c8188; font-size:10.5px; letter-spacing:.12em;
     text-transform:uppercase; background:#101214e6; border:1px solid #2a2d31;
-    border-radius:5px; padding:6px 10px; pointer-events:none; max-width:100%; }
+    border-radius:5px; padding:6px 10px; pointer-events:none; max-width:100%;
+    box-sizing:border-box; overflow-wrap:anywhere; }
   body.light { background:#f2eee2; }
+  html:has(body.light) { background:#f2eee2; }
   body.light #hud { color:#5c6b78; background:#f2eee2e8; border-color:#c3cdd8; } body.light #hud b { color:#c23b22; }
   body.light #hud .live { color:#2e7d5b; } body.light #hud .sample { color:#c9a227; }
   body.light #legend { color:#5c6b78; background:#f2eee2e8; border-color:#c3cdd8; }
@@ -49,7 +62,7 @@
     #legend { font-size:10px; line-height:1.7; }
     #hud, #themehint, #selui { letter-spacing:.08em; font-size:10px; }
   }
-  @media (max-height: 620px){ #legend { display:none; } }
+
   #selcursor { position:fixed; border:1.5px solid #b08d57; border-radius:50%;
     pointer-events:none; display:none; transform:translate(-50%,-50%); z-index:5;
     box-shadow:0 0 0 1px rgba(0,0,0,.25) inset; }
@@ -550,6 +563,15 @@ function spawnMessages(){
   firstBatch = false;
 }
 
+/* Short viewports start with the legend closed so it cannot eat the scene —
+   as state, not a media rule, so L can still reveal it. */
+let legendUserSet = false;
+function autoCollapseLegend(){
+  if (legendUserSet) return;
+  const el = document.getElementById('legend');
+  if (el) el.classList.toggle('collapsed', innerHeight < 620);
+}
+
 /* ---------- live feed ---------- */
 async function refresh(){
   try {
@@ -587,7 +609,10 @@ addEventListener('keydown', e=>{
   else if (e.key==='f' || e.key==='F' || e.key===' '){
     e.preventDefault(); fitSelection();
   }
-  else if (e.key==='l' || e.key==='L'){ document.getElementById('legend').classList.toggle('collapsed'); }
+  else if (e.key==='l' || e.key==='L'){
+    legendUserSet = true;
+    document.getElementById('legend').classList.toggle('collapsed');
+  }
   else if (e.key==='['){ setRadius(selRadius - Math.max(4, selRadius*.15)); }
   else if (e.key===']'){ setRadius(selRadius + Math.max(4, selRadius*.15)); }
 });
@@ -966,19 +991,29 @@ function tickFrame(){
   renderer.render(scene, camera);
 }
 tickFrame();
+/* CSS decides the canvas box; we only match the drawing buffer to it. Passing
+   false to setSize leaves the CSS size alone, so the two cannot disagree. */
 function fitViewport(){
-  const vv = window.visualViewport;
-  const w = Math.round(vv ? vv.width  : innerWidth);
-  const h = Math.round(vv ? vv.height : innerHeight);
+  const r = renderer.domElement.getBoundingClientRect();
+  const w = Math.max(1, Math.floor(r.width)), h = Math.max(1, Math.floor(r.height));
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-  renderer.setSize(w, h, true);
+  renderer.setSize(w, h, false);
   edgeMats.forEach(m => m.resolution.set(w, h));
+  autoCollapseLegend();
 }
-addEventListener('resize', fitViewport);
-addEventListener('orientationchange', fitViewport);
-window.visualViewport?.addEventListener('resize', fitViewport);
+let fitQueued = false;
+function queueFit(){
+  if (fitQueued) return;
+  fitQueued = true;
+  requestAnimationFrame(() => { fitQueued = false; fitViewport(); });
+}
+addEventListener('resize', queueFit);
+addEventListener('orientationchange', queueFit);
+window.visualViewport?.addEventListener('resize', queueFit);
+window.visualViewport?.addEventListener('scroll', queueFit);
+new ResizeObserver(queueFit).observe(document.body);
 fitViewport();
 </script>
 </body>
