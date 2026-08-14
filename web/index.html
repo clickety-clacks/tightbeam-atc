@@ -654,44 +654,87 @@ tagInput.addEventListener('keydown', e => {
    and report our selection back. It is best-effort: if the API is absent the
    page behaves exactly as before. */
 const API = './api';
-let apiSeq = 0, apiTagsRev = -1, apiUp = false;
+const CLIENT_ID = Math.random().toString(36).slice(2, 10);
+let apiSeq = 0, apiTagsRev = -1, apiGen = null, apiUp = false;
 let tags = [];                                   /* [{tagId,target,text,source}] */
+
+/* every request is bounded and checked: a hung fetch must not stall the loop,
+   and a 500 must not read as success */
+async function apiFetch(path, init){
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 4000);
+  try {
+    const r = await fetch(API + path, {...init, signal: ctl.signal, cache:'no-store'});
+    if (!r.ok) throw new Error('http ' + r.status);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
 
 async function apiPull(){
   try {
-    const r = await fetch(`${API}/pull?since=${apiSeq}`, {cache:'no-store'});
-    if (!r.ok) throw 0;
-    const d = await r.json();
+    const d = await apiFetch(`/pull?since=${apiSeq}`);
+    if (typeof d?.seq !== 'number') throw new Error('bad shape');
+    /* a new generation means the service restarted: sequence numbers and tag
+       revisions from the old one mean nothing, so resynchronise rather than
+       trying to apply a delta across the discontinuity */
+    if (apiGen !== null && d.generation !== apiGen){
+      apiSeq = d.seq; apiTagsRev = -1;
+    }
+    apiGen = d.generation ?? apiGen;
+    /* fell further behind than the server's history: it told us, so do not
+       pretend the missing commands were applied */
+    if (d.gap) apiSeq = d.seq;
+    else for (const c of (d.commands || [])){
+      try { applyCommand(c); } catch(e){ /* one bad command must not wedge the loop */ }
+    }
+    if (d.tagsRev !== apiTagsRev){
+      apiTagsRev = d.tagsRev; tags = Array.isArray(d.tags) ? d.tags : []; buildTags();
+    }
+    if (typeof d.seq === 'number' && d.seq >= apiSeq) apiSeq = d.seq;
     apiUp = true;
-    if (d.tagsRev !== apiTagsRev){ apiTagsRev = d.tagsRev; tags = d.tags || []; buildTags(); }
-    for (const c of (d.commands || [])) applyCommand(c);
-    apiSeq = d.seq ?? apiSeq;
   } catch(e){ apiUp = false; }
 }
+
+/* single flight: setInterval would let a slow request overlap a fast one and
+   apply responses out of order */
+async function apiLoop(){
+  for (;;){
+    await apiPull();
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+let lastReport = '';
 async function apiReportSelection(){
   if (!apiUp) return;
   const sel = [...view.selection].map(k => {
-    const [kind, id] = [k.slice(0,1), k.slice(2)];
+    const kind = k.slice(0,1), id = k.slice(2);
     const w = kind === 'i' ? (DATA?.items || []).find(x => x.id === id) : null;
     const a = kind === 'a' ? (DATA?.agents || []).find(x => x.id === id) : null;
     return {id, type: kind === 'i' ? 'item' : 'agent', title: w ? w.title : (a ? a.name : null)};
   });
-  try { await fetch(`${API}/selection`, {method:'POST', headers:{'content-type':'application/json'},
-                                         body: JSON.stringify({selection: sel})}); } catch(e){}
+  const body = JSON.stringify({clientId: CLIENT_ID, selection: sel});
+  if (body === lastReport) return;               /* do not fight other pages with no news */
+  try {
+    await apiFetch('/selection', {method:'POST', headers:{'content-type':'application/json'}, body});
+    lastReport = body;
+  } catch(e){ apiUp = false; }
 }
 async function apiPostTags(list){
-  try { await fetch(`${API}/tags`, {method:'POST', headers:{'content-type':'application/json'},
-                                    body: JSON.stringify({tags:list})}); await apiPull(); } catch(e){}
+  try { await apiFetch('/tags', {method:'POST', headers:{'content-type':'application/json'},
+                                 body: JSON.stringify({tags:list})}); await apiPull(); }
+  catch(e){ apiUp = false; }
 }
 async function apiClearTags(){
-  try { await fetch(`${API}/tags`, {method:'DELETE'}); await apiPull(); }
-  catch(e){ tags = []; buildTags(); }
+  /* never clear locally on failure: the page would show an empty board while
+     the server still holds the tags, and the revision would not correct it */
+  try { await apiFetch('/tags', {method:'DELETE'}); apiTagsRev = -1; await apiPull(); }
+  catch(e){ apiUp = false; }
 }
 function applyCommand(c){
   if (c.kind === 'select'){
     if (c.clear) view.selection.clear();
-    (c.add || []).forEach(id => view.selection.add(selKeyFor(id)));
-    (c.remove || []).forEach(id => view.selection.delete(selKeyFor(id)));
+    (Array.isArray(c.add) ? c.add : []).forEach(id => view.selection.add(selKeyFor(id)));
+    (Array.isArray(c.remove) ? c.remove : []).forEach(id => view.selection.delete(selKeyFor(id)));
     applyView(); apiReportSelection();
   } else if (c.kind === 'focus'){
     if (c.mode === 'clear'){ clearFocus(); return; }
@@ -704,6 +747,7 @@ function applyCommand(c){
     if (c.on) fitSelection(); else if (camMark) restoreCamera();
   }
 }
+
 /* ids arrive bare from the API; internally they carry a kind prefix. The kind
    is decided by the id's own shape, not by searching the current feed — a
    lookup would mislabel anything that arrives before the first snapshot, or
@@ -775,7 +819,7 @@ window.__atc = {
   get apiUp(){ return apiUp; },
   pull: apiPull,
 };
-apiPull(); setInterval(apiPull, 1000);
+apiLoop();
 setInterval(apiReportSelection, 2000);
 
 /* ---------- click: focus an item, background zooms out ---------- */

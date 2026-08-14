@@ -10,9 +10,9 @@ Type=simple
 # The user that can read the Tightbeam base directory:
 User=<tightbeam-user>
 Environment=TB_BASE_DIR=/home/<tightbeam-user>/.tightbeam
-Environment=TB_WEATHER_OUT=/var/www/tightbeam-weather/data.json
+Environment=TB_WEATHER_OUT=/opt/tb-atc/web/data.json
 # For a remote web host instead, set TB_WEATHER_DEST and TB_WEATHER_KEY:
-# Environment=TB_WEATHER_DEST=<user>@<viz-host>:/var/www/tightbeam-weather/data.json
+# Environment=TB_WEATHER_DEST=<user>@<web-host>:/opt/tb-atc/web/data.json
 # Environment=TB_WEATHER_KEY=/home/<tightbeam-user>/.ssh/<key>
 ExecStart=/usr/local/bin/tb-weather-watch
 Restart=on-failure

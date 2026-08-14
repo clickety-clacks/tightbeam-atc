@@ -31,7 +31,7 @@ Config:
   TB_ATC_PORT  port                             (default 8787)
   TB_ATC_WEB   directory holding index.html etc (default ./web next to this file)
 """
-import json, os, posixpath, threading, time
+import json, os, posixpath, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -40,12 +40,29 @@ HOST = os.environ.get("TB_ATC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TB_ATC_PORT", "8787"))
 WEB = Path(os.environ.get("TB_ATC_WEB", Path(__file__).resolve().parent.parent / "web"))
 
+# Bounds. Everything here is in memory and reachable without credentials, so
+# each collection needs a ceiling; without one a single caller can exhaust the
+# process by accident as easily as on purpose.
+MAX_BODY = 256 * 1024
+MAX_TAGS = 500
+MAX_TAG_TEXT = 80
+MAX_ID = 128
+MAX_IDS_PER_CALL = 500
+CMD_HISTORY = 200
+
+# A page that reconnects across a restart must be able to tell that the world
+# it was tracking is gone: sequence numbers alone restart at zero and would
+# silently skip commands.
+GENERATION = uuid.uuid4().hex[:12]
+
 lock = threading.Lock()
 state = {
-    "selection": [],        # last reported by the page
+    "selection": [],        # last reported by a page — telemetry, not truth
     "selectionAt": 0,
-    "commands": [],         # [{seq, kind, ...}] — consumed by seq, trimmed
+    "selectionBy": None,
+    "commands": [],         # [{seq, kind, ...}] — a broadcast log, trimmed
     "seq": 0,
+    "oldestSeq": 0,
     "tags": {},             # tagId -> tag
     "tagSeq": 0,
     "tagsRev": 0,
@@ -56,8 +73,22 @@ def push(kind, **payload):
     state["seq"] += 1
     cmd = {"seq": state["seq"], "kind": kind, **payload}
     state["commands"].append(cmd)
-    del state["commands"][:-200]        # a display, not a durable log
+    if len(state["commands"]) > CMD_HISTORY:
+        del state["commands"][:-CMD_HISTORY]
+        state["oldestSeq"] = state["commands"][0]["seq"]
     return cmd
+
+
+def clip(v, n):
+    return str(v)[:n] if v is not None else None
+
+
+def id_list(v):
+    """A string is iterable, so a caller sending add:"wi_1" instead of
+    add:["wi_1"] would otherwise be read as one id per character."""
+    if not isinstance(v, list):
+        return []
+    return [clip(x, MAX_ID) for x in v if isinstance(x, (str, int))][:MAX_IDS_PER_CALL]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -68,6 +99,8 @@ class Handler(BaseHTTPRequestHandler):
         pass                            # quiet; journald carries the unit's own lines
 
     def _send(self, obj, code=200):
+        """Serialize and write OUTSIDE the state lock — a slow reader must not
+        be able to freeze every other caller."""
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -81,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
+        if n > MAX_BODY:
+            return None
         if not n:
             return {}
         try:
@@ -93,12 +128,18 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- reads ----------
     def _serve_file(self, path):
+        root = WEB.resolve()
         rel = posixpath.normpath(path.lstrip("/")) or "index.html"
-        if rel in (".", "/"): rel = "index.html"
-        target = (WEB / rel).resolve()
-        if not str(target).startswith(str(WEB.resolve())) or target.is_dir():
-            target = WEB / "index.html"
-        if not target.exists():
+        if rel in (".", "/", ""): rel = "index.html"
+        target = (root / rel).resolve()
+        # containment by path relationship, not string prefix: a sibling
+        # directory whose name merely starts with the root would pass a
+        # startswith() check
+        if not target.is_relative_to(root):
+            return self._send({"error": "not found"}, 404)
+        if target.is_dir():
+            target = target / "index.html"
+        if not target.is_file():
             return self._send({"error": "not found"}, 404)
         ctype = {".html":"text/html", ".js":"text/javascript", ".json":"application/json",
                  ".css":"text/css", ".png":"image/png", ".svg":"image/svg+xml"}.get(
@@ -117,68 +158,92 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if not u.path.startswith("/api/"):
             return self._serve_file(u.path)
-        with lock:
-            if u.path == "/api/state":
-                return self._send({
-                    "selection": state["selection"],
-                    "selectionAt": state["selectionAt"],
-                    "tags": list(state["tags"].values()),
-                    "seq": state["seq"],
-                })
-            if u.path == "/api/selection":
-                return self._send(state["selection"])
-            if u.path == "/api/tags":
-                return self._send(list(state["tags"].values()))
-            if u.path == "/api/pull":
+        snap = None
+        if u.path == "/api/state":
+            with lock:
+                snap = {"generation": GENERATION, "selection": list(state["selection"]),
+                        "selectionAt": state["selectionAt"], "selectionBy": state["selectionBy"],
+                        "tags": list(state["tags"].values()), "seq": state["seq"]}
+        elif u.path == "/api/selection":
+            with lock:
+                snap = list(state["selection"])
+        elif u.path == "/api/tags":
+            with lock:
+                snap = list(state["tags"].values())
+        elif u.path == "/api/pull":
+            try:
                 since = int((parse_qs(u.query).get("since") or ["0"])[0])
-                return self._send({
-                    "commands": [c for c in state["commands"] if c["seq"] > since],
-                    "seq": state["seq"],
-                    "tags": list(state["tags"].values()),
-                    "tagsRev": state["tagsRev"],
-                })
-        self._send({"error": "not found"}, 404)
+            except ValueError:
+                since = 0
+            with lock:
+                # a page that fell further behind than the history we keep
+                # cannot reconstruct deltas, and must be told so rather than
+                # silently skipping to the head
+                gap = since < state["oldestSeq"]
+                snap = {"generation": GENERATION,
+                        "commands": [] if gap else [c for c in state["commands"] if c["seq"] > since],
+                        "gap": gap, "oldestSeq": state["oldestSeq"], "seq": state["seq"],
+                        "tags": list(state["tags"].values()), "tagsRev": state["tagsRev"]}
+        if snap is None:
+            return self._send({"error": "not found"}, 404)
+        self._send(snap)
 
     # ---------- writes ----------
     def do_POST(self):
         u = urlparse(self.path)
         b = self._body()
+        if b is None:
+            return self._send({"error": "body too large"}, 413)
+        out = None
         with lock:
             if u.path == "/api/select":
-                add = [str(x) for x in (b.get("add") or [])]
-                rm = [str(x) for x in (b.get("remove") or [])]
+                add, rm = id_list(b.get("add")), id_list(b.get("remove"))
                 clear = bool(b.get("clear"))
                 if not (add or rm or clear):
-                    return self._send({"error": "nothing to do"}, 400)
-                return self._send(push("select", add=add, remove=rm, clear=clear))
+                    out = ({"error": "nothing to do"}, 400)
+                else:
+                    out = (push("select", add=add, remove=rm, clear=clear), 200)
 
             if u.path == "/api/focus":
                 mode = b.get("mode", "single")
                 if mode not in ("single", "neighborhood", "clear"):
-                    return self._send({"error": "mode must be single, neighborhood or clear"}, 400)
-                if mode != "clear" and not b.get("id"):
-                    return self._send({"error": "id required"}, 400)
-                return self._send(push("focus", id=b.get("id"), mode=mode))
+                    out = ({"error": "mode must be single, neighborhood or clear"}, 400)
+                elif mode != "clear" and not b.get("id"):
+                    out = ({"error": "id required"}, 400)
+                else:
+                    out = (push("focus", id=clip(b.get("id"), MAX_ID), mode=mode), 200)
 
             if u.path == "/api/fit":
-                return self._send(push("fit", on=bool(b.get("on", True))))
+                out = (push("fit", on=bool(b.get("on", True))), 200)
 
-            if u.path == "/api/selection":       # the page reporting in
-                state["selection"] = b.get("selection") or []
+            if u.path == "/api/selection":       # a page reporting in
+                raw = b.get("selection")
+                sel = raw[:MAX_IDS_PER_CALL] if isinstance(raw, list) else []
+                state["selection"] = [
+                    {"id": clip(x.get("id"), MAX_ID), "type": clip(x.get("type"), 8),
+                     "title": clip(x.get("title"), 120)}
+                    for x in sel if isinstance(x, dict)]
                 state["selectionAt"] = int(time.time() * 1000)
-                return self._send({"ok": True, "count": len(state["selection"])})
+                state["selectionBy"] = clip(b.get("clientId"), 32)
+                out = ({"ok": True, "count": len(state["selection"])}, 200)
 
             if u.path == "/api/tags":
                 made = []
-                for t in (b.get("tags") or []):
-                    target, text = t.get("target"), (t.get("text") or "").strip()
+                raw_tags = b.get("tags")
+                for t in (raw_tags[:MAX_TAGS] if isinstance(raw_tags, list) else []):
+                    if not isinstance(t, dict):
+                        continue
+                    if len(state["tags"]) >= MAX_TAGS:
+                        break
+                    target = clip(t.get("target"), MAX_ID)
+                    text = (t.get("text") or "")[:MAX_TAG_TEXT * 2].strip()
                     if not target or not text:
                         continue
                     state["tagSeq"] += 1
                     tag = {
                         "tagId": f"t{state['tagSeq']}",
                         "target": str(target),
-                        "text": text[:80],
+                        "text": text[:MAX_TAG_TEXT],
                         "source": "user" if t.get("source") == "user" else "agent",
                         "at": int(time.time() * 1000),
                     }
@@ -186,26 +251,31 @@ class Handler(BaseHTTPRequestHandler):
                     made.append(tag)
                 if made:
                     state["tagsRev"] += 1
-                return self._send({"created": made})
+                out = ({"created": made}, 200)
 
             if u.path == "/api/tags/clear":
                 state["tags"].clear(); state["tagsRev"] += 1
-                return self._send({"ok": True})
-        self._send({"error": "not found"}, 404)
+                out = ({"ok": True}, 200)
+        if out is None:
+            return self._send({"error": "not found"}, 404)
+        self._send(out[0], out[1])
 
     def do_DELETE(self):
         u = urlparse(self.path)
+        out = None
         with lock:
             if u.path == "/api/tags":
                 state["tags"].clear(); state["tagsRev"] += 1
-                return self._send({"ok": True})
-            if u.path.startswith("/api/tags/"):
+                out = ({"ok": True}, 200)
+            elif u.path.startswith("/api/tags/"):
                 tid = u.path.rsplit("/", 1)[-1]
                 gone = state["tags"].pop(tid, None)
                 if gone:
                     state["tagsRev"] += 1
-                return self._send({"deleted": bool(gone)}, 200 if gone else 404)
-        self._send({"error": "not found"}, 404)
+                out = ({"deleted": bool(gone)}, 200 if gone else 404)
+        if out is None:
+            return self._send({"error": "not found"}, 404)
+        self._send(out[0], out[1])
 
 
 if __name__ == "__main__":
