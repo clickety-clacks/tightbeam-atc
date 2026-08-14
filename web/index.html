@@ -118,9 +118,24 @@ scene.add(groundGroup, itemGroup, tetherGroup, linkGroup);
 
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
 let flight = null, focused = false, orbitAngle = 0;
-/* focus has two stages: 1 = this node alone, 2 = this node plus everything it
-   is connected to, with the rest of the org dimmed back */
-let focusObj = null, focusStage = 0, hiAgents = null, hiItems = null;
+
+/* ---------- view state ----------
+   Two independent things, plus one input mode. Nothing else may hold view
+   state; everything visual is derived from here by applyView().
+
+     view.selection  brushed nodes. Persists across rebuilds and mode changes.
+     view.focus      {obj, stage}. stage 1 = the node, 2 = its neighbourhood.
+     view.input      'navigate' | 'brush'. What the pointer does, nothing more.
+
+   Selection and focus are ORTHOGONAL: neither clears or constrains the other. */
+const view = {
+  selection: new Set(),
+  focus: { obj: null, stage: 0 },
+  input: 'navigate',
+  fitTarget: 'selection',        /* which framing f/space lands on next */
+};
+/* derived from view.focus by computeHighlight(); never set directly */
+let hiAgents = null, hiItems = null;
 const DIM = 0.2;
 const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0);
 /* ambient tabletop orbit — parameterized so it can resume from any framing
@@ -183,13 +198,15 @@ function applyTheme(){
   grid.position.y = 0; scene.add(grid);
   renderLegend();
   if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); buildLinks(DATA.links);
-             if (typeof reapplySelection === 'function') reapplySelection(); }
+             if (typeof applyView === 'function') applyView(); }
 }
 
+/* the ghost set is derived from focus alone — never stored independently */
 function computeHighlight(){
-  if (!focusObj || focusStage < 2 || !DATA){ hiAgents = hiItems = null; return; }
+  const { obj, stage } = view.focus;
+  if (!obj || stage < 2 || !DATA){ hiAgents = hiItems = null; return; }
   hiAgents = new Set(); hiItems = new Set();
-  const u = focusObj.userData;
+  const u = obj.userData;
   if (u.type === 'item'){
     hiItems.add(u.w.id);
     Object.keys(u.w.turns || {}).forEach(h => hiAgents.add(h));
@@ -505,7 +522,7 @@ async function refresh(){
     if (h !== agentsHash){ agentsHash = h; buildGround(d.agents); }
     buildItems(d.items);
     buildLinks(d.links);
-    reapplySelection();
+    applyView();
     spawnWakes(); spawnMessages();
     const age = Math.round((Date.now()-d.generatedAt)/1000);
     const el = document.getElementById('mode');
@@ -524,12 +541,9 @@ async function refresh(){
 /* ---------- theme toggle ---------- */
 addEventListener('keydown', e=>{
   if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
-  else if (e.key==='s' || e.key==='S'){ setSelectMode(!selectMode); }
-  else if (e.key==='d' || e.key==='D'){ selected.clear(); reapplySelection(); }
-  else if (e.key==='Escape'){
-    focusObj = null; focusStage = 0; hiAgents = hiItems = null;
-    if (selectMode) setSelectMode(false);
-  }
+  else if (e.key==='s' || e.key==='S'){ setInputMode(view.input==='brush' ? 'navigate' : 'brush'); }
+  else if (e.key==='d' || e.key==='D'){ view.selection.clear(); applyView(); }
+  else if (e.key==='Escape'){ clearFocus(); setInputMode('navigate'); }
   else if (e.key==='f' || e.key==='F' || e.key===' '){
     e.preventDefault(); fitSelection();
   }
@@ -545,9 +559,9 @@ refresh(); setInterval(refresh, 5000);
 
 /* ---------- click: focus an item, background zooms out ---------- */
 let downXY = null;
-addEventListener('pointerdown', e=>{ if (selectMode) return; downXY=[e.clientX,e.clientY]; });
+addEventListener('pointerdown', e=>{ if (view.input==='brush') return; downXY=[e.clientX,e.clientY]; });
 addEventListener('pointerup', e=>{
-  if (selectMode) return;
+  if (view.input==='brush') return;
   if (!downXY) return;
   const moved = Math.hypot(e.clientX-downXY[0], e.clientY-downXY[1]); downXY=null;
   if (moved > 6) return;                       /* it was a drag, not a click */
@@ -556,11 +570,11 @@ addEventListener('pointerup', e=>{
   const hit = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], false)[0];
   if (hit && hit.object.userData.type){
     const o = hit.object;
-    if (focusObj === o) focusStage = focusStage === 1 ? 2 : 1;
-    else { focusObj = o; focusStage = 1; }
-    computeHighlight();
+    if (view.focus.obj === o) view.focus.stage = view.focus.stage === 1 ? 2 : 1;
+    else { view.focus.obj = o; view.focus.stage = 1; }
+    applyView();
     focused = true; userMoved = true;
-    const nb = focusStage === 2 ? neighbourhoodView() : null;
+    const nb = view.focus.stage === 2 ? neighbourhoodView() : null;
     if (nb){
       const dir = camera.position.clone().sub(nb.center); dir.y = 0;
       if (dir.lengthSq() < .01) dir.set(1,0,1);
@@ -577,7 +591,7 @@ addEventListener('pointerup', e=>{
       flyTo(camPos, pt);
     }
   } else if (focused){
-    focused = false; focusObj = null; focusStage = 0; hiAgents = hiItems = null;
+    focused = false; clearFocus();
     const ang = Math.atan2(camera.position.x, camera.position.z);
     const home = new THREE.Vector3(Math.sin(ang)*66, 34, Math.cos(ang)*66);
     flyTo(home, HOME_TGT, ()=>{
@@ -585,7 +599,7 @@ addEventListener('pointerup', e=>{
       userMoved = false;
     });
   } else {
-    focusObj = null; focusStage = 0; hiAgents = hiItems = null;
+    clearFocus();
     /* user had hand-rotated: resume the tabletop spin exactly where they left it */
     const d = camera.position.clone().sub(controls.target);
     orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
@@ -604,7 +618,7 @@ addEventListener('pointermove', e=>{
   if (!hit){ tip.style.display='none'; return; }
   const u = hit.object.userData;
   if (!u.type){ tip.style.display='none'; return; }
-  if (!selectMode && focusStage === 2 && hiAgents){   /* outside the neighbourhood: dead to hover */
+  if (view.input !== 'brush' && view.focus.stage === 2 && hiAgents){   /* outside the neighbourhood: dead to hover */
     const inside = u.type === 'item' ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
     if (!inside){ tip.style.display='none'; return; }
   }
@@ -635,9 +649,8 @@ addEventListener('pointermove', e=>{
    's' toggles. While on, the camera is frozen and a circular cursor selects
    whatever it touches; the first thing it touches on a drag decides whether the
    stroke selects or deselects. Selection survives leaving the mode. */
-let selectMode = false, selecting = false, selOp = null, selRadius = 46;
-let fitOnSelection = true;   /* which framing f/space lands on next */
-const selected = new Set();
+let selecting = false, selOp = null, selRadius = 46;
+const selected = view.selection;                 /* one owner, aliased for brevity */
 const selCursor = document.getElementById('selcursor');
 const selUI = document.getElementById('selui');
 const selRad = document.getElementById('selrad');
@@ -674,12 +687,16 @@ function shadeSelected(mesh, on){
     if (u.lineMat) u.lineMat.visible = true;
   }
 }
-function reapplySelection(){          /* meshes are rebuilt every refresh */
+/* The single point where view state becomes pixels. Call after ANY view change
+   and after every rebuild; meshes are recreated on each five-second refresh, so
+   selection shading has to be re-applied rather than assumed. */
+function applyView(){
+  computeHighlight();
   selectables().forEach(m => {
     const k = selKey(m);
-    if (k) shadeSelected(m, selected.has(k));
+    if (k) shadeSelected(m, view.selection.has(k));
   });
-  document.getElementById('selcount').textContent = selected.size;
+  document.getElementById('selcount').textContent = view.selection.size;
 }
 function paintAt(px, py){
   const r2 = selRadius * selRadius;
@@ -693,22 +710,29 @@ function paintAt(px, py){
   if (!hits.length) return;
   if (!selOp){
     const k0 = selKey(hits[0]);
-    selOp = selected.has(k0) ? 'unselect' : 'select';
+    selOp = view.selection.has(k0) ? 'unselect' : 'select';
     selCursor.classList.toggle('unsel', selOp === 'unselect');
   }
   hits.forEach(m => {
     const k = selKey(m); if (!k) return;
-    if (selOp === 'select') selected.add(k); else selected.delete(k);
+    if (selOp === 'select') view.selection.add(k); else view.selection.delete(k);
     shadeSelected(m, selOp === 'select');
   });
   document.getElementById('selcount').textContent = selected.size;
 }
-function setSelectMode(on){
-  selectMode = on;
-  controls.enabled = !on;
-  selUI.classList.toggle('off', !on);
-  selCursor.style.display = on ? 'block' : 'none';
-  if (!on){ selecting = false; selOp = null; selCursor.classList.remove('unsel'); }
+/* the ONLY place input mode changes; focus and selection are untouched */
+function setInputMode(mode){
+  view.input = mode;
+  const brushing = mode === 'brush';
+  controls.enabled = !brushing;
+  selUI.classList.toggle('off', !brushing);
+  selCursor.style.display = brushing ? 'block' : 'none';
+  if (!brushing){ selecting = false; selOp = null; selCursor.classList.remove('unsel'); }
+}
+/* the ONLY place focus is dropped */
+function clearFocus(){
+  view.focus.obj = null; view.focus.stage = 0;
+  hiAgents = hiItems = null;
 }
 function setRadius(px){
   selRadius = Math.max(8, Math.min(220, Math.round(px)));
@@ -720,18 +744,18 @@ setRadius(selRadius);
 selRad.addEventListener('input', e => setRadius(+e.target.value));
 
 addEventListener('pointermove', e => {
-  if (!selectMode) return;
+  if (view.input !== 'brush') return;
   selCursor.style.left = e.clientX + 'px';
   selCursor.style.top  = e.clientY + 'px';
   if (selecting) paintAt(e.clientX, e.clientY);
 }, true);
 addEventListener('pointerdown', e => {
-  if (!selectMode) return;
+  if (view.input !== 'brush') return;
   selecting = true; selOp = null;
   paintAt(e.clientX, e.clientY);
 }, true);
 addEventListener('pointerup', () => {
-  if (!selectMode) return;
+  if (view.input !== 'brush') return;
   selecting = false; selOp = null; selCursor.classList.remove('unsel');
 }, true);
 
@@ -743,18 +767,18 @@ function fitSelection(){
   const selPts = [], focusPts = [];
   selectables().forEach(m => {
     const k = selKey(m);
-    if (k && selected.has(k)) selPts.push(m.position);
-    if (focusStage === 2 && hiAgents){
+    if (k && view.selection.has(k)) selPts.push(m.position);
+    if (view.focus.stage === 2 && hiAgents){
       const u = m.userData;
       const inside = u.w ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
       if (inside) focusPts.push(m.position);
     }
   });
-  if (!focusPts.length && focusObj) focusPts.push(focusObj.position);
+  if (!focusPts.length && view.focus.obj) focusPts.push(view.focus.obj.position);
   const haveSel = selPts.length > 0, haveFocus = focusPts.length > 0;
-  if (haveSel && haveFocus) fitOnSelection = !fitOnSelection;
-  else fitOnSelection = haveSel;
-  let pts = fitOnSelection ? selPts : focusPts;
+  if (haveSel && haveFocus) view.fitTarget = view.fitTarget === 'selection' ? 'focus' : 'selection';
+  else view.fitTarget = haveSel ? 'selection' : 'focus';
+  let pts = view.fitTarget === 'selection' ? selPts : focusPts;
   if (!pts.length) pts = haveSel ? selPts : focusPts;
   if (!pts.length) selectables().forEach(m => pts.push(m.position));
   if (!pts.length) return false;
@@ -794,14 +818,14 @@ function tickFrame(){
     camera.position.lerpVectors(flight.p0, flight.p1, e);
     controls.target.lerpVectors(flight.t0, flight.t1, e);
     if (flight.k >= 1){ flight.after?.(); flight = null; }
-  } else if (!userMoved && !focused && !selectMode){
+  } else if (!userMoved && !focused && view.input!=='brush'){
     orbitAngle += .00085;
     camera.position.set(orbitTgt.x + Math.sin(orbitAngle)*orbitR,
                         orbitTgt.y + orbitH,
                         orbitTgt.z + Math.cos(orbitAngle)*orbitR);
     controls.target.copy(orbitTgt); camera.lookAt(orbitTgt);
   }
-  const dimming = focusStage === 2 && hiAgents;
+  const dimming = view.focus.stage === 2 && hiAgents;
   const fa = id => (!dimming || hiAgents.has(id)) ? 1 : DIM;
   const fi = id => (!dimming || hiItems.has(id)) ? 1 : DIM;
   const bg = new THREE.Color(T.bg);
