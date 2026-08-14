@@ -295,6 +295,16 @@ function buildLinks(links){
   });
 }
 
+/* deterministic scatter from the item id: stable across refreshes, so items
+   sharing a centroid spread out instead of forming a column */
+function scatter(id){
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++){ h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
+  const a = ((h >>> 0) % 3600) / 3600 * Math.PI * 2;
+  const r = 1.1 + (((h >>> 12) & 1023) / 1023) * 3.4;
+  return {x: Math.cos(a) * r, z: Math.sin(a) * r};
+}
+
 function buildItems(items){
   disposeGroup(itemGroup); disposeGroup(tetherGroup); itemMeshes = [];
   items.forEach((w,idx)=>{
@@ -307,9 +317,12 @@ function buildItems(items){
        actually reached the branch */
     const landed = w.stage >= 5;
     const j = (idx%5)-2;
+    const sc = scatter(w.id);
     const pos = landed
-      ? new THREE.Vector3(anchor.x + j*1.5, 1.05, anchor.z + 3.4 + ((idx*7)%3))
-      : new THREE.Vector3(anchor.x, 6 + (4 - w.stage)*4.2 + (idx%3)*.8, anchor.z);
+      ? new THREE.Vector3(anchor.x + sc.x, 1.05, anchor.z + 3.2 + sc.z)
+      : new THREE.Vector3(anchor.x + sc.x,
+                          6 + (4 - w.stage)*4.2 + (idx%3)*.8,
+                          anchor.z + sc.z);
     const igeo = new THREE.IcosahedronGeometry(landed? .95 : 1.05, 0);
     const mesh = diagramMesh(igeo, col);
     mesh.position.copy(pos);
