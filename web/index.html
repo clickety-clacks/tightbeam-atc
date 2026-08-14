@@ -47,7 +47,7 @@
 <div id="legend"></div>
 <div id="tip"></div>
 <div id="selcursor"></div>
-<div id="selui">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> &nbsp;·&nbsp; <span id="selcount">0</span> selected &nbsp;·&nbsp; [ ] resize · d clear · s exit</div>
+<div id="selui">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> &nbsp;·&nbsp; <span id="selcount">0</span> selected &nbsp;·&nbsp; [ ] resize · f fit · d clear · s exit</div>
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
@@ -521,6 +521,9 @@ addEventListener('keydown', e=>{
   else if (e.key==='d' || e.key==='D'){
     selected.clear(); reapplySelection();
   }
+  else if (e.key==='f' || e.key==='F' || e.key===' '){
+    if (fitSelection()) e.preventDefault();
+  }
   else if (e.key==='['){ setRadius(selRadius - Math.max(4, selRadius*.15)); }
   else if (e.key===']'){ setRadius(selRadius + Math.max(4, selRadius*.15)); }
 });
@@ -721,6 +724,27 @@ addEventListener('pointerup', () => {
   if (!selectMode) return;
   selecting = false; selOp = null; selCursor.classList.remove('unsel');
 }, true);
+
+/* fit the view around the current selection ('f' or space) */
+function fitSelection(){
+  const pts = [];
+  selectables().forEach(m => { const k = selKey(m); if (k && selected.has(k)) pts.push(m.position); });
+  if (!pts.length) return false;
+  const c = new THREE.Vector3();
+  pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
+  let r = 2.5; pts.forEach(v => r = Math.max(r, v.distanceTo(c)));
+  /* pull back far enough that the spread fits the narrower field of view */
+  const fov = camera.fov * Math.PI / 180;
+  const dist = (r / Math.tan(fov / 2)) / Math.min(1, camera.aspect) + 6;
+  const dir = camera.position.clone().sub(c);
+  if (dir.lengthSq() < .01) dir.set(1, .55, 1);
+  dir.normalize();
+  const camPos = c.clone().add(dir.multiplyScalar(dist));
+  camPos.y = Math.max(camPos.y, c.y + r * .5 + 3);
+  focused = true; userMoved = true;
+  flyTo(camPos, c.clone());
+  return true;
+}
 
 /* ---------- animate ---------- */
 const clock = new THREE.Clock();
