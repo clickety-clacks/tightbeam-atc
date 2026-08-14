@@ -200,17 +200,29 @@ open_items = [w for w in items if w["stage"] < 6][:240]
 landed = sorted((w for w in items if w["stage"] >= 6),
                 key=lambda w: w["closedAt"] or 0, reverse=True)[:16]
 
-# ---- recently fired wakes become the message pulses
-# creatorSessionKey is the true sender; origin is a role path, and
-# process:* wakes are substrate machinery, not agent-to-agent traffic
+# ---- traffic: every delivered message, not just wakes. Wakes are a small
+# subset; the messages table is where the conversation actually lives.
+# Senders are role paths, resolved through the roles table's binding.
+role_of = {"agent:" + r["name"]: r["boundSessionKey"]
+           for r in q("SELECT name, boundSessionKey FROM roles "
+                      "WHERE boundSessionKey IS NOT NULL")}
 msgs = []
-for r in q("""SELECT wakeId, creatorSessionKey, sessionKey FROM wakes
-              WHERE state='fired' AND firedAt > ?
-              ORDER BY firedAt DESC LIMIT 200""", NOW - 300000):
-    src = ids.get(r["creatorSessionKey"])
+for r in q("""SELECT id, sessionKey, sender FROM messages
+              WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 400""",
+           NOW - 300000):
     dst = ids.get(r["sessionKey"])
-    if src and dst and src != dst:
-        msgs.append({"id": r["wakeId"], "from": src, "to": dst})
+    if not dst:
+        continue
+    sender = r["sender"] or ""
+    if sender.startswith("agent:"):
+        src = ids.get(role_of.get(sender))
+        if not src or src == dst:
+            continue
+        msgs.append({"id": r["id"], "from": src, "to": dst, "kind": "agent"})
+    elif sender.startswith("user:"):
+        msgs.append({"id": r["id"], "to": dst, "kind": "user"})
+    else:                                   # process:* and the substrate itself
+        msgs.append({"id": r["id"], "to": dst, "kind": "substrate"})
 
 # ---- agent-level activity
 amap = {a["id"]: a for a in agents}
