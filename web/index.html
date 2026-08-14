@@ -291,6 +291,7 @@ function msgCurve(a,b){
    manufactured traffic. New wakes in a batch are staggered a little so a
    burst reads as a burst, not a single clump. */
 const seenWakes = new Map();
+let firstWakeBatch = true;
 function spawnWakes(){
   if (!DATA || !DATA.messages) return;
   const now = Date.now();
@@ -304,8 +305,9 @@ function spawnWakes(){
       const pu = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:T.pulse, transparent:true}));
       pu.userData={curve:msgCurve(m.from,m.to), t:0};
       scene.add(pu); pulses.push(pu);
-    }, Math.random()*3000);
+    }, Math.random()*(firstWakeBatch ? 20000 : 1500));
   });
+  firstWakeBatch = false;
 }
 
 /* ---------- live feed ---------- */
@@ -438,7 +440,7 @@ function tickFrame(){
     if (l.userData.state==='run') l.material.opacity = .65 + Math.sin(t*4+(m.userData.phase||0))*.3;
   });
   for (let i=pulses.length-1;i>=0;i--){
-    const p=pulses[i]; p.userData.t += .012;
+    const p=pulses[i]; p.userData.t += .0055;
     if (p.userData.t>=1){ scene.remove(p); pulses.splice(i,1); continue; }
     p.position.copy(p.userData.curve.getPoint(p.userData.t));
     p.material.opacity = 1-p.userData.t;
