@@ -75,6 +75,7 @@ const THEMES = {
     grid1:0x2a2d31, grid2:0x1c1f23,
     stage:[0xc4453c,0xc97b35,0xc9a835,0xa3b23c,0x6fae4e,0x3f9d63,0x2c7a4b],
     kind:{main:0xb08d57,po:0xa58968,patrol:0xc9a835,orch:0x8a8f96,coder:0x7f8890,rev:0x6b7684,spec:0x91836b},
+    liveHot:0x3d8fd6, liveCold:0x4e545c,
     retired:0x33363a, arcA:0xb08d57, arcB:0x22252a,
     tetherRun:0x6fae4e, tetherWait:0xc9a835, tetherSched:0xb9bfc7, pulse:0xb08d57, pulseSub:0x5f6670, pulseUser:0x6f9ecf,
     discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63, shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
@@ -87,6 +88,7 @@ const THEMES = {
     grid1:0xa9bccf, grid2:0xd8dfe6,
     stage:[0xc23b22,0xd07a2a,0xc9a227,0x8a9a2e,0x4e8a4e,0x2e7d5b,0x1f5e46],
     kind:{main:0xc23b22,po:0xb06a3b,patrol:0xc9a227,orch:0x5c6b78,coder:0x6e7b87,rev:0x52616e,spec:0x7a6a4f},
+    liveHot:0x2f6fb5, liveCold:0xaab3bc,
     retired:0xcdc7b8, arcA:0x26323c, arcB:0xd8dfe6,
     tetherRun:0x2e7d4f, tetherWait:0xb8860b, tetherSched:0x1b232b, pulse:0xc23b22, pulseSub:0x8a97a3, pulseUser:0x3d6ea8,
     discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3, shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
@@ -250,7 +252,9 @@ function renderLegend(){
     `<span style="margin-left:12px;color:${hx(T.tetherSched)}">━ faint: holds an open card, no turn</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow: turn queued, not started</span>` +
     `<span style="margin-left:12px">hedron flashing = turn waiting · strobing shell = turn running · agent discs flash the same way</span>` +
-    `<br><span>flat discs = agents, hanging below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
+    `<br><span style="color:${hx(T.liveHot)}">● blue agent = acted just now</span>` +
+    `<span style="margin-left:8px;color:${hx(T.liveCold)}">● grey = idle an hour or more</span>` +
+    `<span style="margin-left:10px">discs hang below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
     `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = reviewed, not merged yet</span>` +
     `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = in the branch. we have landed</span>` +
     `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = nothing to merge</span>` +
@@ -287,7 +291,12 @@ function buildGround(agents){
   agents.forEach(a=>{
     const d = DEPTH[a.id] ?? 2;
     const r = (KIND_R[a.kind] || KIND_R.coder) * 1.9 * Math.pow(.72, d);
-    const col = a.retired ? T.retired : (T.kind[a.kind] ?? T.kind.coder);
+    /* colour is recency, not role: solid blue when it has just acted,
+       fading to grey by an hour idle. A name is a guess; a timestamp is a fact. */
+    const IDLE_FULL = 3600;
+    const age = (a.idleFor == null) ? IDLE_FULL : Math.min(a.idleFor, IDLE_FULL);
+    const col = a.retired ? T.retired
+      : new THREE.Color(T.liveHot).lerp(new THREE.Color(T.liveCold), age / IDLE_FULL).getHex();
     const geo = new THREE.CircleGeometry(Math.max(r, .45), 40).rotateX(-Math.PI/2);
     const m = diagramMesh(geo, col);
     m.position.copy(APOS[a.id]); m.position.y += .04;

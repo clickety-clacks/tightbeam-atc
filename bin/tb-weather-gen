@@ -109,6 +109,21 @@ def merged_in_branch(refs):
     if all(v is None for v in seen): return None    # unverifiable, not absent
     return False
 
+NOW = int(time.time() * 1000)
+
+# ---- when did each session last actually do anything? Role keywords are a
+# guess at a name; this is a fact. Turns and attests are the two places a
+# session leaves a timestamp when it acts.
+last_act = {}
+def _mark(key, ts):
+    if key and ts and ts > last_act.get(key, 0):
+        last_act[key] = ts
+for r in q("""SELECT sessionKey, max(coalesce(endedAt, startedAt, createdAt)) AS t
+              FROM turns GROUP BY sessionKey"""):
+    _mark(r["sessionKey"], r["t"])
+for r in q("SELECT bySession, max(ts) AS t FROM attests GROUP BY bySession"):
+    _mark(r["bySession"], r["t"])
+
 # ---- agents: active sessions, plus retired ones still holding open cards
 rows = q("SELECT sessionKey, displayName, state, spawnedBy FROM sessions")
 holders_open = {r["holderKey"] for r in q(
@@ -130,6 +145,7 @@ for k, r in sess.items():
         "parent": ids.get(r["spawnedBy"]),
         "retired": r["state"] != "active",
         "turn": None,
+        "idleFor": (NOW - last_act[k]) // 1000 if k in last_act else None,
     })
 mains = [a for a in agents if a["kind"] == "main"]
 root = mains[0]["id"] if mains else (agents[0]["id"] if agents else None)
@@ -138,7 +154,6 @@ for a in agents:
         a["parent"] = root
 
 # ---- turn activity
-NOW = int(time.time() * 1000)
 running_sessions = {r["sessionKey"] for r in q(
     "SELECT DISTINCT sessionKey FROM turns WHERE startedAt IS NOT NULL AND endedAt IS NULL")}
 item_running = {}
