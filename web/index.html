@@ -635,6 +635,7 @@ addEventListener('pointerup', e=>{
   const hit = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], false)[0];
   if (hit && hit.object.userData.type){
     const o = hit.object;
+    camMark = null;                       /* the click moved us; the old mark is stale */
     const k = selKey(o);
     if (view.focus.key && view.focus.key === k) view.focus.stage = view.focus.stage === 1 ? 2 : 1;
     else { view.focus.key = k; view.focus.stage = 1; }
@@ -873,15 +874,12 @@ function fitSelection(){
   });
   if (!focusPts.length){ const fm = focusMesh(); if (fm) focusPts.push(fm.position); }
 
-  /* f/space is a two-state toggle: in on the selection, back out to whatever
-     focus mode is currently showing. It never jumps to the whole org — leaving
-     the view entirely is what a background click is for. */
-  const haveSel = selPts.length > 0, haveFocus = focusPts.length > 0;
-  if (haveSel && haveFocus)
-    view.fitTarget = view.fitTarget === 'selection' ? 'focus' : 'selection';
-  else
-    view.fitTarget = haveSel ? 'selection' : 'focus';
-  let pts = view.fitTarget === 'selection' ? selPts : focusPts;
+  /* The selection always wins: f goes to what you brushed, and only falls back
+     to the focus when nothing is brushed. Getting back out is the bookmark
+     above, not a second framing — a toggle here fought that and could send the
+     first press to the view you were already looking at. */
+  view.fitTarget = selPts.length ? 'selection' : 'focus';
+  let pts = selPts.length ? selPts : focusPts;
   if (!pts.length){ pts = []; selectables().forEach(m => pts.push(m.position)); }
   if (!pts.length) return false;
   const c = new THREE.Vector3();
