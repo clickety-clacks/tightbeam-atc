@@ -658,6 +658,7 @@ addEventListener('pointerup', e=>{
       flyTo(camPos, pt);
     }
   } else if (view.framing !== 'none'){
+    camMark = null;
     clearFocus();
     const ang = Math.atan2(camera.position.x, camera.position.z);
     const home = new THREE.Vector3(Math.sin(ang)*66, 34, Math.cos(ang)*66);
@@ -666,6 +667,7 @@ addEventListener('pointerup', e=>{
       userMoved = false;
     });
   } else {
+    camMark = null;
     clearFocus();
     /* user had hand-rotated: resume the tabletop spin exactly where they left it */
     const d = camera.position.clone().sub(controls.target);
@@ -831,8 +833,32 @@ addEventListener('pointerup', () => {
   selecting = false; selOp = null; selCursor.classList.remove('unsel');
 }, true);
 
-/* fit the view around the current selection ('f' or space) */
+/* f/space is a round trip: the first press remembers exactly where the camera
+   was — position, target, and the ambient orbit's angle, radius, height and
+   centre — then flies to the selection. The next press restores all of it, so
+   you land back in the same zoom, pan and rotation you left, still turning if
+   it was turning. */
+let camMark = null;
+function markCamera(){
+  camMark = {
+    pos: camera.position.clone(), tgt: controls.target.clone(),
+    orbitAngle, orbitR, orbitH, orbitTgt: orbitTgt.clone(),
+    userMoved, framing: view.framing, fitTarget: view.fitTarget,
+  };
+}
+function restoreCamera(){
+  const m = camMark; camMark = null;
+  view.framing = 'restoring';
+  userMoved = true;
+  flyTo(m.pos, m.tgt, () => {
+    orbitAngle = m.orbitAngle; orbitR = m.orbitR; orbitH = m.orbitH;
+    orbitTgt.copy(m.orbitTgt);
+    userMoved = m.userMoved; view.framing = m.framing; view.fitTarget = m.fitTarget;
+  });
+  return true;
+}
 function fitSelection(){
+  if (camMark) return restoreCamera();      /* second press: go back */
   /* f/space toggles between the two framings: whatever focus mode is showing,
      and the brushed selection. With only one of them available it just frames
      that one, and with neither it frames the whole org. */
@@ -872,13 +898,14 @@ function fitSelection(){
   camPos.y = Math.max(camPos.y, c.y + r * .5 + 3);
   /* hand the ambient orbit a new centre so it carousels around the selection
      once the flight lands, instead of resuming around the org's root */
+  markCamera();                                /* first press: remember here */
   flyTo(camPos, c.clone(), () => {
     const d = camPos.clone().sub(c);
     orbitR = Math.hypot(d.x, d.z);
     orbitH = d.y;
     orbitAngle = Math.atan2(d.x, d.z);
     orbitTgt.copy(c);
-    view.framing = 'none'; userMoved = false;   /* orbit resumes around what we framed */
+    userMoved = false;                         /* orbit carries on around what we framed */
   });
   view.framing = view.fitTarget; userMoved = true;
   return true;
@@ -895,7 +922,7 @@ function tickFrame(){
     camera.position.lerpVectors(flight.p0, flight.p1, e);
     controls.target.lerpVectors(flight.t0, flight.t1, e);
     if (flight.k >= 1){ flight.after?.(); flight = null; }
-  } else if (!userMoved && view.framing==='none' && view.input!=='brush'){
+  } else if (!userMoved && view.framing!=='restoring' && view.input!=='brush'){
     orbitAngle += .00085;
     camera.position.set(orbitTgt.x + Math.sin(orbitAngle)*orbitR,
                         orbitTgt.y + orbitH,
