@@ -86,19 +86,26 @@ try:
 except Exception:
     equiv_cache = {}
 
-def patch_equivalent(c):
+def probe(c):
+    """True: equivalent content is on the branch. False: it is not.
+    None: the commit is not in this clone, so nothing can be concluded."""
     if c in equiv_cache: return equiv_cache[c]
-    ok = git("cat-file", "-e", c + "^{commit}").returncode == 0
-    hit = ok and git("cherry", BRANCH, c, c + "~1").stdout.strip().startswith("-")
-    equiv_cache[c] = hit
-    return hit
+    if git("cat-file", "-e", c + "^{commit}").returncode != 0:
+        r = None
+    else:
+        r = git("cherry", BRANCH, c, c + "~1").stdout.strip().startswith("-")
+    equiv_cache[c] = r
+    return r
 
 def merged_in_branch(refs):
     if not branch_shas or not refs: return None     # detection unavailable
     for c in refs:
         if c in branch_shas or c[:12] in branch_pfx: return True
         if len(c) < 12 and any(s.startswith(c) for s in branch_shas): return True
-    return any(patch_equivalent(c) for c in refs)
+    seen = [probe(c) for c in refs]
+    if any(v is True for v in seen): return True
+    if all(v is None for v in seen): return None    # unverifiable, not absent
+    return False
 
 # ---- agents: active sessions, plus retired ones still holding open cards
 rows = q("SELECT sessionKey, displayName, state, spawnedBy FROM sessions")
@@ -219,7 +226,7 @@ if DEST:
     if KEY: cmd += ["-i", KEY, "-o", "IdentitiesOnly=yes"]
     subprocess.run(cmd + [OUT, DEST], check=True)
 pending = [w for w in open_items
-           if w["stage"] >= 5 and w["code"] and w["merged"] is not True]
+           if w["stage"] >= 5 and w["code"] and w["merged"] is False]
 print(f"snapshot: {len(agents)} agents, {len(open_items)} open, "
       f"{len(landed)} landed, {len(msgs)} msgs, "
       f"{len(pending)} awaiting a real merge")

@@ -166,7 +166,7 @@ function renderLegend(){
     `<span style="margin-left:12px">hedron flashing = turn waiting · strobing shell = turn running · agent discs flash the same way</span>` +
     `<br><span>flat discs = agents, hanging below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
     `<span style="margin-left:10px;color:${hx(T.discY)}">yellow floor disc = code not in the branch yet</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discN)}">gray floor disc = nothing to merge, awaiting closure</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discN)}">gray floor disc = nothing to merge or nothing verifiable</span>` +
     `<span style="margin-left:10px;color:${hx(T.discG)}">green floor disc = in the branch. we have landed</span>` +
     `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring = orphaned</span>` +
     `<span style="margin-left:10px;color:${hx(T.pulse)}">pulses = wakes (agent → agent)</span>`;
@@ -250,8 +250,10 @@ function buildItems(items){
     if (landed){
       /* green: the code is in. yellow: code that is not in yet.
          neutral: nothing to merge, the item just needs closing. */
+      /* yellow is reserved for work proven to be off the branch; anything
+         unverifiable or non-code is neutral, not a pending merge */
       const dcol = (w.stage>=6 || w.merged===true) ? T.discG
-                 : (w.code === false)              ? T.discN : T.discY;
+                 : (w.code && w.merged===false)    ? T.discY : T.discN;
       const dgeo = new THREE.CylinderGeometry(1.65,1.75,.14,24);
       const disc = diagramMesh(dgeo, dcol);
       disc.position.set(pos.x,.07,pos.z);
@@ -412,7 +414,7 @@ addEventListener('pointermove', e=>{
       +(w.stage>=5&&w.stage<6&&w.merged===true?'<div>in the branch · awaiting closure</div>':'')
       +(w.stage>=5&&w.stage<6&&w.code===false?'<div>no code to merge · awaiting closure</div>':'')
       +(w.stage>=5&&w.code!==false&&w.merged===false?'<div>NOT in the branch · merge pending</div>':'')
-      +(w.stage>=5&&w.code!==false&&w.merged==null?'<div>no commit recorded on this item</div>':'')
+      +(w.stage>=5&&w.stage<6&&w.code&&w.merged==null?'<div>no commit that resolves in the repo · cannot verify</div>':'')
       +'<div class="seg">'+segs+'</div><div style="margin-top:4px" class="seg">'+acts+'</div>';
   } else {
     const a=u.a;
