@@ -54,7 +54,7 @@ const THEMES = {
     kind:{main:0xb08d57,po:0xa58968,patrol:0xc9a835,orch:0x8a8f96,coder:0x7f8890,rev:0x6b7684,spec:0x91836b},
     retired:0x33363a, arcA:0xb08d57, arcB:0x22252a,
     tetherRun:0x6fae4e, tetherWait:0xc9a835, pulse:0xb08d57,
-    discY:0xc9a835, discG:0x2c7a4b, shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
+    discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63, shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
     flashRun:0x6fae4e, flashWait:0xc9a835,
     metalness:.55, roughness:.3, agentMetal:.75, agentRough:.35, baseEmissive:.25, edges:false,
     amb:0x8a8a92, keyC:0xfff2dd, rimC:0x5b7285,
@@ -66,7 +66,7 @@ const THEMES = {
     kind:{main:0xc23b22,po:0xb06a3b,patrol:0xc9a227,orch:0x5c6b78,coder:0x6e7b87,rev:0x52616e,spec:0x7a6a4f},
     retired:0xcdc7b8, arcA:0x26323c, arcB:0xd8dfe6,
     tetherRun:0x2e7d4f, tetherWait:0xb8860b, pulse:0xc23b22,
-    discY:0xc9a227, discG:0x2e7d5b, shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
+    discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3, shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
     flashRun:0x2e7d4f, flashWait:0xb8860b,
     metalness:.05, roughness:.85, agentMetal:.05, agentRough:.9, baseEmissive:.0, edges:true,
     amb:0xffffff, keyC:0xfff8ec, rimC:0xb8c7d9,
@@ -165,7 +165,8 @@ function renderLegend(){
     `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow edge: turn waiting</span>` +
     `<span style="margin-left:12px">hedron flashing = turn waiting · strobing shell = turn running · agent discs flash the same way</span>` +
     `<br><span>flat discs = agents, hanging below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow floor disc = not in the branch yet</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow floor disc = code not in the branch yet</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discN)}">gray floor disc = nothing to merge, awaiting closure</span>` +
     `<span style="margin-left:10px;color:${hx(T.discG)}">green floor disc = in the branch. we have landed</span>` +
     `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring = orphaned</span>` +
     `<span style="margin-left:10px;color:${hx(T.pulse)}">pulses = wakes (agent → agent)</span>`;
@@ -247,7 +248,10 @@ function buildItems(items){
     Object.assign(mesh.userData, {type:'item', w, phase:idx*1.3, landed, baseY: landed? null : pos.y});
     itemGroup.add(mesh); itemMeshes.push(mesh);
     if (landed){
-      const dcol = (w.stage>=6 || w.merged) ? T.discG : T.discY;
+      /* green: the code is in. yellow: code that is not in yet.
+         neutral: nothing to merge, the item just needs closing. */
+      const dcol = (w.stage>=6 || w.merged===true) ? T.discG
+                 : (w.code === false)              ? T.discN : T.discY;
       const dgeo = new THREE.CylinderGeometry(1.65,1.75,.14,24);
       const disc = diagramMesh(dgeo, dcol);
       disc.position.set(pos.x,.07,pos.z);
@@ -406,7 +410,9 @@ addEventListener('pointermove', e=>{
     tip.innerHTML = '<div class="t">'+w.id+' — '+w.title+'</div>'
       +'<div>'+STAGE_NAMES[w.stage]+(!(w.holders||[]).length?' · ORPHANED':'')+'</div>'
       +(w.stage>=5&&w.stage<6&&w.merged===true?'<div>in the branch · awaiting closure</div>':'')
-      +(w.stage>=5&&w.merged===false?'<div>NOT in the branch · merge pending</div>':'')
+      +(w.stage>=5&&w.stage<6&&w.code===false?'<div>no code to merge · awaiting closure</div>':'')
+      +(w.stage>=5&&w.code!==false&&w.merged===false?'<div>NOT in the branch · merge pending</div>':'')
+      +(w.stage>=5&&w.code!==false&&w.merged==null?'<div>no commit recorded on this item</div>':'')
       +'<div class="seg">'+segs+'</div><div style="margin-top:4px" class="seg">'+acts+'</div>';
   } else {
     const a=u.a;

@@ -65,6 +65,16 @@ if REPO and Path(REPO, ".git").exists():
     branch_shas = set(out)
     branch_pfx = {s[:12] for s in out}
 
+# which items ever produced code? a ruling or a recon has nothing to merge,
+# so it must not read as a pending merge. assignment_effects is optional.
+try:
+    code_items = {r["workItemId"] for r in q(
+        """SELECT DISTINCT a.workItemId FROM assignment_effects e
+           JOIN assignments a ON a.id = e.assignmentId
+           WHERE e.effectKind IN ('code','release','live_mutation')""")}
+except sqlite3.Error:
+    code_items = None                       # unavailable: treat every item as code
+
 def merged_in_branch(refs):
     if not branch_shas or not refs: return None     # detection unavailable
     for c in refs:
@@ -156,7 +166,8 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
         elif sk in pending: turns[ids[sk]] = "wait"
     items.append({"id": wid[:11], "title": (r["title"] or "")[:60],
                   "stage": stage, "holders": holders, "turns": turns,
-                  "closedAt": closed_at, "merged": merged_in_branch(refs)})
+                  "closedAt": closed_at, "merged": merged_in_branch(refs),
+                  "code": True if code_items is None else wid in code_items})
 # show the whole open sky so drainage is visible; landings by closure recency
 open_items = [w for w in items if w["stage"] < 6][:240]
 landed = sorted((w for w in items if w["stage"] >= 6),
@@ -187,7 +198,8 @@ if DEST:
     cmd = ["scp", "-q"]
     if KEY: cmd += ["-i", KEY, "-o", "IdentitiesOnly=yes"]
     subprocess.run(cmd + [OUT, DEST], check=True)
-pending = [w for w in open_items if w["stage"] >= 5 and w["merged"] is False]
+pending = [w for w in open_items
+           if w["stage"] >= 5 and w["code"] and w["merged"] is not True]
 print(f"snapshot: {len(agents)} agents, {len(open_items)} open, "
       f"{len(landed)} landed, {len(msgs)} msgs, "
       f"{len(pending)} awaiting a real merge")
