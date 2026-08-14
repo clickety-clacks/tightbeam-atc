@@ -203,7 +203,10 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
     items.append({"id": wid[:11], "title": (r["title"] or "")[:60],
                   "stage": stage, "holders": holders, "turns": turns, "flow": flow,
                   "closedAt": closed_at, "merged": merged_in_branch(refs),
-                  "code": True if code_items is None else wid in code_items})
+                  # a recorded commit is proof of code, whatever the effect
+                  # tags say — effect kinds are advisory and often incomplete
+                  "code": True if code_items is None
+                          else (wid in code_items or bool(refs))})
 # show the whole open sky so drainage is visible; landings by closure recency
 open_items = [w for w in items if w["stage"] < 6][:240]
 landed = sorted((w for w in items if w["stage"] >= 6),
