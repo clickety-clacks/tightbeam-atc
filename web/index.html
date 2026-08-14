@@ -525,16 +525,13 @@ async function refresh(){
 addEventListener('keydown', e=>{
   if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
   else if (e.key==='s' || e.key==='S'){ setSelectMode(!selectMode); }
-  else if (e.key==='d' || e.key==='D'){
-    selected.clear(); reapplySelection();
-    focusObj = null; focusStage = 0; hiAgents = hiItems = null;
-  }
+  else if (e.key==='d' || e.key==='D'){ selected.clear(); reapplySelection(); }
   else if (e.key==='Escape'){
     focusObj = null; focusStage = 0; hiAgents = hiItems = null;
     if (selectMode) setSelectMode(false);
   }
   else if (e.key==='f' || e.key==='F' || e.key===' '){
-    if (fitSelection()) e.preventDefault();
+    e.preventDefault(); fitSelection();
   }
   else if (e.key==='['){ setRadius(selRadius - Math.max(4, selRadius*.15)); }
   else if (e.key===']'){ setRadius(selRadius + Math.max(4, selRadius*.15)); }
@@ -707,7 +704,6 @@ function paintAt(px, py){
 }
 function setSelectMode(on){
   selectMode = on;
-  if (on){ focusObj = null; focusStage = 0; hiAgents = hiItems = null; }
   controls.enabled = !on;
   selUI.classList.toggle('off', !on);
   selCursor.style.display = on ? 'block' : 'none';
@@ -742,6 +738,8 @@ addEventListener('pointerup', () => {
 function fitSelection(){
   const pts = [];
   selectables().forEach(m => { const k = selKey(m); if (k && selected.has(k)) pts.push(m.position); });
+  if (!pts.length && focusObj) pts.push(focusObj.position);      /* nothing brushed: frame the focus */
+  if (!pts.length) selectables().forEach(m => pts.push(m.position));  /* nothing at all: frame the org */
   if (!pts.length) return false;
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
