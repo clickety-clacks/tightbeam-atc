@@ -96,6 +96,10 @@ scene.add(groundGroup, itemGroup, tetherGroup);
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [];
 let flight = null, focused = false, orbitAngle = 0;
 const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0);
+/* ambient tabletop orbit — parameterized so it can resume from any framing
+   the user has dragged the camera into, not just the canonical home view */
+let orbitR = 66, orbitH = 36;
+const orbitTgt = HOME_TGT.clone();
 function flyTo(pos, target, after){
   flight = {p0:camera.position.clone(), p1:pos.clone(),
             t0:controls.target.clone(), t1:target.clone(), k:0, after};
@@ -365,11 +369,21 @@ addEventListener('pointerup', e=>{
     const camPos = pt.clone().add(dir); camPos.y = pt.y + 4.5;
     focused = true; userMoved = true;
     flyTo(camPos, pt);
-  } else {
+  } else if (focused){
     focused = false;
     const ang = Math.atan2(camera.position.x, camera.position.z);
     const home = new THREE.Vector3(Math.sin(ang)*66, 34, Math.cos(ang)*66);
-    flyTo(home, HOME_TGT, ()=>{ orbitAngle = ang; userMoved = false; });
+    flyTo(home, HOME_TGT, ()=>{
+      orbitAngle = ang; orbitR = 66; orbitH = 36; orbitTgt.copy(HOME_TGT);
+      userMoved = false;
+    });
+  } else {
+    /* user had hand-rotated: resume the tabletop spin exactly where they left it */
+    const d = camera.position.clone().sub(controls.target);
+    orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+    orbitAngle = Math.atan2(d.x, d.z);
+    orbitTgt.copy(controls.target);
+    userMoved = false;
   }
 });
 
@@ -414,8 +428,10 @@ function tickFrame(){
     if (flight.k >= 1){ flight.after?.(); flight = null; }
   } else if (!userMoved && !focused){
     orbitAngle += .00085;
-    camera.position.set(Math.sin(orbitAngle)*66, 34, Math.cos(orbitAngle)*66);
-    controls.target.copy(HOME_TGT); camera.lookAt(HOME_TGT);
+    camera.position.set(orbitTgt.x + Math.sin(orbitAngle)*orbitR,
+                        orbitTgt.y + orbitH,
+                        orbitTgt.z + Math.cos(orbitAngle)*orbitR);
+    controls.target.copy(orbitTgt); camera.lookAt(orbitTgt);
   }
   groundGroup.children.forEach(m=>{
     const u=m.userData;
