@@ -174,7 +174,8 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
     wid = r["id"]
     hs = q("SELECT DISTINCT holderKey FROM assignments WHERE workItemId=? AND state='open'", wid)
     holders = [ids[h["holderKey"]] for h in hs if h["holderKey"] in ids]
-    ev = q("""SELECT t.kind, t.verdictKind, t.commitRefs FROM attests t
+    ev = q("""SELECT t.kind, t.verdictKind, t.commitRefs, t.ts,
+                     a.reviewsAssignmentId AS reviews FROM attests t
               JOIN assignments a ON a.id=t.assignmentId WHERE a.workItemId=?""", wid)
     refs = set()
     for e in ev:
@@ -193,7 +194,20 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
         if "tests-passed" in verd: stage = 2
         if "completion" in kinds: stage = 3
         if verd & {"reviewed-clean", "spec-reviewed", "verified"}: stage = 4
-        if "completion" in kinds and "reviewed-clean" in verd: stage = 5
+        # A review only clears the work it actually saw. If the producer filed
+        # again after the last reviewed-clean, that verdict is stale and the
+        # item is back in review, not ready to merge.
+        last_clean = max((e["ts"] for e in ev if e["verdictKind"] == "reviewed-clean"),
+                         default=None)
+        # only the PRODUCER's completions count: a reviewer files one to close
+        # its own review card, which would make every reviewed item look stale
+        last_done = max((e["ts"] for e in ev
+                         if e["kind"] == "completion" and e["reviews"] is None),
+                        default=None)
+        stale_review = (last_clean is not None and last_done is not None
+                        and last_done > last_clean)
+        if "completion" in kinds and "reviewed-clean" in verd and not stale_review:
+            stage = 5
     # green = a turn is executing on this card; yellow = a turn is queued for it
     turns, turn_sk = {}, {}
     for sk in item_run.get(wid, ()):
