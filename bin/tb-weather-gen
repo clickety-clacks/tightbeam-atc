@@ -183,16 +183,25 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
         if "completion" in kinds: stage = 3
         if verd & {"reviewed-clean", "spec-reviewed", "verified"}: stage = 4
         if "completion" in kinds and "reviewed-clean" in verd: stage = 5
-    turns = {}
+    turns, turn_sk = {}, {}
     for sk in item_running.get(wid, set()):
-        if sk in ids: turns[ids[sk]] = "run"
+        if sk in ids:
+            turns[ids[sk]] = "run"; turn_sk[ids[sk]] = sk
     for h in hs:
         sk = h["holderKey"]
         if sk not in ids or ids[sk] in turns: continue
-        if sk in running_sessions: turns[ids[sk]] = "run"
-        elif sk in pending: turns[ids[sk]] = "wait"
+        if sk in running_sessions: turns[ids[sk]] = "run"; turn_sk[ids[sk]] = sk
+        elif sk in pending: turns[ids[sk]] = "wait"; turn_sk[ids[sk]] = sk
+    # which way the waiting prompt flows. "in" = toward this agent (it owes the
+    # turn); "out" = the item is waiting on someone else. When prompts are
+    # pending in both directions the earliest dueAt wins.
+    imminent = q("""SELECT sessionKey FROM wakes WHERE state='pending'
+                    AND work_item_id=? ORDER BY dueAt LIMIT 1""", wid)
+    tgt = imminent[0]["sessionKey"] if imminent else None
+    flow = {aid: ("in" if (tgt is None or sk == tgt) else "out")
+            for aid, sk in turn_sk.items()}
     items.append({"id": wid[:11], "title": (r["title"] or "")[:60],
-                  "stage": stage, "holders": holders, "turns": turns,
+                  "stage": stage, "holders": holders, "turns": turns, "flow": flow,
                   "closedAt": closed_at, "merged": merged_in_branch(refs),
                   "code": True if code_items is None else wid in code_items})
 # show the whole open sky so drainage is visible; landings by closure recency

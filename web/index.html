@@ -273,11 +273,22 @@ function buildItems(items){
     if (act==='wait' && w.stage<6) mesh.userData.waitFlash = true;
     Object.entries(w.turns||{}).forEach(([hid,st])=>{
       if (!byId[hid] || byId[hid].retired) return;
-      const line = new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints([mesh.position, APOS[hid].clone().add(new THREE.Vector3(0,.25,0))]),
-        new THREE.LineBasicMaterial({color: st==='run'?T.tetherRun:T.tetherWait, transparent:true, opacity: st==='run'? .9:.45}));
-      line.userData={itemMesh:mesh, hid, state:st};
-      tetherGroup.add(line);
+      const col = st==='run' ? T.tetherRun : T.tetherWait;
+      /* fat line, double the diagram stroke, so an active tether reads as
+         attention rather than structure */
+      const lm = new LineMaterial({color:col, linewidth:4, transparent:true, opacity:.8});
+      lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
+      const lg = new LineSegmentsGeometry().setPositions([0,0,0, 0,0,0]);
+      const seg = new LineSegments2(lg, lm);
+      seg.frustumCulled = false;
+      seg.userData = {itemMesh:mesh, hid, state:st,
+                      dir:(w.flow||{})[hid] || 'in', mat:lm, geo:lg};
+      tetherGroup.add(seg);
+      /* a bead runs the tether in the direction the waiting prompt travels */
+      const bead = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:col, transparent:true}));
+      bead.scale.setScalar(st==='run' ? .95 : .75);
+      bead.userData = {tether:seg, t:Math.random()};
+      tetherGroup.add(bead);
     });
     if (w.stalled){
       const halo = new THREE.Mesh(new THREE.RingGeometry(1.5,1.85,32),
@@ -499,13 +510,29 @@ function tickFrame(){
       if (ch.userData.act==='run'){ ch.material.opacity = .04 + (0.5+0.5*Math.sin(t*2.2))*.18; }
     });
   });
-  tetherGroup.children.forEach(l=>{
-    const m=l.userData.itemMesh;
-    /* tether ends on the agent itself, which hangs below the grid — not on
-       the grid above it */
-    if (APOS[l.userData.hid]) l.geometry.setFromPoints([m.position,
-      APOS[l.userData.hid].clone().add(new THREE.Vector3(0,.25,0))]);
-    if (l.userData.state==='run') l.material.opacity = .65 + Math.sin(t*4+(m.userData.phase||0))*.3;
+  const _end = new THREE.Vector3();
+  tetherGroup.children.forEach(o=>{
+    const u = o.userData;
+    if (u.geo){                                   /* the fat tether itself */
+      const a = APOS[u.hid]; if (!a) return;
+      const p = u.itemMesh.position;
+      _end.copy(a).add(new THREE.Vector3(0,.25,0));
+      u.geo.setPositions([p.x,p.y,p.z, _end.x,_end.y,_end.z]);
+      const fast = u.state==='run';
+      u.mat.opacity = (fast ? .5 : .3) +
+        Math.abs(Math.sin(t*(fast?6:3) + (u.itemMesh.userData.phase||0))) * .45;
+    } else if (u.tether){                         /* the direction bead */
+      const tu = u.tether.userData, a = APOS[tu.hid];
+      if (!a){ o.visible = false; return; }
+      o.visible = true;
+      const p = tu.itemMesh.position;
+      _end.copy(a).add(new THREE.Vector3(0,.25,0));
+      /* "in": the prompt is heading to this agent, so it runs item → agent */
+      const from = tu.dir==='in' ? p : _end, to = tu.dir==='in' ? _end : p;
+      u.t = (u.t + (tu.state==='run' ? .014 : .007)) % 1;
+      o.position.lerpVectors(from, to, u.t);
+      o.material.opacity = .95 * (1 - Math.abs(u.t - .5) * 1.2);
+    }
   });
   for (let i=msgLines.length-1;i>=0;i--){
     const l = msgLines[i], u = l.userData;
