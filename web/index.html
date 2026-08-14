@@ -245,6 +245,7 @@ function buildGround(agents){
     m.userData.type='agent'; m.userData.a=a; m.userData.phase=Math.random()*6.28;
     if (!a.retired && a.turn==='run'){ m.userData.lineMat.color.setHex(T.flashRun); m.userData.flash='run'; }
     else if (!a.retired && a.turn==='wait'){ m.userData.lineMat.color.setHex(T.flashWait); m.userData.flash='wait'; }
+    m.userData.baseStroke.copy(m.userData.lineMat.color);   /* ghosting shades from here */
     /* label the named layer — Main, owners, patrols, orchestrators;
        the leaf-worker crowd stays tooltip-only */
     if (!a.retired && ['main','po','patrol','orch'].includes(a.kind)){
@@ -277,8 +278,8 @@ function buildLinks(links){
     if (!APOS[l.from] || !APOS[l.to]) return;
     if (!byId[l.from] || !byId[l.to]) return;
     const col = l.state === 'run' ? T.tetherRun : T.tetherWait;
-    const lm = new LineMaterial({color:0xffffff, linewidth:1.6, transparent:true,
-                                 opacity:.4, vertexColors:true});
+    const lm = new LineMaterial({color:0xffffff, linewidth:2.6, transparent:true,
+                                 opacity:.5, vertexColors:true});
     lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
     const lg = new LineSegmentsGeometry()
       .setPositions(new Array(TETHER_SEGS*6).fill(0))
@@ -337,7 +338,7 @@ function buildItems(items){
       const col = st==='run' ? T.tetherRun : T.tetherWait;
       /* the tether is subdivided so a brightness wave can travel INSIDE it,
          showing direction without adding a separate object */
-      const lm = new LineMaterial({color:col, linewidth:1.6, transparent:true, opacity:.55});
+      const lm = new LineMaterial({color:col, linewidth:1.6, transparent:true, opacity:.4});
       lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
       const lg = new LineSegmentsGeometry().setPositions([0,0,0, 0,0,0]);
       const seg = new LineSegments2(lg, lm);
@@ -523,6 +524,10 @@ addEventListener('pointermove', e=>{
   if (!hit){ tip.style.display='none'; return; }
   const u = hit.object.userData;
   if (!u.type){ tip.style.display='none'; return; }
+  if (focusStage === 2 && hiAgents){          /* outside the neighbourhood: dead to hover */
+    const inside = u.type === 'item' ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
+    if (!inside){ tip.style.display='none'; return; }
+  }
   tip.style.display='block'; tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY+10)+'px';
   if (u.type==='item'){
     const w=u.w;
@@ -575,12 +580,13 @@ function tickFrame(){
     if (u.a){
       const f = fa(u.a.id);
       shade(m.material, u.baseFill, f);
-      if (u.lineMat && !u.flash) shade(u.lineMat, u.baseStroke, f);
+      if (u.lineMat) shade(u.lineMat, u.baseStroke, f);
+      u.dim = f;
       m.children.forEach(ch => { if (ch.isSprite) ch.material.opacity = .85 * f; });
     }
     if (u && u.flash && u.lineMat){
       const fast = u.flash==='run';
-      u.lineMat.opacity = .18 + (0.5+0.5*Math.sin(t*(fast?5.5:2.2)+u.phase)) * .55;
+      u.lineMat.opacity = (.18 + (0.5+0.5*Math.sin(t*(fast?5.5:2.2)+u.phase)) * .55) * (u.dim ?? 1);
     }
   });
   itemGroup.children.forEach(m=>{
@@ -588,14 +594,15 @@ function tickFrame(){
     if (u.w){
       const f = fi(u.w.id);
       shade(m.material, u.baseFill, f);
-      if (u.lineMat && !u.waitFlash) shade(u.lineMat, u.baseStroke, f);
+      if (u.lineMat) shade(u.lineMat, u.baseStroke, f);
+      u.dim = f;
     }
     if (u.baseY){ m.position.y = u.baseY + Math.sin(t*1.2+u.phase)*.5; m.rotation.y += .004; }
     if (u.landed){ m.rotation.y += .0015; }
-    if (u.waitFlash && u.lineMat){ u.lineMat.opacity = .15 + (0.5+0.5*Math.sin(t*2.6+u.phase))*.6; }
+    if (u.waitFlash && u.lineMat){ u.lineMat.opacity = (.15 + (0.5+0.5*Math.sin(t*2.6+u.phase))*.6) * (u.dim ?? 1); }
     m.children.forEach(ch=>{
-      if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=.4+Math.abs(Math.sin(t*3))*.5; const sc=1+Math.sin(t*3)*.18; ch.scale.set(sc,sc,sc); }
-      if (ch.userData.act==='run'){ ch.material.opacity = .04 + (0.5+0.5*Math.sin(t*2.2))*.18; }
+      if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=(.4+Math.abs(Math.sin(t*3))*.5)*(u.dim ?? 1); const sc=1+Math.sin(t*3)*.18; ch.scale.set(sc,sc,sc); }
+      if (ch.userData.act==='run'){ ch.material.opacity = (.04 + (0.5+0.5*Math.sin(t*2.2))*.18) * (u.dim ?? 1); }
     });
   });
   const _end = new THREE.Vector3();
@@ -604,7 +611,7 @@ function tickFrame(){
     const a = APOS[u.hid]; if (!a) return;
     const p = u.itemMesh.position;
     _end.copy(a).add(new THREE.Vector3(0,.25,0));
-    u.mat.opacity = .55 * Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
+    u.mat.opacity = .4 * Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
     u.geo.setPositions([p.x,p.y,p.z, _end.x,_end.y,_end.z]);
   });
   /* agent-to-agent links carry the travelling pulse: white crest running from
@@ -615,7 +622,7 @@ function tickFrame(){
     if (!A || !B){ o.visible = false; return; }
     o.visible = true;
     const fast = u.state === 'run';
-    u.mat.opacity = .4 * Math.min(fa(u.from), fa(u.to));
+    u.mat.opacity = .5 * Math.min(fa(u.from), fa(u.to));
     u.head = (u.head + (fast ? .011 : .006)) % 1;
     const pos = u.pos, rgb = u.rgb;
     for (let i = 0; i < TETHER_SEGS; i++){
