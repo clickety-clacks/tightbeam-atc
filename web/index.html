@@ -5,8 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tight Beam — Org Weather</title>
 <style>
-  html,body { margin:0; height:100%; background:#101214; overflow:hidden;
+  html,body { margin:0; padding:0; background:#101214; overflow:hidden;
+    position:fixed; inset:0; width:100%; height:100%;
     font-family: ui-sans-serif,-apple-system,"Helvetica Neue",Arial,sans-serif; }
+  /* an inline canvas adds descender space and makes the document taller than
+     the window, which scrolls the fixed chrome out of view */
+  canvas { display:block; position:fixed; inset:0; }
   /* one top bar owns the top edge; children never position themselves */
   #topbar { position:fixed; top:0; left:0; right:0; z-index:6; display:flex;
     align-items:flex-start; justify-content:space-between; gap:10px;
@@ -958,7 +962,20 @@ function tickFrame(){
   renderer.render(scene, camera);
 }
 tickFrame();
-addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); edgeMats.forEach(m=>m.resolution.set(innerWidth,innerHeight)); });
+function fitViewport(){
+  const vv = window.visualViewport;
+  const w = Math.round(vv ? vv.width  : innerWidth);
+  const h = Math.round(vv ? vv.height : innerHeight);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(w, h, true);
+  edgeMats.forEach(m => m.resolution.set(w, h));
+}
+addEventListener('resize', fitViewport);
+addEventListener('orientationchange', fitViewport);
+window.visualViewport?.addEventListener('resize', fitViewport);
+fitViewport();
 </script>
 </body>
 </html>
