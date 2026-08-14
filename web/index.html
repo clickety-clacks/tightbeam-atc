@@ -287,17 +287,26 @@ function msgCurve(a,b){
   mid.y = Math.min(mid.y + 1.6 + p.distanceTo(q)*.16, -.4);  /* wakes travel under the surface */
   return new THREE.QuadraticBezierCurve3(p, mid, q);
 }
-/* in-flight pulse count tracks real wake volume: busier ledger, busier sky */
-setInterval(()=>{
-  if (document.hidden || !DATA || !DATA.messages || !DATA.messages.length) return;
-  const cap = Math.min(DATA.messages.length, 16);
-  if (pulses.length >= cap) return;
-  const m = DATA.messages[Math.floor(Math.random()*DATA.messages.length)];
-  if (!APOS[m.from] || !APOS[m.to]) return;
-  const pu = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:T.pulse, transparent:true}));
-  pu.userData={curve:msgCurve(m.from,m.to), t:0};
-  scene.add(pu); pulses.push(pu);
-}, 300);
+/* every fired wake in the feed animates exactly once — no sampling, no
+   manufactured traffic. New wakes in a batch are staggered a little so a
+   burst reads as a burst, not a single clump. */
+const seenWakes = new Map();
+function spawnWakes(){
+  if (!DATA || !DATA.messages) return;
+  const now = Date.now();
+  seenWakes.forEach((ts,k)=>{ if (now-ts > 900000) seenWakes.delete(k); });
+  DATA.messages.forEach(m=>{
+    const k = m.id || (m.from+'>'+m.to);
+    if (seenWakes.has(k)) return;
+    seenWakes.set(k, now);
+    setTimeout(()=>{
+      if (document.hidden || !APOS[m.from] || !APOS[m.to]) return;
+      const pu = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:T.pulse, transparent:true}));
+      pu.userData={curve:msgCurve(m.from,m.to), t:0};
+      scene.add(pu); pulses.push(pu);
+    }, Math.random()*3000);
+  });
+}
 
 /* ---------- live feed ---------- */
 async function refresh(){
@@ -310,6 +319,7 @@ async function refresh(){
     const h = d.agents.map(a=>a.id+(a.retired?1:0)+(a.turn||'')).join('|');
     if (h !== agentsHash){ agentsHash = h; buildGround(d.agents); }
     buildItems(d.items);
+    spawnWakes();
     const age = Math.round((Date.now()-d.generatedAt)/1000);
     const el = document.getElementById('mode');
     el.textContent = 'live · '+d.agents.length+' agents · '+d.items.length+' items · '+age+'s ago';

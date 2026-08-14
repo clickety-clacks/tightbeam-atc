@@ -129,11 +129,13 @@ landed = sorted((w for w in items if w["stage"] >= 6),
 # creatorSessionKey is the true sender; origin is a role path, and
 # process:* wakes are substrate machinery, not agent-to-agent traffic
 msgs = []
-for r in q("""SELECT creatorSessionKey, sessionKey FROM wakes
-              WHERE state='fired' AND firedAt > ? LIMIT 60""", NOW - 120000):
+for r in q("""SELECT wakeId, creatorSessionKey, sessionKey FROM wakes
+              WHERE state='fired' AND firedAt > ?
+              ORDER BY firedAt DESC LIMIT 200""", NOW - 300000):
     src = ids.get(r["creatorSessionKey"])
     dst = ids.get(r["sessionKey"])
-    if src and dst and src != dst: msgs.append({"from": src, "to": dst})
+    if src and dst and src != dst:
+        msgs.append({"id": r["wakeId"], "from": src, "to": dst})
 
 # ---- agent-level activity
 amap = {a["id"]: a for a in agents}
@@ -142,7 +144,7 @@ for k in sess:
     elif k in pending: amap[ids[k]]["turn"] = "wait"
 
 snap = {"generatedAt": NOW, "agents": agents,
-        "items": open_items + landed, "messages": msgs[:20]}
+        "items": open_items + landed, "messages": msgs}
 json.dump(snap, open(OUT, "w"))
 if DEST:
     cmd = ["scp", "-q"]
