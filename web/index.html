@@ -276,7 +276,7 @@ function buildItems(items){
       const col = st==='run' ? T.tetherRun : T.tetherWait;
       /* fat line, double the diagram stroke, so an active tether reads as
          attention rather than structure */
-      const lm = new LineMaterial({color:col, linewidth:4, transparent:true, opacity:.8});
+      const lm = new LineMaterial({color:col, linewidth:2.5, transparent:true, opacity:.8});
       lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
       const lg = new LineSegmentsGeometry().setPositions([0,0,0, 0,0,0]);
       const seg = new LineSegments2(lg, lm);
@@ -286,7 +286,7 @@ function buildItems(items){
       tetherGroup.add(seg);
       /* a bead runs the tether in the direction the waiting prompt travels */
       const bead = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:col, transparent:true}));
-      bead.scale.setScalar(st==='run' ? .95 : .75);
+      bead.scale.setScalar(st==='run' ? .7 : .55);
       bead.userData = {tether:seg, t:Math.random()};
       tetherGroup.add(bead);
     });
