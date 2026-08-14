@@ -302,8 +302,11 @@ function scatter(id){
   for (let i = 0; i < id.length; i++){ h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
   const a = ((h >>> 0) % 3600) / 3600 * Math.PI * 2;
   const r = 1.1 + (((h >>> 12) & 1023) / 1023) * 3.4;
-  return {x: Math.cos(a) * r, z: Math.sin(a) * r};
+  return {x: Math.cos(a) * r, z: Math.sin(a) * r, phase: a};
 }
+/* accumulated rotation, kept across rebuilds so the spin does not snap back
+   to zero every time the feed refreshes */
+const spin = new Map();
 
 function buildItems(items){
   disposeGroup(itemGroup); disposeGroup(tetherGroup); itemMeshes = [];
@@ -326,7 +329,8 @@ function buildItems(items){
     const igeo = new THREE.IcosahedronGeometry(landed? .95 : 1.05, 0);
     const mesh = diagramMesh(igeo, col);
     mesh.position.copy(pos);
-    Object.assign(mesh.userData, {type:'item', w, phase:idx*1.3, landed, baseY: landed? null : pos.y});
+    Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, landed, baseY: landed? null : pos.y});
+    mesh.rotation.y = spin.get(w.id) || 0;
     itemGroup.add(mesh); itemMeshes.push(mesh);
     if (landed){
       /* green: the code is in. yellow: code that is not in yet.
@@ -639,6 +643,7 @@ function tickFrame(){
     }
     if (u.baseY){ m.position.y = u.baseY + Math.sin(t*1.2+u.phase)*.5; m.rotation.y += .004; }
     if (u.landed){ m.rotation.y += .0015; }
+    if (u.w && (u.baseY || u.landed)) spin.set(u.w.id, m.rotation.y);
     if (u.waitFlash && u.lineMat){ u.lineMat.opacity = (.15 + (0.5+0.5*Math.sin(t*2.6+u.phase))*.6) * (u.dim ?? 1); }
     m.children.forEach(ch=>{
       if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=(.4+Math.abs(Math.sin(t*3))*.5)*(u.dim ?? 1); const sc=1+Math.sin(t*3)*.18; ch.scale.set(sc,sc,sc); }
