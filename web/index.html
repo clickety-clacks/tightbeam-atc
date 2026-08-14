@@ -93,7 +93,7 @@ let grid = null;
 const groundGroup = new THREE.Group(), itemGroup = new THREE.Group(), tetherGroup = new THREE.Group();
 scene.add(groundGroup, itemGroup, tetherGroup);
 
-let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [];
+let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
 let flight = null, focused = false, orbitAngle = 0;
 const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0);
 /* ambient tabletop orbit — parameterized so it can resume from any framing
@@ -169,9 +169,10 @@ function renderLegend(){
     `<span style="margin-left:10px;color:${hx(T.discN)}">gray floor disc = nothing to merge or nothing verifiable</span>` +
     `<span style="margin-left:10px;color:${hx(T.discG)}">green floor disc = in the branch. we have landed</span>` +
     `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring = orphaned</span>` +
-    `<span style="margin-left:10px;color:${hx(T.pulse)}">pulses = messages: agent → agent</span>` +
-    `<span style="margin-left:8px;color:${hx(T.pulseSub)}">substrate (rises from below)</span>` +
-    `<span style="margin-left:8px;color:${hx(T.pulseUser)}">operator (descends from above)</span>`;
+    `<span style="margin-left:10px;color:${hx(T.pulse)}">traveling dot = wake</span>` +
+    `<span style="margin-left:8px;color:${hx(T.pulse)}">strobing line = message</span>` +
+    `<span style="margin-left:8px;color:${hx(T.pulseSub)}">substrate (from below)</span>` +
+    `<span style="margin-left:8px;color:${hx(T.pulseUser)}">operator (from above)</span>`;
 }
 
 function buildGround(agents){
@@ -311,28 +312,51 @@ function msgCurve(m){
 /* every fired wake in the feed animates exactly once — no sampling, no
    manufactured traffic. New wakes in a batch are staggered a little so a
    burst reads as a burst, not a single clump. */
-const seenWakes = new Map();
-let firstWakeBatch = true;
+const seenWakes = new Map(), seenMsgs = new Map();
+let firstBatch = true;
+function reap(map){ const now=Date.now(); map.forEach((ts,k)=>{ if(now-ts>900000) map.delete(k); }); }
+
+/* a wake is a nudge: one dot travels the arc */
 function spawnWakes(){
+  if (!DATA || !DATA.wakes) return;
+  reap(seenWakes);
+  DATA.wakes.forEach(w=>{
+    const k = w.id || (w.from+'>'+w.to);
+    if (seenWakes.has(k)) return;
+    seenWakes.set(k, Date.now());
+    setTimeout(()=>{
+      if (document.hidden || !APOS[w.from] || !APOS[w.to]) return;
+      const pu = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:T.pulse, transparent:true}));
+      pu.userData={curve:msgCurve({from:w.from, to:w.to, kind:'agent'}), t:0};
+      scene.add(pu); pulses.push(pu);
+    }, Math.random()*(firstBatch ? 20000 : 1500));
+  });
+}
+
+/* a message is speech: the connection itself strobes, then fades */
+function spawnMessages(){
   if (!DATA || !DATA.messages) return;
-  const now = Date.now();
-  seenWakes.forEach((ts,k)=>{ if (now-ts > 900000) seenWakes.delete(k); });
+  reap(seenMsgs);
   DATA.messages.forEach(m=>{
     const k = m.id || ((m.from||m.kind)+'>'+m.to);
-    if (seenWakes.has(k)) return;
-    seenWakes.set(k, now);
+    if (seenMsgs.has(k)) return;
+    seenMsgs.set(k, Date.now());
     setTimeout(()=>{
       if (document.hidden || !APOS[m.to]) return;
       if (m.kind === 'agent' && !APOS[m.from]) return;
       const col = m.kind==='substrate' ? T.pulseSub : m.kind==='user' ? T.pulseUser : T.pulse;
-      const pu = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({
-        color:col, transparent:true, opacity: m.kind==='substrate' ? .55 : 1 }));
-      pu.scale.setScalar(m.kind==='substrate' ? .7 : 1);
-      pu.userData={curve:msgCurve(m), t:0};
-      scene.add(pu); pulses.push(pu);
-    }, Math.random()*(firstWakeBatch ? 20000 : 1500));
+      const pts = msgCurve(m).getPoints(28);
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({color:col, transparent:true, opacity:.9,
+                                     depthWrite:false}));
+      line.userData = {life:0, span: m.kind==='substrate' ? 1.6 : 2.4,
+                       peak: m.kind==='substrate' ? .45 : .85,
+                       phase: Math.random()*6.28};
+      scene.add(line); msgLines.push(line);
+    }, Math.random()*(firstBatch ? 20000 : 1500));
   });
-  firstWakeBatch = false;
+  firstBatch = false;
 }
 
 /* ---------- live feed ---------- */
@@ -346,7 +370,7 @@ async function refresh(){
     const h = d.agents.map(a=>a.id+(a.retired?1:0)+(a.turn||'')).join('|');
     if (h !== agentsHash){ agentsHash = h; buildGround(d.agents); }
     buildItems(d.items);
-    spawnWakes();
+    spawnWakes(); spawnMessages();
     const age = Math.round((Date.now()-d.generatedAt)/1000);
     const el = document.getElementById('mode');
     el.textContent = 'live · '+d.agents.length+' agents · '+d.items.length+' items · '+age+'s ago';
@@ -480,6 +504,13 @@ function tickFrame(){
     if (APOS[l.userData.hid]) l.geometry.setFromPoints([m.position, APOS[l.userData.hid].clone().setY(.3)]);
     if (l.userData.state==='run') l.material.opacity = .65 + Math.sin(t*4+(m.userData.phase||0))*.3;
   });
+  for (let i=msgLines.length-1;i>=0;i--){
+    const l = msgLines[i], u = l.userData;
+    u.life += 1/60;
+    if (u.life >= u.span){ scene.remove(l); l.geometry.dispose(); l.material.dispose(); msgLines.splice(i,1); continue; }
+    const fade = 1 - u.life/u.span;
+    l.material.opacity = u.peak * fade * (0.35 + 0.65*Math.abs(Math.sin(t*11 + u.phase)));
+  }
   for (let i=pulses.length-1;i>=0;i--){
     const p=pulses[i]; p.userData.t += .0055;
     if (p.userData.t>=1){ scene.remove(p); pulses.splice(i,1); continue; }

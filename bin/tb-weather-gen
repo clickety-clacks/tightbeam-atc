@@ -230,8 +230,18 @@ for k in sess:
     if k in running_sessions: amap[ids[k]]["turn"] = "run"
     elif k in pending: amap[ids[k]]["turn"] = "wait"
 
+# ---- wakes are their own channel: a wake is a nudge, a message is speech
+wakes_out = []
+for r in q("""SELECT wakeId, creatorSessionKey, sessionKey FROM wakes
+              WHERE state='fired' AND firedAt > ?
+              ORDER BY firedAt DESC LIMIT 200""", NOW - 300000):
+    src = ids.get(r["creatorSessionKey"])
+    dst = ids.get(r["sessionKey"])
+    if src and dst and src != dst:
+        wakes_out.append({"id": r["wakeId"], "from": src, "to": dst})
+
 snap = {"generatedAt": NOW, "agents": agents,
-        "items": open_items + landed, "messages": msgs}
+        "items": open_items + landed, "messages": msgs, "wakes": wakes_out}
 json.dump(snap, open(OUT, "w"))
 if branch_shas:
     json.dump({"tip": _tip, "v": PROBE_V, "map": equiv_cache}, open(EQUIV, "w"))
