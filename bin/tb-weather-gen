@@ -79,10 +79,12 @@ except sqlite3.Error:
 # alone reports false "not merged". Fall back to patch equivalence, cached
 # per branch tip because it costs a subprocess per commit.
 EQUIV = Path(OUT + ".equiv.json")
+PROBE_V = 2                       # bump when probe semantics change
 _tip = git("rev-parse", BRANCH).stdout.strip() if branch_shas else ""
 try:
     _c = json.load(open(EQUIV))
-    equiv_cache = _c["map"] if _c.get("tip") == _tip else {}
+    equiv_cache = (_c["map"] if _c.get("tip") == _tip
+                   and _c.get("v") == PROBE_V else {})
 except Exception:
     equiv_cache = {}
 
@@ -220,7 +222,7 @@ snap = {"generatedAt": NOW, "agents": agents,
         "items": open_items + landed, "messages": msgs}
 json.dump(snap, open(OUT, "w"))
 if branch_shas:
-    json.dump({"tip": _tip, "map": equiv_cache}, open(EQUIV, "w"))
+    json.dump({"tip": _tip, "v": PROBE_V, "map": equiv_cache}, open(EQUIV, "w"))
 if DEST:
     cmd = ["scp", "-q"]
     if KEY: cmd += ["-i", KEY, "-o", "IdentitiesOnly=yes"]
