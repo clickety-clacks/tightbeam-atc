@@ -146,6 +146,17 @@ for r in q("""SELECT t.sessionKey, a.workItemId FROM turns t
               JOIN assignments a ON a.id = t.assignmentId
               WHERE t.startedAt IS NOT NULL AND t.endedAt IS NULL"""):
     item_running.setdefault(r["workItemId"], set()).add(r["sessionKey"])
+# a pending wake only says something about a CARD when it names one. A wake
+# with no work item is about the session, not about any particular piece of
+# work, so it must not light up every card that session happens to hold.
+item_wait = {}
+for r in q("""SELECT sessionKey, work_item_id FROM wakes
+              WHERE state='pending' AND work_item_id IS NOT NULL"""):
+    item_wait.setdefault(r["work_item_id"], set()).add(r["sessionKey"])
+for r in q("""SELECT w.sessionKey, a.workItemId FROM wakes w
+              JOIN assignments a ON a.id = w.assignmentId
+              WHERE w.state='pending' AND w.work_item_id IS NULL"""):
+    item_wait.setdefault(r["workItemId"], set()).add(r["sessionKey"])
 pending = {r["sessionKey"] for r in q(
     "SELECT DISTINCT sessionKey FROM wakes WHERE state='pending'")}
 
@@ -183,15 +194,16 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
         if "completion" in kinds: stage = 3
         if verd & {"reviewed-clean", "spec-reviewed", "verified"}: stage = 4
         if "completion" in kinds and "reviewed-clean" in verd: stage = 5
+    # A tether is drawn only when a turn or a prompt names THIS card. A session
+    # runs one turn at a time, so attributing its turn to every card it holds
+    # lit up dozens of tethers at once and made one agent look omnipresent.
     turns, turn_sk = {}, {}
     for sk in item_running.get(wid, set()):
         if sk in ids:
             turns[ids[sk]] = "run"; turn_sk[ids[sk]] = sk
-    for h in hs:
-        sk = h["holderKey"]
-        if sk not in ids or ids[sk] in turns: continue
-        if sk in running_sessions: turns[ids[sk]] = "run"; turn_sk[ids[sk]] = sk
-        elif sk in pending: turns[ids[sk]] = "wait"; turn_sk[ids[sk]] = sk
+    for sk in item_wait.get(wid, ()):
+        if sk in ids and ids[sk] not in turns:
+            turns[ids[sk]] = "wait"; turn_sk[ids[sk]] = sk
     # which way the waiting prompt flows. "in" = toward this agent (it owes the
     # turn); "out" = the item is waiting on someone else. When prompts are
     # pending in both directions the earliest dueAt wins.
