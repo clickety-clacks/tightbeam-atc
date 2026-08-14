@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tight Beam — Org Weather</title>
+<title>Tightbeam — Air Traffic Control</title>
 <style>
   /* CSS is the single source of geometry: it sizes the canvas box and the
      renderer matches its buffer to the measured box, so the two cannot
@@ -73,8 +73,7 @@
     padding:8px 11px; color:#9a9ea6; font-size:11px; letter-spacing:.08em;
     text-transform:uppercase; }
   #selui input { width:min(130px, 26vw); vertical-align:middle; pointer-events:auto; }
-  #selui.off { opacity:.5; }
-  #selui.off input { pointer-events:none; }
+  #selui.off { display:none; }
   #selui b { color:#b08d57; }
   body.light #selui { background:#faf7eeee; border-color:#b8c7d9; color:#5c6b78; }
   body.light #selui b { color:#c23b22; }
@@ -82,7 +81,7 @@
 </head>
 <body>
 <div id="topbar">
-  <div id="hud"><span class="title">The <b>Tight&nbsp;Beam</b> Dispatch · org weather · </span><span id="mode" class="sample">connecting…</span></div>
+  <div id="hud"><span class="title"><b>Tightbeam</b> · air traffic control · </span><span id="mode" class="sample">connecting…</span></div>
   <div id="topright">
     <div id="themehint">T theme · S select · L legend</div>
     <div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> · <span id="selcount">0</span> sel · [ ] size · f fit · d clear</div>

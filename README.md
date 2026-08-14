@@ -1,6 +1,6 @@
-# Tightbeam Org Weather
+# Tightbeam Air Traffic Control
 
-A live 3D visualization of a running [Tightbeam](https://github.com/clickety-clacks/tightbeam)
+A live 3D air-traffic view of a running [Tightbeam](https://github.com/clickety-clacks/tightbeam)
 organization, rendered as a technical diagram: hidden-line wireframes on
 plotter paper (light mode) or a vector display (dark mode).
 
