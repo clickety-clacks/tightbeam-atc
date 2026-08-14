@@ -41,7 +41,7 @@ import { LineSegments2 } from './addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from './addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from './addons/lines/LineMaterial.js';
 const edgeMats = new Set();
-const TETHER_SEGS = 22;   /* subdivisions per tether, for the traveling wave */
+const TETHER_SEGS = 40;   /* subdivisions per tether, for the traveling wave */
 
 const STAGE_NAMES = ['specced','building','tests pass','reviewed','verdict clean','gate ready','merged'];
 const SEGS = ['spec bound','producer completion','tests + baselines','independent review','reviewed-clean verdict','merge attest'];
@@ -277,8 +277,8 @@ function buildItems(items){
       const col = st==='run' ? T.tetherRun : T.tetherWait;
       /* the tether is subdivided so a brightness wave can travel INSIDE it,
          showing direction without adding a separate object */
-      const lm = new LineMaterial({color:0xffffff, linewidth:2.5, transparent:true,
-                                   opacity:.85, vertexColors:true});
+      const lm = new LineMaterial({color:0xffffff, linewidth:1.6, transparent:true,
+                                   opacity:.9, vertexColors:true});
       lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
       const lg = new LineSegmentsGeometry()
         .setPositions(new Array(TETHER_SEGS*6).fill(0))
@@ -524,7 +524,7 @@ function tickFrame(){
        someone else */
     u.head = (u.head + (fast ? .010 : .005)) % 1;
     const crest = u.dir === 'in' ? u.head : 1 - u.head;
-    const pos = u.pos, rgb = u.rgb, base = fast ? .3 : .18;
+    const pos = u.pos, rgb = u.rgb, base = fast ? .16 : .10;
     for (let i = 0; i < TETHER_SEGS; i++){
       const f0 = i / TETHER_SEGS, f1 = (i + 1) / TETHER_SEGS, k = i * 6;
       pos[k]   = p.x + (_end.x - p.x) * f0;
@@ -536,7 +536,7 @@ function tickFrame(){
       for (let e = 0; e < 2; e++){
         const f = e ? f1 : f0;
         let d = Math.abs(f - crest); if (d > .5) d = 1 - d;      /* wrap */
-        const amp = base + Math.exp(-(d*d) / .012) * (fast ? .95 : .7);
+        const amp = base + Math.exp(-(d*d) / .0022) * (fast ? 2.1 : 1.6);
         const j = k + e*3;
         rgb[j]   = u.col.r * amp;
         rgb[j+1] = u.col.g * amp;
