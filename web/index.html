@@ -63,6 +63,19 @@
     #hud, #themehint, #selui { letter-spacing:.08em; font-size:10px; }
   }
 
+  #tagbox { position:fixed; z-index:7; display:none; background:#1b1e22f2;
+    border:1px solid #3a3d42; border-left:3px solid #b08d57; border-radius:5px;
+    padding:9px 11px; color:#9a9ea6; font-size:11px; letter-spacing:.06em;
+    text-transform:uppercase; max-width:min(300px, calc(100vw - 36px));
+    box-sizing:border-box; }
+  #tagbox input { display:block; margin-top:6px; width:100%; box-sizing:border-box;
+    background:#101214; border:1px solid #3a3d42; border-radius:3px; color:#d8d6d1;
+    padding:5px 7px; font-size:12px; font-family:inherit; letter-spacing:0;
+    text-transform:none; }
+  #tagbox .who { color:#b08d57; }
+  body.light #tagbox { background:#faf7eef2; border-color:#b8c7d9; border-left-color:#c23b22; color:#5c6b78; }
+  body.light #tagbox input { background:#fff; border-color:#b8c7d9; color:#26323c; }
+  body.light #tagbox .who { color:#c23b22; }
   #selcursor { position:fixed; border:1.5px solid #b08d57; border-radius:50%;
     pointer-events:none; display:none; transform:translate(-50%,-50%); z-index:5;
     box-shadow:0 0 0 1px rgba(0,0,0,.25) inset; }
@@ -83,12 +96,14 @@
 <div id="topbar">
   <div id="hud"><span class="title"><b>Tightbeam</b> · air traffic control · </span><span id="mode" class="sample">connecting…</span></div>
   <div id="topright">
-    <div id="themehint">T theme · S select · L legend</div>
+    <div id="themehint">T theme · S select · L legend · C tags</div>
     <div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> · <span id="selcount">0</span> sel · [ ] size · f fit · d clear</div>
   </div>
 </div>
 <div id="legend"></div>
 <div id="tip"></div>
+<div id="tagbox">tag <span class="who"></span><input id="taginput" type="text"
+  placeholder="type a note, enter to attach, esc to close" maxlength="80"></div>
 <div id="selcursor"></div>
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
@@ -213,6 +228,34 @@ function labelSprite(text){
   const h = 1.35; sp.scale.set(h*c.width/c.height, h, 1);
   return sp;
 }
+/* a tag: short text pinned above a node, coloured by who wrote it */
+function tagSprite(text, source){
+  const c = document.createElement('canvas'), ctx = c.getContext('2d');
+  const font = '600 34px ui-sans-serif, -apple-system, "Helvetica Neue", Arial, sans-serif';
+  ctx.font = font;
+  const w = Math.ceil(ctx.measureText(text).width) + 26;
+  c.width = w; c.height = 52;
+  const ctx2 = c.getContext('2d');
+  const hot = source === 'user' ? (T.name==='light' ? '#c23b22' : '#d9a441')
+                                : (T.name==='light' ? '#2f6fb5' : '#5aa9e6');
+  ctx2.fillStyle = T.name==='light' ? 'rgba(250,247,238,.94)' : 'rgba(16,18,20,.9)';
+  ctx2.strokeStyle = hot; ctx2.lineWidth = 2;
+  const r = 9;
+  ctx2.beginPath();
+  ctx2.moveTo(r,1); ctx2.lineTo(w-r,1); ctx2.quadraticCurveTo(w-1,1,w-1,r);
+  ctx2.lineTo(w-1,51-r); ctx2.quadraticCurveTo(w-1,51,w-r,51);
+  ctx2.lineTo(r,51); ctx2.quadraticCurveTo(1,51,1,51-r);
+  ctx2.lineTo(1,r); ctx2.quadraticCurveTo(1,1,r,1); ctx2.closePath();
+  ctx2.fill(); ctx2.stroke();
+  ctx2.font = font; ctx2.textBaseline = 'middle'; ctx2.fillStyle = hot;
+  ctx2.fillText(text, 13, 27);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(c), transparent:true, depthTest:false }));
+  sp.renderOrder = 12;
+  const h = 1.1; sp.scale.set(h * w / 52, h, 1);
+  return sp;
+}
+
 /* hidden-line diagram mesh: background-colored fill that writes depth
    (occludes what's behind it) + visible edges in the stroke color */
 function diagramMesh(geo, strokeHex){
@@ -249,9 +292,15 @@ function applyTheme(){
 /* the ghost set is derived from focus alone — never stored independently */
 function computeHighlight(){
   const obj = focusMesh();
-  if (!obj || view.focus.stage < 2 || !DATA){ hiAgents = hiItems = null; return; }
+  if (!obj || view.focus.stage < 1 || !DATA){ hiAgents = hiItems = null; return; }
   hiAgents = new Set(); hiItems = new Set();
   const u = obj.userData;
+  /* stage 1 lights only the node itself; everything else fades the same way it
+     does in neighbourhood mode */
+  if (view.focus.stage === 1){
+    if (u.w) hiItems.add(u.w.id); else if (u.a) hiAgents.add(u.a.id);
+    return;
+  }
   if (u.type === 'item'){
     hiItems.add(u.w.id);
     Object.keys(u.w.turns || {}).forEach(h => hiAgents.add(h));
@@ -571,6 +620,100 @@ function autoCollapseLegend(){
   if (el) el.classList.toggle('collapsed', innerHeight < 620);
 }
 
+/* ---------- tag composer ----------
+   Visible only while a single node is focused; what you type is filed with
+   'user' provenance so it renders differently from anything an agent wrote. */
+const tagBox = document.getElementById('tagbox');
+const tagInput = document.getElementById('taginput');
+function showTagBox(){
+  if (view.focus.stage !== 1 || !view.focus.key){ hideTagBox(); return; }
+  const m = focusMesh();
+  const label = m?.userData.w ? m.userData.w.id : (m?.userData.a ? m.userData.a.name : '');
+  tagBox.querySelector('.who').textContent = label ? '· ' + String(label).slice(0, 26) : '';
+  tagBox.style.display = 'block';
+  tagBox.style.left = '18px';
+  tagBox.style.top = 'calc(50% - 40px)';
+  tagInput.value = '';
+}
+function hideTagBox(){ tagBox.style.display = 'none'; tagInput.blur(); }
+tagInput.addEventListener('keydown', e => {
+  e.stopPropagation();                       /* the canvas hotkeys are not for typing */
+  if (e.key === 'Enter'){
+    const text = tagInput.value.trim();
+    const target = view.focus.key ? view.focus.key.slice(2) : null;
+    if (text && target){
+      apiPostTags([{target, text, source:'user'}]);
+      tagInput.value = '';
+    }
+  } else if (e.key === 'Escape'){ hideTagBox(); }
+});
+
+/* ---------- control plane ----------
+   A small API lets anything drive this view: read the selection, focus a node,
+   select by id, fit, and attach tags. We poll it for commands we have not seen
+   and report our selection back. It is best-effort: if the API is absent the
+   page behaves exactly as before. */
+const API = './api';
+let apiSeq = 0, apiTagsRev = -1, apiUp = false;
+let tags = [];                                   /* [{tagId,target,text,source}] */
+
+async function apiPull(){
+  try {
+    const r = await fetch(`${API}/pull?since=${apiSeq}`, {cache:'no-store'});
+    if (!r.ok) throw 0;
+    const d = await r.json();
+    apiUp = true;
+    if (d.tagsRev !== apiTagsRev){ apiTagsRev = d.tagsRev; tags = d.tags || []; buildTags(); }
+    for (const c of (d.commands || [])) applyCommand(c);
+    apiSeq = d.seq ?? apiSeq;
+  } catch(e){ apiUp = false; }
+}
+async function apiReportSelection(){
+  if (!apiUp) return;
+  const sel = [...view.selection].map(k => {
+    const [kind, id] = [k.slice(0,1), k.slice(2)];
+    const w = kind === 'i' ? (DATA?.items || []).find(x => x.id === id) : null;
+    const a = kind === 'a' ? (DATA?.agents || []).find(x => x.id === id) : null;
+    return {id, type: kind === 'i' ? 'item' : 'agent', title: w ? w.title : (a ? a.name : null)};
+  });
+  try { await fetch(`${API}/selection`, {method:'POST', headers:{'content-type':'application/json'},
+                                         body: JSON.stringify({selection: sel})}); } catch(e){}
+}
+async function apiPostTags(list){
+  try { await fetch(`${API}/tags`, {method:'POST', headers:{'content-type':'application/json'},
+                                    body: JSON.stringify({tags:list})}); await apiPull(); } catch(e){}
+}
+async function apiClearTags(){
+  try { await fetch(`${API}/tags`, {method:'DELETE'}); await apiPull(); }
+  catch(e){ tags = []; buildTags(); }
+}
+function applyCommand(c){
+  if (c.kind === 'select'){
+    if (c.clear) view.selection.clear();
+    (c.add || []).forEach(id => view.selection.add(selKeyFor(id)));
+    (c.remove || []).forEach(id => view.selection.delete(selKeyFor(id)));
+    applyView(); apiReportSelection();
+  } else if (c.kind === 'focus'){
+    if (c.mode === 'clear'){ clearFocus(); return; }
+    view.focus.key = selKeyFor(c.id);
+    view.focus.stage = c.mode === 'neighborhood' ? 2 : 1;
+    applyView();
+    const m = focusMesh();
+    if (m) flyToNode(m);
+  } else if (c.kind === 'fit'){
+    if (c.on) fitSelection(); else if (camMark) restoreCamera();
+  }
+}
+/* ids arrive bare from the API; internally they carry a kind prefix. The kind
+   is decided by the id's own shape, not by searching the current feed — a
+   lookup would mislabel anything that arrives before the first snapshot, or
+   any node not currently on screen. */
+function selKeyFor(id){
+  const s = String(id);
+  if (s.startsWith('i:') || s.startsWith('a:')) return s;
+  return s.startsWith('wi_') ? 'i:' + s : 'a:' + s;
+}
+
 /* ---------- live feed ---------- */
 async function refresh(){
   try {
@@ -601,7 +744,9 @@ async function refresh(){
 
 /* ---------- theme toggle ---------- */
 addEventListener('keydown', e=>{
-  if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
+  if (e.target && e.target.tagName === 'INPUT') return;
+  if (e.key==='c' || e.key==='C'){ apiClearTags(); }
+  else if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
   else if (e.key==='s' || e.key==='S'){ setInputMode(view.input==='brush' ? 'navigate' : 'brush'); }
   else if (e.key==='d' || e.key==='D'){ view.selection.clear(); applyView(); }
   else if (e.key==='Escape'){ clearFocus(); if (view.input==='brush') setInputMode('navigate'); }
@@ -621,6 +766,17 @@ matchMedia('(prefers-color-scheme: light)').addEventListener('change', ev=>{
 
 applyTheme();
 refresh(); setInterval(refresh, 5000);
+/* a read-only window onto the page's state, for tests and for anything
+   driving the view from a console */
+window.__atc = {
+  get view(){ return view; },
+  get tags(){ return tags; },
+  get data(){ return DATA; },
+  get apiUp(){ return apiUp; },
+  pull: apiPull,
+};
+apiPull(); setInterval(apiPull, 1000);
+setInterval(apiReportSelection, 2000);
 
 /* ---------- click: focus an item, background zooms out ---------- */
 let downXY = null;
@@ -641,22 +797,7 @@ addEventListener('pointerup', e=>{
     else { view.focus.key = k; view.focus.stage = 1; }
     applyView();
     view.framing = 'focus'; userMoved = true;
-    const nb = view.focus.stage === 2 ? neighbourhoodView() : null;
-    if (nb){
-      const dir = camera.position.clone().sub(nb.center); dir.y = 0;
-      if (dir.lengthSq() < .01) dir.set(1,0,1);
-      dir.normalize().multiplyScalar(nb.radius * 2.1 + 8);
-      const camPos = nb.center.clone().add(dir);
-      camPos.y = nb.center.y + nb.radius * 1.1 + 6;
-      flyTo(camPos, nb.center);
-    } else {
-      const pt = o.position.clone();
-      const dir = camera.position.clone().sub(pt); dir.y = 0;
-      if (dir.lengthSq() < .01) dir.set(1,0,1);
-      dir.normalize().multiplyScalar(9);
-      const camPos = pt.clone().add(dir); camPos.y = pt.y + 4.5;
-      flyTo(camPos, pt);
-    }
+    flyToNode(o);
   } else if (view.framing !== 'none'){
     camMark = null;
     clearFocus();
@@ -687,7 +828,7 @@ addEventListener('pointermove', e=>{
   if (!hit){ tip.style.display='none'; return; }
   const u = hit.object.userData;
   if (!u.type){ tip.style.display='none'; return; }
-  if (view.input !== 'brush' && view.focus.stage === 2 && hiAgents){   /* outside the neighbourhood: dead to hover */
+  if (view.input !== 'brush' && view.focus.stage >= 1 && hiAgents){   /* outside the neighbourhood: dead to hover */
     const inside = u.type === 'item' ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
     if (!inside){ tip.style.display='none'; return; }
   }
@@ -763,6 +904,26 @@ function shadeSelected(mesh, on){
    brush stroke can touch hundreds of nodes per frame), and the dim factors are
    applied per frame in tickFrame() because they animate. Both stay consistent
    because every rebuild ends in applyView(). */
+function buildTags(){
+  /* tags live as children of the node they name, so they inherit its motion */
+  selectables().forEach(m => {
+    (m.userData.tagSprites || []).forEach(sp => {
+      m.remove(sp); sp.material.map?.dispose?.(); sp.material.dispose();
+    });
+    m.userData.tagSprites = [];
+  });
+  const byKey = {};
+  tags.forEach(t => (byKey[selKeyFor(t.target)] ??= []).push(t));
+  selectables().forEach(m => {
+    const list = byKey[selKey(m)]; if (!list) return;
+    list.slice(0, 4).forEach((t, i) => {
+      const sp = tagSprite(t.text, t.source);
+      sp.position.set(0, 1.5 + i * 1.25, 0);
+      m.add(sp); m.userData.tagSprites.push(sp);
+    });
+  });
+}
+
 function applyView(){
   computeHighlight();
   selectables().forEach(m => {
@@ -805,6 +966,7 @@ function setInputMode(mode){
 /* the ONLY place focus is dropped */
 function clearFocus(){
   view.focus.key = null; view.focus.stage = 0;
+  if (typeof hideTagBox === 'function') hideTagBox();
   view.framing = 'none';                 /* releases the camera to ambient orbit */
   applyView();                           /* focus drives dimming: re-derive now */
 }
@@ -839,6 +1001,27 @@ addEventListener('pointerup', () => {
    you land back in the same zoom, pan and rotation you left, still turning if
    it was turning. */
 let camMark = null;
+/* the camera move a click (or an API focus) performs on a node */
+function flyToNode(o){
+  view.framing = 'focus'; userMoved = true;
+  const nb = view.focus.stage === 2 ? neighbourhoodView() : null;
+  if (nb){
+    const dir = camera.position.clone().sub(nb.center); dir.y = 0;
+    if (dir.lengthSq() < .01) dir.set(1,0,1);
+    dir.normalize().multiplyScalar(nb.radius * 2.1 + 8);
+    const camPos = nb.center.clone().add(dir);
+    camPos.y = nb.center.y + nb.radius * 1.1 + 6;
+    flyTo(camPos, nb.center);
+  } else {
+    const pt = o.position.clone();
+    const dir = camera.position.clone().sub(pt); dir.y = 0;
+    if (dir.lengthSq() < .01) dir.set(1,0,1);
+    dir.normalize().multiplyScalar(9);
+    const camPos = pt.clone().add(dir); camPos.y = pt.y + 4.5;
+    flyTo(camPos, pt);
+  }
+  showTagBox();
+}
 function markCamera(){
   camMark = {
     pos: camera.position.clone(), tgt: controls.target.clone(),
@@ -866,7 +1049,7 @@ function fitSelection(){
   selectables().forEach(m => {
     const k = selKey(m);
     if (k && view.selection.has(k)) selPts.push(m.position);
-    if (view.focus.stage === 2 && hiAgents){
+    if (view.focus.stage >= 1 && hiAgents){
       const u = m.userData;
       const inside = u.w ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
       if (inside) focusPts.push(m.position);
@@ -926,7 +1109,7 @@ function tickFrame(){
                         orbitTgt.z + Math.cos(orbitAngle)*orbitR);
     controls.target.copy(orbitTgt); camera.lookAt(orbitTgt);
   }
-  const dimming = view.focus.stage === 2 && hiAgents;
+  const dimming = view.focus.stage >= 1 && hiAgents;
   const fa = id => (!dimming || hiAgents.has(id)) ? 1 : DIM;
   const fi = id => (!dimming || hiItems.has(id)) ? 1 : DIM;
   const bg = new THREE.Color(T.bg);

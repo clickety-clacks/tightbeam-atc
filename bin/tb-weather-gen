@@ -130,7 +130,13 @@ holders_open = {r["holderKey"] for r in q(
     "SELECT DISTINCT holderKey FROM assignments WHERE state='open'")}
 sess = {r["sessionKey"]: r for r in rows
         if r["state"] == "active" or r["sessionKey"] in holders_open}
-ids = {k: f"a{i}" for i, k in enumerate(sess)}
+# Stable, addressable agent ids. Enumeration order changes between snapshots,
+# so positional ids could not be used by anything outside this process; the
+# session's own suffix is stable and matches what the CLI shows.
+def _agent_id(session_key):
+    tail = session_key.rsplit(" ", 1)[-1]
+    return tail if tail.startswith("s_") else "a" + str(abs(hash(session_key)) % 10**8)
+ids = {k: _agent_id(k) for k in sess}
 agents = []
 for k, r in sess.items():
     kind = kind_of(r["displayName"] or "")

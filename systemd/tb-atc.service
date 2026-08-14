@@ -1,0 +1,14 @@
+[Unit]
+Description=Tightbeam Air Traffic Control (page + control API)
+After=network.target
+
+[Service]
+Environment=TB_ATC_HOST=127.0.0.1
+Environment=TB_ATC_PORT=8787
+Environment=TB_ATC_WEB=%h/.local/share/tb-atc/web
+ExecStart=%h/.local/bin/tb-atc-api
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

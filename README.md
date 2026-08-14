@@ -46,6 +46,17 @@ No CDNs: three.js is vendored in `web/`. The page is fully self-contained.
 
 ## Install
 
+The simplest install is one process: `server/tb-atc-api.py` serves the page
+**and** the control API, so there is no separate web server to configure.
+
+    sudo mkdir -p /opt/tb-atc && sudo cp -r web /opt/tb-atc/
+    sudo cp server/tb-atc-api.py /opt/tb-atc/
+    TB_ATC_WEB=/opt/tb-atc/web python3 /opt/tb-atc/tb-atc-api.py
+    # then point the generator at /opt/tb-atc/web/data.json
+
+`systemd/tb-atc.service` is a user unit for that arrangement. Everything below
+describes the alternative: serving `web/` from an existing web server.
+
 ### 1. The web page
 
 Copy `web/` to a directory your web server serves. Same-host example:
@@ -145,3 +156,36 @@ shape can drive the page.
   configuration belongs in environment variables.
 
 MIT licensed.
+
+
+## Control API
+
+The view can be driven by anything on the network. There is no authentication,
+deliberately: it controls a display and nothing else. Bind it to localhost
+unless you mean otherwise.
+
+| verb | path | body |
+|---|---|---|
+| GET | `/api/state` | selection, tags and command sequence |
+| GET | `/api/selection` | `[{id, type, title}]` — what a human has selected |
+| POST | `/api/select` | `{add:[id], remove:[id], clear:bool}` |
+| POST | `/api/focus` | `{id, mode:"single"｜"neighborhood"｜"clear"}` |
+| POST | `/api/fit` | `{on:bool}` — fly to the selection, or back |
+| GET | `/api/tags` | `[{tagId, target, text, source, at}]` |
+| POST | `/api/tags` | `{tags:[{target, text, source:"agent"｜"user"}]}` |
+| DELETE | `/api/tags` | clear all |
+| DELETE | `/api/tags/<tagId>` | clear one |
+
+Ids are the feed's own: work items `wi_...`, agents `s_...` (their session
+suffix). Tags render by provenance — agent tags blue, user tags amber — are
+capped at 80 characters, and live in memory only.
+
+`skill/SKILL.md` is an agent-facing guide to operating the view, including the
+etiquette of not yanking the camera away from someone mid-investigation.
+
+## Keyboard
+
+`T` theme · `S` select mode · `L` legend · `C` clear tags · `F`/space fit to
+selection and back · `[` `]` brush radius · `D` clear selection · `Esc` clear
+focus. Click a node to focus it, click again for its neighbourhood, click the
+background to reset.
