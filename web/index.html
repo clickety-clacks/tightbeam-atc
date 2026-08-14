@@ -54,7 +54,7 @@ const THEMES = {
     stage:[0xc4453c,0xc97b35,0xc9a835,0xa3b23c,0x6fae4e,0x3f9d63,0x2c7a4b],
     kind:{main:0xb08d57,po:0xa58968,patrol:0xc9a835,orch:0x8a8f96,coder:0x7f8890,rev:0x6b7684,spec:0x91836b},
     retired:0x33363a, arcA:0xb08d57, arcB:0x22252a,
-    tetherRun:0x6fae4e, tetherWait:0xc9a835, pulse:0xb08d57, pulseSub:0x5f6670, pulseUser:0x6f9ecf,
+    tetherRun:0x6fae4e, tetherWait:0xc9a835, tetherSched:0xb9bfc7, pulse:0xb08d57, pulseSub:0x5f6670, pulseUser:0x6f9ecf,
     discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63, shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
     flashRun:0x6fae4e, flashWait:0xc9a835,
     metalness:.55, roughness:.3, agentMetal:.75, agentRough:.35, baseEmissive:.25, edges:false,
@@ -66,7 +66,7 @@ const THEMES = {
     stage:[0xc23b22,0xd07a2a,0xc9a227,0x8a9a2e,0x4e8a4e,0x2e7d5b,0x1f5e46],
     kind:{main:0xc23b22,po:0xb06a3b,patrol:0xc9a227,orch:0x5c6b78,coder:0x6e7b87,rev:0x52616e,spec:0x7a6a4f},
     retired:0xcdc7b8, arcA:0x26323c, arcB:0xd8dfe6,
-    tetherRun:0x2e7d4f, tetherWait:0xb8860b, pulse:0xc23b22, pulseSub:0x8a97a3, pulseUser:0x3d6ea8,
+    tetherRun:0x2e7d4f, tetherWait:0xb8860b, tetherSched:0x1b232b, pulse:0xc23b22, pulseSub:0x8a97a3, pulseUser:0x3d6ea8,
     discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3, shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
     flashRun:0x2e7d4f, flashWait:0xb8860b,
     metalness:.05, roughness:.85, agentMetal:.05, agentRough:.9, baseEmissive:.0, edges:true,
@@ -199,7 +199,7 @@ function renderLegend(){
   document.getElementById('legend').innerHTML =
     STAGE_NAMES.map((n,i)=>`<span class="sw" style="background:${c(i)};${i?'margin-left:10px':''}"></span>${n}`).join('') +
     `<br><span style="color:${hx(T.tetherRun)}">━ green: turn running now</span>` +
-    `<span style="margin-left:12px;color:${hx(T.discN)}">━ faint: obligation scheduled later</span>` +
+    `<span style="margin-left:12px;color:${hx(T.tetherSched)}">━ ink: obligation scheduled for later</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow: prompt due, turn owed</span>` +
     `<span style="margin-left:12px">hedron flashing = turn waiting · strobing shell = turn running · agent discs flash the same way</span>` +
     `<br><span>flat discs = agents, hanging below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
@@ -345,11 +345,10 @@ function buildItems(items){
     if (act==='wait' && w.stage<6) mesh.userData.waitFlash = true;
     Object.entries(w.turns||{}).forEach(([hid,st])=>{
       if (!byId[hid] || byId[hid].retired) return;
-      const col = st==='run' ? T.tetherRun : st==='wait' ? T.tetherWait : T.discN;
+      const col = st==='run' ? T.tetherRun : st==='wait' ? T.tetherWait : T.tetherSched;
       /* the tether is subdivided so a brightness wave can travel INSIDE it,
          showing direction without adding a separate object */
-      const lm = new LineMaterial({color:col, linewidth: st==='sched' ? 1 : 1.6,
-                                   transparent:true, opacity: st==='sched' ? .16 : .4});
+      const lm = new LineMaterial({color:col, linewidth:1.6, transparent:true, opacity:.4});
       lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
       const lg = new LineSegmentsGeometry().setPositions([0,0,0, 0,0,0]);
       const seg = new LineSegments2(lg, lm);
@@ -622,7 +621,7 @@ function tickFrame(){
     const a = APOS[u.hid]; if (!a) return;
     const p = u.itemMesh.position;
     _end.copy(a).add(new THREE.Vector3(0,.25,0));
-    u.mat.opacity = (u.state==='sched' ? .16 : .4) * Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
+    u.mat.opacity = .4 * Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
     u.geo.setPositions([p.x,p.y,p.z, _end.x,_end.y,_end.z]);
   });
   /* agent-to-agent links carry the travelling pulse: white crest running from
