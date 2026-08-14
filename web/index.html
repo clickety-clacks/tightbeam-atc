@@ -96,6 +96,10 @@ scene.add(groundGroup, itemGroup, tetherGroup);
 
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
 let flight = null, focused = false, orbitAngle = 0;
+/* focus has two stages: 1 = this node alone, 2 = this node plus everything it
+   is connected to, with the rest of the org dimmed back */
+let focusObj = null, focusStage = 0, hiAgents = null, hiItems = null;
+const DIM = 0.2;
 const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0);
 /* ambient tabletop orbit — parameterized so it can resume from any framing
    the user has dragged the camera into, not just the canonical home view */
@@ -141,6 +145,8 @@ function diagramMesh(geo, strokeHex){
   edgeMats.add(lineMat);
   fill.add(new LineSegments2(lg, lineMat));
   fill.userData.lineMat = lineMat;
+  fill.userData.baseFill = fill.material.color.clone();
+  fill.userData.baseStroke = lineMat.color.clone();
   return fill;
 }
 
@@ -155,6 +161,36 @@ function applyTheme(){
   grid.position.y = 0; scene.add(grid);
   renderLegend();
   if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); }
+}
+
+function computeHighlight(){
+  if (!focusObj || focusStage < 2 || !DATA){ hiAgents = hiItems = null; return; }
+  hiAgents = new Set(); hiItems = new Set();
+  const u = focusObj.userData;
+  if (u.type === 'item'){
+    hiItems.add(u.w.id);
+    Object.keys(u.w.turns || {}).forEach(h => hiAgents.add(h));
+    (u.w.holders || []).forEach(h => hiAgents.add(h));
+  } else if (u.a){
+    const id = u.a.id;
+    hiAgents.add(id);
+    if (u.a.parent) hiAgents.add(u.a.parent);
+    (DATA.agents || []).forEach(x => { if (x.parent === id) hiAgents.add(x.id); });
+    (DATA.items || []).forEach(w => {
+      if ((w.turns || {})[id] || (w.holders || []).includes(id)) hiItems.add(w.id);
+    });
+  }
+}
+/* frame everything currently highlighted */
+function neighbourhoodView(){
+  const pts = [];
+  itemMeshes.forEach(m => { if (m.userData.w && hiItems && hiItems.has(m.userData.w.id)) pts.push(m.position); });
+  Object.entries(agentMeshes).forEach(([id,m]) => { if (hiAgents && hiAgents.has(id)) pts.push(m.position); });
+  if (!pts.length) return null;
+  const c = new THREE.Vector3();
+  pts.forEach(v => c.add(v)); c.multiplyScalar(1/pts.length);
+  let r = 4; pts.forEach(v => r = Math.max(r, v.distanceTo(c)));
+  return {center:c, radius:r};
 }
 
 function renderLegend(){
@@ -229,7 +265,9 @@ function buildGround(agents){
     const c0=new THREE.Color(T.arcA), c1=new THREE.Color(T.arcB);
     pts.forEach((_,i)=>{ const c=c0.clone().lerp(c1,i/(pts.length-1)); cols.set([c.r,c.g,c.b],i*3); });
     geo.setAttribute('color', new THREE.BufferAttribute(cols,3));
-    groundGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({vertexColors:true, transparent:true, opacity:.9})));
+    const arc = new THREE.Line(geo, new THREE.LineBasicMaterial({vertexColors:true, transparent:true, opacity:.9}));
+    arc.userData = {arc:true, from:a.parent, to:a.id};
+    groundGroup.add(arc);
   });
 }
 
@@ -420,15 +458,29 @@ addEventListener('pointerup', e=>{
   ray.setFromCamera(mouse, camera);
   const hit = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], false)[0];
   if (hit && hit.object.userData.type){
-    const pt = hit.object.position.clone();
-    const dir = camera.position.clone().sub(pt); dir.y = 0;
-    if (dir.lengthSq() < .01) dir.set(1,0,1);
-    dir.normalize().multiplyScalar(9);
-    const camPos = pt.clone().add(dir); camPos.y = pt.y + 4.5;
+    const o = hit.object;
+    if (focusObj === o) focusStage = focusStage === 1 ? 2 : 1;
+    else { focusObj = o; focusStage = 1; }
+    computeHighlight();
     focused = true; userMoved = true;
-    flyTo(camPos, pt);
+    const nb = focusStage === 2 ? neighbourhoodView() : null;
+    if (nb){
+      const dir = camera.position.clone().sub(nb.center); dir.y = 0;
+      if (dir.lengthSq() < .01) dir.set(1,0,1);
+      dir.normalize().multiplyScalar(nb.radius * 2.1 + 8);
+      const camPos = nb.center.clone().add(dir);
+      camPos.y = nb.center.y + nb.radius * 1.1 + 6;
+      flyTo(camPos, nb.center);
+    } else {
+      const pt = o.position.clone();
+      const dir = camera.position.clone().sub(pt); dir.y = 0;
+      if (dir.lengthSq() < .01) dir.set(1,0,1);
+      dir.normalize().multiplyScalar(9);
+      const camPos = pt.clone().add(dir); camPos.y = pt.y + 4.5;
+      flyTo(camPos, pt);
+    }
   } else if (focused){
-    focused = false;
+    focused = false; focusObj = null; focusStage = 0; hiAgents = hiItems = null;
     const ang = Math.atan2(camera.position.x, camera.position.z);
     const home = new THREE.Vector3(Math.sin(ang)*66, 34, Math.cos(ang)*66);
     flyTo(home, HOME_TGT, ()=>{
@@ -436,6 +488,7 @@ addEventListener('pointerup', e=>{
       userMoved = false;
     });
   } else {
+    focusObj = null; focusStage = 0; hiAgents = hiItems = null;
     /* user had hand-rotated: resume the tabletop spin exactly where they left it */
     const d = camera.position.clone().sub(controls.target);
     orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
@@ -495,8 +548,20 @@ function tickFrame(){
                         orbitTgt.z + Math.cos(orbitAngle)*orbitR);
     controls.target.copy(orbitTgt); camera.lookAt(orbitTgt);
   }
+  const dimming = focusStage === 2 && hiAgents;
+  const fa = id => (!dimming || hiAgents.has(id)) ? 1 : DIM;
+  const fi = id => (!dimming || hiItems.has(id)) ? 1 : DIM;
+  const bg = new THREE.Color(T.bg);
+  const shade = (mat, base, f) => { if (base) mat.color.copy(base).lerp(bg, 1 - f); };
   groundGroup.children.forEach(m=>{
     const u=m.userData;
+    if (u.arc){ m.material.opacity = (!dimming || (hiAgents.has(u.from) && hiAgents.has(u.to))) ? .9 : .12; return; }
+    if (u.a){
+      const f = fa(u.a.id);
+      shade(m.material, u.baseFill, f);
+      if (u.lineMat && !u.flash) shade(u.lineMat, u.baseStroke, f);
+      m.children.forEach(ch => { if (ch.isSprite) ch.material.opacity = .85 * f; });
+    }
     if (u && u.flash && u.lineMat){
       const fast = u.flash==='run';
       u.lineMat.opacity = .18 + (0.5+0.5*Math.sin(t*(fast?5.5:2.2)+u.phase)) * .55;
@@ -504,6 +569,11 @@ function tickFrame(){
   });
   itemGroup.children.forEach(m=>{
     const u=m.userData;
+    if (u.w){
+      const f = fi(u.w.id);
+      shade(m.material, u.baseFill, f);
+      if (u.lineMat && !u.waitFlash) shade(u.lineMat, u.baseStroke, f);
+    }
     if (u.baseY){ m.position.y = u.baseY + Math.sin(t*1.2+u.phase)*.5; m.rotation.y += .004; }
     if (u.landed){ m.rotation.y += .0015; }
     if (u.waitFlash && u.lineMat){ u.lineMat.opacity = .15 + (0.5+0.5*Math.sin(t*2.6+u.phase))*.6; }
@@ -519,6 +589,8 @@ function tickFrame(){
     const p = u.itemMesh.position;
     _end.copy(a).add(new THREE.Vector3(0,.25,0));
     const fast = u.state === 'run';
+    const tf = Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
+    u.mat.opacity = .4 * tf;
     /* the wave crest runs from 0 (item end) to 1 (agent end) when the prompt
        is heading to this agent, and the other way when the item waits on
        someone else */
