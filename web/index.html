@@ -41,6 +41,7 @@ import { LineSegments2 } from './addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from './addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from './addons/lines/LineMaterial.js';
 const edgeMats = new Set();
+const TETHER_SEGS = 22;   /* subdivisions per tether, for the traveling wave */
 
 const STAGE_NAMES = ['specced','building','tests pass','reviewed','verdict clean','gate ready','merged'];
 const SEGS = ['spec bound','producer completion','tests + baselines','independent review','reviewed-clean verdict','merge attest'];
@@ -274,21 +275,22 @@ function buildItems(items){
     Object.entries(w.turns||{}).forEach(([hid,st])=>{
       if (!byId[hid] || byId[hid].retired) return;
       const col = st==='run' ? T.tetherRun : T.tetherWait;
-      /* fat line, double the diagram stroke, so an active tether reads as
-         attention rather than structure */
-      const lm = new LineMaterial({color:col, linewidth:2.5, transparent:true, opacity:.8});
+      /* the tether is subdivided so a brightness wave can travel INSIDE it,
+         showing direction without adding a separate object */
+      const lm = new LineMaterial({color:0xffffff, linewidth:2.5, transparent:true,
+                                   opacity:.85, vertexColors:true});
       lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
-      const lg = new LineSegmentsGeometry().setPositions([0,0,0, 0,0,0]);
+      const lg = new LineSegmentsGeometry()
+        .setPositions(new Array(TETHER_SEGS*6).fill(0))
+        .setColors(new Array(TETHER_SEGS*6).fill(0));
       const seg = new LineSegments2(lg, lm);
       seg.frustumCulled = false;
       seg.userData = {itemMesh:mesh, hid, state:st,
-                      dir:(w.flow||{})[hid] || 'in', mat:lm, geo:lg};
+                      dir:(w.flow||{})[hid] || 'in', mat:lm, geo:lg,
+                      col:new THREE.Color(col), head:Math.random(),
+                      pos:new Float32Array(TETHER_SEGS*6),
+                      rgb:new Float32Array(TETHER_SEGS*6)};
       tetherGroup.add(seg);
-      /* a bead runs the tether in the direction the waiting prompt travels */
-      const bead = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:col, transparent:true}));
-      bead.scale.setScalar(st==='run' ? .7 : .55);
-      bead.userData = {tether:seg, t:Math.random()};
-      tetherGroup.add(bead);
     });
     if (w.stalled){
       const halo = new THREE.Mesh(new THREE.RingGeometry(1.5,1.85,32),
@@ -513,26 +515,36 @@ function tickFrame(){
   const _end = new THREE.Vector3();
   tetherGroup.children.forEach(o=>{
     const u = o.userData;
-    if (u.geo){                                   /* the fat tether itself */
-      const a = APOS[u.hid]; if (!a) return;
-      const p = u.itemMesh.position;
-      _end.copy(a).add(new THREE.Vector3(0,.25,0));
-      u.geo.setPositions([p.x,p.y,p.z, _end.x,_end.y,_end.z]);
-      const fast = u.state==='run';
-      u.mat.opacity = (fast ? .5 : .3) +
-        Math.abs(Math.sin(t*(fast?6:3) + (u.itemMesh.userData.phase||0))) * .45;
-    } else if (u.tether){                         /* the direction bead */
-      const tu = u.tether.userData, a = APOS[tu.hid];
-      if (!a){ o.visible = false; return; }
-      o.visible = true;
-      const p = tu.itemMesh.position;
-      _end.copy(a).add(new THREE.Vector3(0,.25,0));
-      /* "in": the prompt is heading to this agent, so it runs item → agent */
-      const from = tu.dir==='in' ? p : _end, to = tu.dir==='in' ? _end : p;
-      u.t = (u.t + (tu.state==='run' ? .014 : .007)) % 1;
-      o.position.lerpVectors(from, to, u.t);
-      o.material.opacity = .95 * (1 - Math.abs(u.t - .5) * 1.2);
+    const a = APOS[u.hid]; if (!a) return;
+    const p = u.itemMesh.position;
+    _end.copy(a).add(new THREE.Vector3(0,.25,0));
+    const fast = u.state === 'run';
+    /* the wave crest runs from 0 (item end) to 1 (agent end) when the prompt
+       is heading to this agent, and the other way when the item waits on
+       someone else */
+    u.head = (u.head + (fast ? .010 : .005)) % 1;
+    const crest = u.dir === 'in' ? u.head : 1 - u.head;
+    const pos = u.pos, rgb = u.rgb, base = fast ? .3 : .18;
+    for (let i = 0; i < TETHER_SEGS; i++){
+      const f0 = i / TETHER_SEGS, f1 = (i + 1) / TETHER_SEGS, k = i * 6;
+      pos[k]   = p.x + (_end.x - p.x) * f0;
+      pos[k+1] = p.y + (_end.y - p.y) * f0;
+      pos[k+2] = p.z + (_end.z - p.z) * f0;
+      pos[k+3] = p.x + (_end.x - p.x) * f1;
+      pos[k+4] = p.y + (_end.y - p.y) * f1;
+      pos[k+5] = p.z + (_end.z - p.z) * f1;
+      for (let e = 0; e < 2; e++){
+        const f = e ? f1 : f0;
+        let d = Math.abs(f - crest); if (d > .5) d = 1 - d;      /* wrap */
+        const amp = base + Math.exp(-(d*d) / .012) * (fast ? .95 : .7);
+        const j = k + e*3;
+        rgb[j]   = u.col.r * amp;
+        rgb[j+1] = u.col.g * amp;
+        rgb[j+2] = u.col.b * amp;
+      }
     }
+    u.geo.setPositions(pos);
+    u.geo.setColors(rgb);
   });
   for (let i=msgLines.length-1;i>=0;i--){
     const l = msgLines[i], u = l.userData;
