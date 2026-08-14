@@ -249,7 +249,18 @@ for r in q("""SELECT wakeId, creatorSessionKey, sessionKey FROM wakes
     if src and dst and src != dst:
         wakes_out.append({"id": r["wakeId"], "from": src, "to": dst})
 
-snap = {"generatedAt": NOW, "agents": agents,
+# ---- agent-to-agent links: a pending wake IS an obligation between two
+# agents. Green when the receiver is in a turn, yellow when it still owes one.
+links = []
+for r in q("""SELECT wakeId, creatorSessionKey, sessionKey FROM wakes
+              WHERE state='pending' ORDER BY dueAt LIMIT 300"""):
+    src = ids.get(r["creatorSessionKey"])
+    dst = ids.get(r["sessionKey"])
+    if src and dst and src != dst:
+        links.append({"id": r["wakeId"], "from": src, "to": dst,
+                      "state": "run" if r["sessionKey"] in running_sessions else "wait"})
+
+snap = {"generatedAt": NOW, "agents": agents, "links": links,
         "items": open_items + landed, "messages": msgs, "wakes": wakes_out}
 json.dump(snap, open(OUT, "w"))
 if branch_shas:

@@ -91,8 +91,8 @@ const key = new THREE.DirectionalLight(0xffffff, 1.1); key.position.set(30,50,20
 const rim = new THREE.DirectionalLight(0xffffff, .5); rim.position.set(-30,20,-30); scene.add(rim);
 let grid = null;
 
-const groundGroup = new THREE.Group(), itemGroup = new THREE.Group(), tetherGroup = new THREE.Group();
-scene.add(groundGroup, itemGroup, tetherGroup);
+const groundGroup = new THREE.Group(), itemGroup = new THREE.Group(), tetherGroup = new THREE.Group(), linkGroup = new THREE.Group();
+scene.add(groundGroup, itemGroup, tetherGroup, linkGroup);
 
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
 let flight = null, focused = false, orbitAngle = 0;
@@ -160,7 +160,7 @@ function applyTheme(){
   grid.material.transparent = true; grid.material.opacity = .35;
   grid.position.y = 0; scene.add(grid);
   renderLegend();
-  if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); }
+  if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); buildLinks(DATA.links); }
 }
 
 function computeHighlight(){
@@ -271,6 +271,28 @@ function buildGround(agents){
   });
 }
 
+function buildLinks(links){
+  disposeGroup(linkGroup);
+  (links||[]).forEach(l=>{
+    if (!APOS[l.from] || !APOS[l.to]) return;
+    if (!byId[l.from] || !byId[l.to]) return;
+    const col = l.state === 'run' ? T.tetherRun : T.tetherWait;
+    const lm = new LineMaterial({color:0xffffff, linewidth:1.6, transparent:true,
+                                 opacity:.4, vertexColors:true});
+    lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
+    const lg = new LineSegmentsGeometry()
+      .setPositions(new Array(TETHER_SEGS*6).fill(0))
+      .setColors(new Array(TETHER_SEGS*6).fill(0));
+    const seg = new LineSegments2(lg, lm);
+    seg.frustumCulled = false;
+    seg.userData = {from:l.from, to:l.to, state:l.state, mat:lm, geo:lg,
+                    col:new THREE.Color(col), head:Math.random(),
+                    pos:new Float32Array(TETHER_SEGS*6),
+                    rgb:new Float32Array(TETHER_SEGS*6)};
+    linkGroup.add(seg);
+  });
+}
+
 function buildItems(items){
   disposeGroup(itemGroup); disposeGroup(tetherGroup); itemMeshes = [];
   items.forEach((w,idx)=>{
@@ -315,19 +337,12 @@ function buildItems(items){
       const col = st==='run' ? T.tetherRun : T.tetherWait;
       /* the tether is subdivided so a brightness wave can travel INSIDE it,
          showing direction without adding a separate object */
-      const lm = new LineMaterial({color:0xffffff, linewidth:1.6, transparent:true,
-                                   opacity:.4, vertexColors:true});
+      const lm = new LineMaterial({color:col, linewidth:1.6, transparent:true, opacity:.55});
       lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
-      const lg = new LineSegmentsGeometry()
-        .setPositions(new Array(TETHER_SEGS*6).fill(0))
-        .setColors(new Array(TETHER_SEGS*6).fill(0));
+      const lg = new LineSegmentsGeometry().setPositions([0,0,0, 0,0,0]);
       const seg = new LineSegments2(lg, lm);
       seg.frustumCulled = false;
-      seg.userData = {itemMesh:mesh, hid, state:st,
-                      dir:(w.flow||{})[hid] || 'in', mat:lm, geo:lg,
-                      col:new THREE.Color(col), head:Math.random(),
-                      pos:new Float32Array(TETHER_SEGS*6),
-                      rgb:new Float32Array(TETHER_SEGS*6)};
+      seg.userData = {itemMesh:mesh, hid, state:st, mat:lm, geo:lg};
       tetherGroup.add(seg);
     });
     if (w.stalled){
@@ -421,6 +436,7 @@ async function refresh(){
     const h = d.agents.map(a=>a.id+(a.retired?1:0)+(a.turn||'')).join('|');
     if (h !== agentsHash){ agentsHash = h; buildGround(d.agents); }
     buildItems(d.items);
+    buildLinks(d.links);
     spawnWakes(); spawnMessages();
     const age = Math.round((Date.now()-d.generatedAt)/1000);
     const el = document.getElementById('mode');
@@ -588,36 +604,35 @@ function tickFrame(){
     const a = APOS[u.hid]; if (!a) return;
     const p = u.itemMesh.position;
     _end.copy(a).add(new THREE.Vector3(0,.25,0));
+    u.mat.opacity = .55 * Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
+    u.geo.setPositions([p.x,p.y,p.z, _end.x,_end.y,_end.z]);
+  });
+  /* agent-to-agent links carry the travelling pulse: white crest running from
+     the sender to whoever owes the turn */
+  linkGroup.children.forEach(o=>{
+    const u = o.userData;
+    const A = APOS[u.from], B = APOS[u.to];
+    if (!A || !B){ o.visible = false; return; }
+    o.visible = true;
     const fast = u.state === 'run';
-    const tf = Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
-    u.mat.opacity = .4 * tf;
-    /* the wave crest runs from 0 (item end) to 1 (agent end) when the prompt
-       is heading to this agent, and the other way when the item waits on
-       someone else */
-    u.head = (u.head + (fast ? .010 : .005)) % 1;
-    const crest = u.dir === 'in' ? u.head : 1 - u.head;
+    u.mat.opacity = .4 * Math.min(fa(u.from), fa(u.to));
+    u.head = (u.head + (fast ? .011 : .006)) % 1;
     const pos = u.pos, rgb = u.rgb;
     for (let i = 0; i < TETHER_SEGS; i++){
-      const f0 = i / TETHER_SEGS, f1 = (i + 1) / TETHER_SEGS, k = i * 6;
-      pos[k]   = p.x + (_end.x - p.x) * f0;
-      pos[k+1] = p.y + (_end.y - p.y) * f0;
-      pos[k+2] = p.z + (_end.z - p.z) * f0;
-      pos[k+3] = p.x + (_end.x - p.x) * f1;
-      pos[k+4] = p.y + (_end.y - p.y) * f1;
-      pos[k+5] = p.z + (_end.z - p.z) * f1;
+      const f0 = i/TETHER_SEGS, f1 = (i+1)/TETHER_SEGS, k = i*6;
+      pos[k]   = A.x + (B.x-A.x)*f0; pos[k+1] = A.y + (B.y-A.y)*f0 + .25; pos[k+2] = A.z + (B.z-A.z)*f0;
+      pos[k+3] = A.x + (B.x-A.x)*f1; pos[k+4] = A.y + (B.y-A.y)*f1 + .25; pos[k+5] = A.z + (B.z-A.z)*f1;
       for (let e = 0; e < 2; e++){
         const f = e ? f1 : f0;
-        let d = Math.abs(f - crest); if (d > .5) d = 1 - d;      /* wrap */
-        /* the line stays its own colour; the crest blows out to white */
-        const hot = Math.min(1, Math.exp(-(d*d) / .0022) * (fast ? 1.25 : 1));
+        let d = Math.abs(f - u.head); if (d > .5) d = 1 - d;
+        const hot = Math.min(1, Math.exp(-(d*d)/.0022) * (fast ? 1.25 : 1));
         const j = k + e*3;
-        rgb[j]   = u.col.r + (1 - u.col.r) * hot;
-        rgb[j+1] = u.col.g + (1 - u.col.g) * hot;
-        rgb[j+2] = u.col.b + (1 - u.col.b) * hot;
+        rgb[j]   = u.col.r + (1-u.col.r)*hot;
+        rgb[j+1] = u.col.g + (1-u.col.g)*hot;
+        rgb[j+2] = u.col.b + (1-u.col.b)*hot;
       }
     }
-    u.geo.setPositions(pos);
-    u.geo.setColors(rgb);
+    u.geo.setPositions(pos); u.geo.setColors(rgb);
   });
   for (let i=msgLines.length-1;i>=0;i--){
     const l = msgLines[i], u = l.userData;
