@@ -8,34 +8,41 @@
   html,body { margin:0; height:100%; background:#101214; overflow:hidden;
     font-family: ui-sans-serif,-apple-system,"Helvetica Neue",Arial,sans-serif; }
   #hud { position:fixed; top:14px; left:18px; color:#9a9ea6; font-size:12px;
-    letter-spacing:.22em; text-transform:uppercase; pointer-events:none; }
+    letter-spacing:.22em; text-transform:uppercase; pointer-events:none;
+    background:#101214e6; border:1px solid #2a2d31; border-radius:5px; padding:7px 11px; }
   #hud b { color:#b08d57; font-weight:600; }
   #hud .live { color:#6fae4e; } #hud .sample { color:#c9a835; }
-  #legend { position:fixed; bottom:14px; left:18px; color:#7c8188; font-size:11px; line-height:1.9; pointer-events:none; }
+  #legend { position:fixed; bottom:14px; left:18px; color:#7c8188; font-size:11px;
+    line-height:1.9; pointer-events:none; background:#101214e6; border:1px solid #2a2d31;
+    border-radius:5px; padding:8px 12px; max-width:calc(100vw - 36px); }
   .sw { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:-1px; }
   #tip { position:fixed; display:none; background:#1b1e22ee; color:#d8d6d1;
     border:1px solid #3a3d42; border-left:3px solid #b08d57; border-radius:4px;
     padding:8px 12px; font-size:12.5px; line-height:1.5; pointer-events:none; max-width:320px; }
   #tip .t { color:#b08d57; font-weight:600; }
   #tip .seg { color:#9a9ea6; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
-  #themehint { position:fixed; top:14px; right:18px; color:#7c8188; font-size:10.5px; letter-spacing:.12em; text-transform:uppercase; }
+  #themehint { position:fixed; top:14px; right:18px; color:#7c8188; font-size:10.5px;
+    letter-spacing:.12em; text-transform:uppercase; background:#101214e6;
+    border:1px solid #2a2d31; border-radius:5px; padding:6px 10px; pointer-events:none; }
   body.light { background:#f2eee2; }
-  body.light #hud { color:#5c6b78; } body.light #hud b { color:#c23b22; }
+  body.light #hud { color:#5c6b78; background:#f2eee2e8; border-color:#c3cdd8; } body.light #hud b { color:#c23b22; }
   body.light #hud .live { color:#2e7d5b; } body.light #hud .sample { color:#c9a227; }
-  body.light #legend { color:#5c6b78; }
+  body.light #legend { color:#5c6b78; background:#f2eee2e8; border-color:#c3cdd8; }
   body.light #tip { background:#faf7eeee; color:#26323c; border-color:#b8c7d9; border-left-color:#c23b22; }
   body.light #tip .t { color:#c23b22; } body.light #tip .seg { color:#5c6b78; }
-  body.light #themehint { color:#8a97a3; }
+  body.light #themehint { color:#8a97a3; background:#f2eee2e8; border-color:#c3cdd8; }
   #selcursor { position:fixed; border:1.5px solid #b08d57; border-radius:50%;
     pointer-events:none; display:none; transform:translate(-50%,-50%); z-index:5;
     box-shadow:0 0 0 1px rgba(0,0,0,.25) inset; }
   #selcursor.unsel { border-color:#c4453c; border-style:dashed; }
   body.light #selcursor { border-color:#c23b22; }
-  #selui { position:fixed; top:38px; right:18px; display:none; z-index:6; pointer-events:none;
+  #selui { position:fixed; top:52px; right:18px; z-index:6; pointer-events:none;
     background:#1b1e22dd; border:1px solid #3a3d42; border-radius:5px;
     padding:8px 11px; color:#9a9ea6; font-size:11px; letter-spacing:.08em;
     text-transform:uppercase; }
   #selui input { width:130px; vertical-align:middle; pointer-events:auto; }
+  #selui.off { opacity:.5; }
+  #selui.off input { pointer-events:none; }
   #selui b { color:#b08d57; }
   body.light #selui { background:#faf7eeee; border-color:#b8c7d9; color:#5c6b78; }
   body.light #selui b { color:#c23b22; }
@@ -47,7 +54,7 @@
 <div id="legend"></div>
 <div id="tip"></div>
 <div id="selcursor"></div>
-<div id="selui">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> &nbsp;·&nbsp; <span id="selcount">0</span> selected &nbsp;·&nbsp; [ ] resize · f fit · d clear · esc/s exit</div>
+<div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> &nbsp;·&nbsp; <span id="selcount">0</span> selected &nbsp;·&nbsp; [ ] resize · f fit · d clear · esc/s exit</div>
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
@@ -702,7 +709,7 @@ function setSelectMode(on){
   selectMode = on;
   if (on){ focusObj = null; focusStage = 0; hiAgents = hiItems = null; }
   controls.enabled = !on;
-  selUI.style.display = on ? 'block' : 'none';
+  selUI.classList.toggle('off', !on);
   selCursor.style.display = on ? 'block' : 'none';
   if (!on){ selecting = false; selOp = null; selCursor.classList.remove('unsel'); }
 }
