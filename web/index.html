@@ -326,7 +326,7 @@ function buildItems(items){
       : new THREE.Vector3(anchor.x + sc.x,
                           6 + (4 - w.stage)*4.2 + (idx%3)*.8,
                           anchor.z + sc.z);
-    const igeo = new THREE.IcosahedronGeometry(landed? .95 : 1.05, 0);
+    const igeo = new THREE.IcosahedronGeometry(landed? .475 : .525, 0);
     const mesh = diagramMesh(igeo, col);
     mesh.position.copy(pos);
     Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, landed, baseY: landed? null : pos.y});
@@ -343,7 +343,7 @@ function buildItems(items){
                  : (w.code && w.merged===false)    ? T.discY : T.discN;
       /* solid ring, not a wireframe: the named radius is the OUTER edge and
          the band runs inward from it */
-      const R = 1.2, BAND = .26;
+      const R = .8, BAND = .18;
       const dgeo = new THREE.RingGeometry(R - BAND, R, 64).rotateX(-Math.PI/2);
       const disc = new THREE.Mesh(dgeo, new THREE.MeshBasicMaterial({
         color: dcol, side: THREE.DoubleSide, transparent: true, opacity: .5 }));
@@ -355,7 +355,7 @@ function buildItems(items){
     const vals = Object.values(w.turns||{});
     const act = vals.includes('run') ? 'run' : vals.includes('wait') ? 'wait' : null;
     if (act==='run' && w.stage<6){
-      const shell = new THREE.Mesh(new THREE.SphereGeometry(1.45, 28, 20),
+      const shell = new THREE.Mesh(new THREE.SphereGeometry(.78, 28, 20),
         new THREE.MeshBasicMaterial({color:T.shell, transparent:true, opacity:.1, depthWrite:false}));
       shell.userData={act:'run'}; mesh.add(shell);
     }
@@ -387,14 +387,14 @@ function buildItems(items){
       tetherGroup.add(seg);
     });
     if (w.stalled){
-      const halo = new THREE.Mesh(new THREE.RingGeometry(1.5,1.85,32),
+      const halo = new THREE.Mesh(new THREE.RingGeometry(.8,.98,32),
         new THREE.MeshBasicMaterial({color:T.halo, side:THREE.DoubleSide, transparent:true, opacity:.7}));
       halo.userData={pulse:true}; mesh.add(halo);
     }
     if (!active.length){
       /* orphan mark: a billboard ring AROUND the item, so it never reads as a
          landing marker on the ground */
-      const ring = new THREE.Mesh(new THREE.RingGeometry(1.5,1.68,48),
+      const ring = new THREE.Mesh(new THREE.RingGeometry(.78,.9,48),
         new THREE.MeshBasicMaterial({color:T.orphan, side:THREE.DoubleSide,
                                      transparent:true, opacity:.55, depthWrite:false}));
       ring.userData = {orphanRing:true};
