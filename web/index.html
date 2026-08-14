@@ -117,7 +117,7 @@ const groundGroup = new THREE.Group(), itemGroup = new THREE.Group(), tetherGrou
 scene.add(groundGroup, itemGroup, tetherGroup, linkGroup);
 
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
-let flight = null, focused = false, orbitAngle = 0;
+let flight = null, orbitAngle = 0;
 
 /* ---------- view state ----------
    Two independent things, plus one input mode. Nothing else may hold view
@@ -130,11 +130,19 @@ let flight = null, focused = false, orbitAngle = 0;
    Selection and focus are ORTHOGONAL: neither clears or constrains the other. */
 const view = {
   selection: new Set(),
-  focus: { obj: null, stage: 0 },
+  /* focus holds a STABLE KEY, never a mesh: meshes are rebuilt every five
+     seconds, so an object reference goes stale and takes hover, dimming and
+     framing with it. focusMesh() resolves the key against the current scene. */
+  focus: { key: null, stage: 0 },
   input: 'navigate',
+  framing: 'none',               /* 'none' | 'focus' | 'selection' — camera intent */
   fitTarget: 'selection',        /* which framing f/space lands on next */
 };
-/* derived from view.focus by computeHighlight(); never set directly */
+function focusMesh(){
+  if (!view.focus.key) return null;
+  return selectables().find(m => selKey(m) === view.focus.key) || null;
+}
+/* derived from view.focus by computeHighlight() — its only writer */
 let hiAgents = null, hiItems = null;
 const DIM = 0.2;
 const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0);
@@ -198,13 +206,13 @@ function applyTheme(){
   grid.position.y = 0; scene.add(grid);
   renderLegend();
   if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); buildLinks(DATA.links);
-             if (typeof applyView === 'function') applyView(); }
+             applyView(); }
 }
 
 /* the ghost set is derived from focus alone — never stored independently */
 function computeHighlight(){
-  const { obj, stage } = view.focus;
-  if (!obj || stage < 2 || !DATA){ hiAgents = hiItems = null; return; }
+  const obj = focusMesh();
+  if (!obj || view.focus.stage < 2 || !DATA){ hiAgents = hiItems = null; return; }
   hiAgents = new Set(); hiItems = new Set();
   const u = obj.userData;
   if (u.type === 'item'){
@@ -543,7 +551,7 @@ addEventListener('keydown', e=>{
   if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
   else if (e.key==='s' || e.key==='S'){ setInputMode(view.input==='brush' ? 'navigate' : 'brush'); }
   else if (e.key==='d' || e.key==='D'){ view.selection.clear(); applyView(); }
-  else if (e.key==='Escape'){ clearFocus(); setInputMode('navigate'); }
+  else if (e.key==='Escape'){ clearFocus(); if (view.input==='brush') setInputMode('navigate'); }
   else if (e.key==='f' || e.key==='F' || e.key===' '){
     e.preventDefault(); fitSelection();
   }
@@ -570,10 +578,11 @@ addEventListener('pointerup', e=>{
   const hit = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], false)[0];
   if (hit && hit.object.userData.type){
     const o = hit.object;
-    if (view.focus.obj === o) view.focus.stage = view.focus.stage === 1 ? 2 : 1;
-    else { view.focus.obj = o; view.focus.stage = 1; }
+    const k = selKey(o);
+    if (view.focus.key && view.focus.key === k) view.focus.stage = view.focus.stage === 1 ? 2 : 1;
+    else { view.focus.key = k; view.focus.stage = 1; }
     applyView();
-    focused = true; userMoved = true;
+    view.framing = 'focus'; userMoved = true;
     const nb = view.focus.stage === 2 ? neighbourhoodView() : null;
     if (nb){
       const dir = camera.position.clone().sub(nb.center); dir.y = 0;
@@ -590,8 +599,8 @@ addEventListener('pointerup', e=>{
       const camPos = pt.clone().add(dir); camPos.y = pt.y + 4.5;
       flyTo(camPos, pt);
     }
-  } else if (focused){
-    focused = false; clearFocus();
+  } else if (view.framing !== 'none'){
+    clearFocus();
     const ang = Math.atan2(camera.position.x, camera.position.z);
     const home = new THREE.Vector3(Math.sin(ang)*66, 34, Math.cos(ang)*66);
     flyTo(home, HOME_TGT, ()=>{
@@ -650,7 +659,6 @@ addEventListener('pointermove', e=>{
    whatever it touches; the first thing it touches on a drag decides whether the
    stroke selects or deselects. Selection survives leaving the mode. */
 let selecting = false, selOp = null, selRadius = 46;
-const selected = view.selection;                 /* one owner, aliased for brevity */
 const selCursor = document.getElementById('selcursor');
 const selUI = document.getElementById('selui');
 const selRad = document.getElementById('selrad');
@@ -687,9 +695,14 @@ function shadeSelected(mesh, on){
     if (u.lineMat) u.lineMat.visible = true;
   }
 }
-/* The single point where view state becomes pixels. Call after ANY view change
-   and after every rebuild; meshes are recreated on each five-second refresh, so
-   selection shading has to be re-applied rather than assumed. */
+/* Full sync of view state to pixels. Call after any state change and after
+   every rebuild — meshes are recreated on each five-second refresh, so shading
+   cannot be assumed to survive.
+   NOT the only writer of pixels, and the comment should not pretend otherwise:
+   paintAt() shades the meshes it hits directly as a deliberate fast path (a
+   brush stroke can touch hundreds of nodes per frame), and the dim factors are
+   applied per frame in tickFrame() because they animate. Both stay consistent
+   because every rebuild ends in applyView(). */
 function applyView(){
   computeHighlight();
   selectables().forEach(m => {
@@ -731,8 +744,9 @@ function setInputMode(mode){
 }
 /* the ONLY place focus is dropped */
 function clearFocus(){
-  view.focus.obj = null; view.focus.stage = 0;
-  hiAgents = hiItems = null;
+  view.focus.key = null; view.focus.stage = 0;
+  view.framing = 'none';                 /* releases the camera to ambient orbit */
+  applyView();                           /* focus drives dimming: re-derive now */
 }
 function setRadius(px){
   selRadius = Math.max(8, Math.min(220, Math.round(px)));
@@ -774,13 +788,12 @@ function fitSelection(){
       if (inside) focusPts.push(m.position);
     }
   });
-  if (!focusPts.length && view.focus.obj) focusPts.push(view.focus.obj.position);
+  if (!focusPts.length){ const fm = focusMesh(); if (fm) focusPts.push(fm.position); }
   const haveSel = selPts.length > 0, haveFocus = focusPts.length > 0;
   if (haveSel && haveFocus) view.fitTarget = view.fitTarget === 'selection' ? 'focus' : 'selection';
   else view.fitTarget = haveSel ? 'selection' : 'focus';
   let pts = view.fitTarget === 'selection' ? selPts : focusPts;
-  if (!pts.length) pts = haveSel ? selPts : focusPts;
-  if (!pts.length) selectables().forEach(m => pts.push(m.position));
+  if (!pts.length) selectables().forEach(m => pts.push(m.position));   /* nothing chosen: frame the org */
   if (!pts.length) return false;
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
@@ -801,9 +814,9 @@ function fitSelection(){
     orbitH = d.y;
     orbitAngle = Math.atan2(d.x, d.z);
     orbitTgt.copy(c);
-    focused = false; userMoved = false;
+    view.framing = 'none'; userMoved = false;   /* orbit resumes around what we framed */
   });
-  focused = true; userMoved = true;
+  view.framing = view.fitTarget; userMoved = true;
   return true;
 }
 
@@ -818,7 +831,7 @@ function tickFrame(){
     camera.position.lerpVectors(flight.p0, flight.p1, e);
     controls.target.lerpVectors(flight.t0, flight.t1, e);
     if (flight.k >= 1){ flight.after?.(); flight = null; }
-  } else if (!userMoved && !focused && view.input!=='brush'){
+  } else if (!userMoved && view.framing==='none' && view.input!=='brush'){
     orbitAngle += .00085;
     camera.position.set(orbitTgt.x + Math.sin(orbitAngle)*orbitR,
                         orbitTgt.y + orbitH,
