@@ -636,6 +636,7 @@ addEventListener('pointermove', e=>{
    whatever it touches; the first thing it touches on a drag decides whether the
    stroke selects or deselects. Selection survives leaving the mode. */
 let selectMode = false, selecting = false, selOp = null, selRadius = 46;
+let fitOnSelection = true;   /* which framing f/space lands on next */
 const selected = new Set();
 const selCursor = document.getElementById('selcursor');
 const selUI = document.getElementById('selui');
@@ -736,10 +737,26 @@ addEventListener('pointerup', () => {
 
 /* fit the view around the current selection ('f' or space) */
 function fitSelection(){
-  const pts = [];
-  selectables().forEach(m => { const k = selKey(m); if (k && selected.has(k)) pts.push(m.position); });
-  if (!pts.length && focusObj) pts.push(focusObj.position);      /* nothing brushed: frame the focus */
-  if (!pts.length) selectables().forEach(m => pts.push(m.position));  /* nothing at all: frame the org */
+  /* f/space toggles between the two framings: whatever focus mode is showing,
+     and the brushed selection. With only one of them available it just frames
+     that one, and with neither it frames the whole org. */
+  const selPts = [], focusPts = [];
+  selectables().forEach(m => {
+    const k = selKey(m);
+    if (k && selected.has(k)) selPts.push(m.position);
+    if (focusStage === 2 && hiAgents){
+      const u = m.userData;
+      const inside = u.w ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
+      if (inside) focusPts.push(m.position);
+    }
+  });
+  if (!focusPts.length && focusObj) focusPts.push(focusObj.position);
+  const haveSel = selPts.length > 0, haveFocus = focusPts.length > 0;
+  if (haveSel && haveFocus) fitOnSelection = !fitOnSelection;
+  else fitOnSelection = haveSel;
+  let pts = fitOnSelection ? selPts : focusPts;
+  if (!pts.length) pts = haveSel ? selPts : focusPts;
+  if (!pts.length) selectables().forEach(m => pts.push(m.position));
   if (!pts.length) return false;
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
