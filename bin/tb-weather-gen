@@ -150,15 +150,20 @@ for r in q("""SELECT t.sessionKey, a.workItemId FROM turns t
 # with no work item is about the session, not about any particular piece of
 # work, so it must not light up every card that session happens to hold.
 item_wait = {}
+# ...and only when it is actually DUE. Most pending wakes are scheduled hours
+# ahead (the substrate's slate-clear prods sit a day out); a future reminder is
+# not a prompt waiting on a turn.
+DUE = NOW + 60_000
 for r in q("""SELECT sessionKey, work_item_id FROM wakes
-              WHERE state='pending' AND work_item_id IS NOT NULL"""):
+              WHERE state='pending' AND work_item_id IS NOT NULL AND dueAt <= ?""", DUE):
     item_wait.setdefault(r["work_item_id"], set()).add(r["sessionKey"])
 for r in q("""SELECT w.sessionKey, a.workItemId FROM wakes w
               JOIN assignments a ON a.id = w.assignmentId
-              WHERE w.state='pending' AND w.work_item_id IS NULL"""):
+              WHERE w.state='pending' AND w.work_item_id IS NULL AND w.dueAt <= ?""", DUE):
     item_wait.setdefault(r["workItemId"], set()).add(r["sessionKey"])
 pending = {r["sessionKey"] for r in q(
-    "SELECT DISTINCT sessionKey FROM wakes WHERE state='pending'")}
+    "SELECT DISTINCT sessionKey FROM wakes WHERE state='pending' AND dueAt <= ?",
+    NOW + 60_000)}
 
 # ---- work items with evidence stages
 items = []
