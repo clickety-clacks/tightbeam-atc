@@ -278,14 +278,24 @@ for r in q("""SELECT wakeId, creatorSessionKey, sessionKey FROM wakes
 
 # ---- agent-to-agent links: a pending wake IS an obligation between two
 # agents. Green when the receiver is in a turn, yellow when it still owes one.
-links = []
+links, seen_link = [], set()
+# yellow: the wake is still pending, so the receiver owes a turn
 for r in q("""SELECT wakeId, creatorSessionKey, sessionKey FROM wakes
               WHERE state='pending' ORDER BY dueAt LIMIT 300"""):
-    src = ids.get(r["creatorSessionKey"])
-    dst = ids.get(r["sessionKey"])
+    src, dst = ids.get(r["creatorSessionKey"]), ids.get(r["sessionKey"])
     if src and dst and src != dst:
-        links.append({"id": r["wakeId"], "from": src, "to": dst,
-                      "state": "run" if r["sessionKey"] in running_sessions else "wait"})
+        links.append({"id": r["wakeId"], "from": src, "to": dst, "state": "wait"})
+        seen_link.add(r["wakeId"])
+# green: the wake fired and the turn it started is executing right now. Without
+# this the line vanished at the moment of delivery, which is exactly when the
+# work begins.
+for r in q("""SELECT t.wakeId, w.creatorSessionKey, t.sessionKey FROM turns t
+              JOIN wakes w ON w.wakeId = t.wakeId
+              WHERE t.endedAt IS NULL AND t.startedAt IS NOT NULL"""):
+    src, dst = ids.get(r["creatorSessionKey"]), ids.get(r["sessionKey"])
+    if src and dst and src != dst and r["wakeId"] not in seen_link:
+        links.append({"id": r["wakeId"], "from": src, "to": dst, "state": "run"})
+        seen_link.add(r["wakeId"])
 
 snap = {"generatedAt": NOW, "agents": agents, "links": links,
         "items": open_items + landed, "messages": msgs, "wakes": wakes_out}
