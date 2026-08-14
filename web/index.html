@@ -198,9 +198,9 @@ function renderLegend(){
   const hx = v => '#'+v.toString(16).padStart(6,'0');
   document.getElementById('legend').innerHTML =
     STAGE_NAMES.map((n,i)=>`<span class="sw" style="background:${c(i)};${i?'margin-left:10px':''}"></span>${n}`).join('') +
-    `<br><span style="color:${hx(T.tetherRun)}">━ green: turn running now</span>` +
-    `<span style="margin-left:12px;color:${hx(T.tetherSched)}">━ ink: obligation scheduled for later</span>` +
-    `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow: prompt due, turn owed</span>` +
+    `<br><span style="color:${hx(T.tetherRun)}">━ green: turn executing now</span>` +
+    `<span style="margin-left:12px">(no line = no turn on that item)</span>` +
+    `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow: turn queued, not started</span>` +
     `<span style="margin-left:12px">hedron flashing = turn waiting · strobing shell = turn running · agent discs flash the same way</span>` +
     `<br><span>flat discs = agents, hanging below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
     `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = reviewed, not merged yet</span>` +
@@ -345,7 +345,7 @@ function buildItems(items){
     if (act==='wait' && w.stage<6) mesh.userData.waitFlash = true;
     Object.entries(w.turns||{}).forEach(([hid,st])=>{
       if (!byId[hid] || byId[hid].retired) return;
-      const col = st==='run' ? T.tetherRun : st==='wait' ? T.tetherWait : T.tetherSched;
+      const col = st==='run' ? T.tetherRun : T.tetherWait;
       /* the tether is subdivided so a brightness wave can travel INSIDE it,
          showing direction without adding a separate object */
       const lm = new LineMaterial({color:col, linewidth:1.6, transparent:true, opacity:.4});

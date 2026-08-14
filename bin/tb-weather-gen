@@ -146,29 +146,16 @@ for r in q("""SELECT t.sessionKey, a.workItemId FROM turns t
               JOIN assignments a ON a.id = t.assignmentId
               WHERE t.startedAt IS NOT NULL AND t.endedAt IS NULL"""):
     item_running.setdefault(r["workItemId"], set()).add(r["sessionKey"])
-# a pending wake only says something about a CARD when it names one. A wake
-# with no work item is about the session, not about any particular piece of
-# work, so it must not light up every card that session happens to hold.
-item_wait = {}
-# ...and only when it is actually DUE. Most pending wakes are scheduled hours
-# ahead (the substrate's slate-clear prods sit a day out); a future reminder is
-# not a prompt waiting on a turn.
-# Three honest states, because the ledger really does distinguish them:
-#   due now  -> a prompt is waiting on a turn
-#   future   -> an obligation exists but has not come round yet
-DUE = NOW + 60_000
-item_sched = {}
-def _note(bucket, wid, sk):
-    bucket.setdefault(wid, set()).add(sk)
-for r in q("""SELECT sessionKey, work_item_id, dueAt FROM wakes
-              WHERE state='pending' AND work_item_id IS NOT NULL"""):
-    _note(item_wait if r["dueAt"] <= DUE else item_sched,
-          r["work_item_id"], r["sessionKey"])
-for r in q("""SELECT w.sessionKey, a.workItemId, w.dueAt FROM wakes w
-              JOIN assignments a ON a.id = w.assignmentId
-              WHERE w.state='pending' AND w.work_item_id IS NULL"""):
-    _note(item_wait if r["dueAt"] <= DUE else item_sched,
-          r["workItemId"], r["sessionKey"])
+# TETHERS ARE TURN STATE, not wake state. A turn is queued when its row exists
+# but has not started, and running once it has; both bind to a card through the
+# assignment. A scheduled wake is an intention, not a turn, and draws nothing.
+item_run, item_queue = {}, {}
+for r in q("""SELECT t.sessionKey, t.startedAt, a.workItemId FROM turns t
+              JOIN assignments a ON a.id = t.assignmentId
+              WHERE t.endedAt IS NULL"""):
+    bucket = item_run if r["startedAt"] else item_queue
+    bucket.setdefault(r["workItemId"], set()).add(r["sessionKey"])
+
 pending = {r["sessionKey"] for r in q(
     "SELECT DISTINCT sessionKey FROM wakes WHERE state='pending' AND dueAt <= ?",
     NOW + 60_000)}
@@ -207,19 +194,14 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
         if "completion" in kinds: stage = 3
         if verd & {"reviewed-clean", "spec-reviewed", "verified"}: stage = 4
         if "completion" in kinds and "reviewed-clean" in verd: stage = 5
-    # A tether is drawn only when a turn or a prompt names THIS card. A session
-    # runs one turn at a time, so attributing its turn to every card it holds
-    # lit up dozens of tethers at once and made one agent look omnipresent.
+    # green = a turn is executing on this card; yellow = a turn is queued for it
     turns, turn_sk = {}, {}
-    for sk in item_running.get(wid, set()):
+    for sk in item_run.get(wid, ()):
         if sk in ids:
             turns[ids[sk]] = "run"; turn_sk[ids[sk]] = sk
-    for sk in item_wait.get(wid, ()):
+    for sk in item_queue.get(wid, ()):
         if sk in ids and ids[sk] not in turns:
             turns[ids[sk]] = "wait"; turn_sk[ids[sk]] = sk
-    for sk in item_sched.get(wid, ()):
-        if sk in ids and ids[sk] not in turns:
-            turns[ids[sk]] = "sched"; turn_sk[ids[sk]] = sk
     # which way the waiting prompt flows. "in" = toward this agent (it owes the
     # turn); "out" = the item is waiting on someone else. When prompts are
     # pending in both directions the earliest dueAt wins.
