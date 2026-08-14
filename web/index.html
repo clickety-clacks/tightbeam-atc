@@ -741,8 +741,17 @@ function fitSelection(){
   dir.normalize();
   const camPos = c.clone().add(dir.multiplyScalar(dist));
   camPos.y = Math.max(camPos.y, c.y + r * .5 + 3);
+  /* hand the ambient orbit a new centre so it carousels around the selection
+     once the flight lands, instead of resuming around the org's root */
+  flyTo(camPos, c.clone(), () => {
+    const d = camPos.clone().sub(c);
+    orbitR = Math.hypot(d.x, d.z);
+    orbitH = d.y;
+    orbitAngle = Math.atan2(d.x, d.z);
+    orbitTgt.copy(c);
+    focused = false; userMoved = false;
+  });
   focused = true; userMoved = true;
-  flyTo(camPos, c.clone());
   return true;
 }
 
