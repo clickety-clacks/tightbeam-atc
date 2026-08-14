@@ -53,7 +53,7 @@ const THEMES = {
     stage:[0xc4453c,0xc97b35,0xc9a835,0xa3b23c,0x6fae4e,0x3f9d63,0x2c7a4b],
     kind:{main:0xb08d57,po:0xa58968,patrol:0xc9a835,orch:0x8a8f96,coder:0x7f8890,rev:0x6b7684,spec:0x91836b},
     retired:0x33363a, arcA:0xb08d57, arcB:0x22252a,
-    tetherRun:0x6fae4e, tetherWait:0xc9a835, pulse:0xb08d57,
+    tetherRun:0x6fae4e, tetherWait:0xc9a835, pulse:0xb08d57, pulseSub:0x5f6670, pulseUser:0x6f9ecf,
     discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63, shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
     flashRun:0x6fae4e, flashWait:0xc9a835,
     metalness:.55, roughness:.3, agentMetal:.75, agentRough:.35, baseEmissive:.25, edges:false,
@@ -65,7 +65,7 @@ const THEMES = {
     stage:[0xc23b22,0xd07a2a,0xc9a227,0x8a9a2e,0x4e8a4e,0x2e7d5b,0x1f5e46],
     kind:{main:0xc23b22,po:0xb06a3b,patrol:0xc9a227,orch:0x5c6b78,coder:0x6e7b87,rev:0x52616e,spec:0x7a6a4f},
     retired:0xcdc7b8, arcA:0x26323c, arcB:0xd8dfe6,
-    tetherRun:0x2e7d4f, tetherWait:0xb8860b, pulse:0xc23b22,
+    tetherRun:0x2e7d4f, tetherWait:0xb8860b, pulse:0xc23b22, pulseSub:0x8a97a3, pulseUser:0x3d6ea8,
     discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3, shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
     flashRun:0x2e7d4f, flashWait:0xb8860b,
     metalness:.05, roughness:.85, agentMetal:.05, agentRough:.9, baseEmissive:.0, edges:true,
@@ -169,7 +169,9 @@ function renderLegend(){
     `<span style="margin-left:10px;color:${hx(T.discN)}">gray floor disc = nothing to merge or nothing verifiable</span>` +
     `<span style="margin-left:10px;color:${hx(T.discG)}">green floor disc = in the branch. we have landed</span>` +
     `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring = orphaned</span>` +
-    `<span style="margin-left:10px;color:${hx(T.pulse)}">pulses = wakes (agent → agent)</span>`;
+    `<span style="margin-left:10px;color:${hx(T.pulse)}">pulses = messages: agent → agent</span>` +
+    `<span style="margin-left:8px;color:${hx(T.pulseSub)}">substrate (rises from below)</span>` +
+    `<span style="margin-left:8px;color:${hx(T.pulseUser)}">operator (descends from above)</span>`;
 }
 
 function buildGround(agents){
@@ -291,10 +293,19 @@ function buildItems(items){
 
 /* ---------- wake pulses ---------- */
 const pulseGeo = new THREE.SphereGeometry(.28, 10, 10);
-function msgCurve(a,b){
-  const p=APOS[a].clone(), q=APOS[b].clone(); p.y+=.3; q.y+=.3;
-  const mid=p.clone().add(q).multiplyScalar(.5);
-  mid.y = Math.min(mid.y + 1.6 + p.distanceTo(q)*.16, -.4);  /* wakes travel under the surface */
+function msgCurve(m){
+  const q = APOS[m.to].clone(); q.y += .3;
+  if (m.kind === 'substrate'){            /* machinery speaking: rises from below */
+    const p = q.clone(); p.y -= 14;
+    return new THREE.QuadraticBezierCurve3(p, p.clone().lerp(q,.5), q);
+  }
+  if (m.kind === 'user'){                 /* the operator: descends from above */
+    const p = new THREE.Vector3(q.x*.35, 26, q.z*.35);
+    return new THREE.QuadraticBezierCurve3(p, p.clone().lerp(q,.5), q);
+  }
+  const p = APOS[m.from].clone(); p.y += .3;
+  const mid = p.clone().add(q).multiplyScalar(.5);
+  mid.y = Math.min(mid.y + 1.6 + p.distanceTo(q)*.16, -.4);
   return new THREE.QuadraticBezierCurve3(p, mid, q);
 }
 /* every fired wake in the feed animates exactly once — no sampling, no
@@ -307,13 +318,17 @@ function spawnWakes(){
   const now = Date.now();
   seenWakes.forEach((ts,k)=>{ if (now-ts > 900000) seenWakes.delete(k); });
   DATA.messages.forEach(m=>{
-    const k = m.id || (m.from+'>'+m.to);
+    const k = m.id || ((m.from||m.kind)+'>'+m.to);
     if (seenWakes.has(k)) return;
     seenWakes.set(k, now);
     setTimeout(()=>{
-      if (document.hidden || !APOS[m.from] || !APOS[m.to]) return;
-      const pu = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:T.pulse, transparent:true}));
-      pu.userData={curve:msgCurve(m.from,m.to), t:0};
+      if (document.hidden || !APOS[m.to]) return;
+      if (m.kind === 'agent' && !APOS[m.from]) return;
+      const col = m.kind==='substrate' ? T.pulseSub : m.kind==='user' ? T.pulseUser : T.pulse;
+      const pu = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({
+        color:col, transparent:true, opacity: m.kind==='substrate' ? .55 : 1 }));
+      pu.scale.setScalar(m.kind==='substrate' ? .7 : 1);
+      pu.userData={curve:msgCurve(m), t:0};
       scene.add(pu); pulses.push(pu);
     }, Math.random()*(firstWakeBatch ? 20000 : 1500));
   });
