@@ -13,20 +13,21 @@
   canvas { display:block; position:fixed; inset:0; }
   /* one top bar owns the top edge; children never position themselves */
   #topbar { position:fixed; top:0; left:0; right:0; z-index:6; display:flex;
-    align-items:flex-start; justify-content:space-between; gap:10px;
-    padding:14px 18px; pointer-events:none; box-sizing:border-box; }
+    flex-wrap:wrap; align-items:flex-start; justify-content:space-between;
+    gap:8px 10px; padding:14px 18px; pointer-events:none; box-sizing:border-box; }
   #topright { display:flex; flex-direction:column; align-items:flex-end; gap:8px;
-    flex:0 0 auto; }
+    flex:0 1 auto; min-width:0; max-width:100%; }
   #hud { color:#9a9ea6; font-size:12px; letter-spacing:.22em; text-transform:uppercase;
     background:#101214e6; border:1px solid #2a2d31; border-radius:5px; padding:7px 11px;
-    flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    flex:1 1 auto; min-width:0; max-width:100%; }
   #hud b { color:#b08d57; font-weight:600; }
   #hud .live { color:#6fae4e; } #hud .sample { color:#c9a835; }
   /* the bottom bar spans both edges, so it can never run off either side */
   #legend { position:fixed; bottom:14px; left:18px; right:18px; z-index:6;
     color:#7c8188; font-size:11px; line-height:1.9; pointer-events:none;
     background:#101214e6; border:1px solid #2a2d31; border-radius:5px;
-    padding:8px 12px; box-sizing:border-box; max-height:34vh; overflow:hidden; }
+    padding:8px 12px; box-sizing:border-box; max-height:32vh; overflow:hidden; }
+  #legend.collapsed { display:none; }
   .sw { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:-1px; }
   #tip { position:fixed; display:none; background:#1b1e22ee; color:#d8d6d1;
     border:1px solid #3a3d42; border-left:3px solid #b08d57; border-radius:4px;
@@ -35,7 +36,7 @@
   #tip .seg { color:#9a9ea6; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
   #themehint { color:#7c8188; font-size:10.5px; letter-spacing:.12em;
     text-transform:uppercase; background:#101214e6; border:1px solid #2a2d31;
-    border-radius:5px; padding:6px 10px; pointer-events:none; white-space:nowrap; }
+    border-radius:5px; padding:6px 10px; pointer-events:none; max-width:100%; }
   body.light { background:#f2eee2; }
   body.light #hud { color:#5c6b78; background:#f2eee2e8; border-color:#c3cdd8; } body.light #hud b { color:#c23b22; }
   body.light #hud .live { color:#2e7d5b; } body.light #hud .sample { color:#c9a227; }
@@ -43,16 +44,18 @@
   body.light #tip { background:#faf7eeee; color:#26323c; border-color:#b8c7d9; border-left-color:#c23b22; }
   body.light #tip .t { color:#c23b22; } body.light #tip .seg { color:#5c6b78; }
   body.light #themehint { color:#8a97a3; background:#f2eee2e8; border-color:#c3cdd8; }
+  @media (max-width: 1150px){ #hud .title { display:none; } }
   @media (max-width: 760px){
-    #legend { font-size:10px; line-height:1.7; max-height:28vh; }
-    #hud { letter-spacing:.12em; }
+    #legend { font-size:10px; line-height:1.7; }
+    #hud, #themehint, #selui { letter-spacing:.08em; font-size:10px; }
   }
+  @media (max-height: 620px){ #legend { display:none; } }
   #selcursor { position:fixed; border:1.5px solid #b08d57; border-radius:50%;
     pointer-events:none; display:none; transform:translate(-50%,-50%); z-index:5;
     box-shadow:0 0 0 1px rgba(0,0,0,.25) inset; }
   #selcursor.unsel { border-color:#c4453c; border-style:dashed; }
   body.light #selcursor { border-color:#c23b22; }
-  #selui { pointer-events:none; max-width:min(52vw, 340px); box-sizing:border-box;
+  #selui { pointer-events:none; box-sizing:border-box; max-width:100%;
     background:#1b1e22dd; border:1px solid #3a3d42; border-radius:5px;
     padding:8px 11px; color:#9a9ea6; font-size:11px; letter-spacing:.08em;
     text-transform:uppercase; }
@@ -66,10 +69,10 @@
 </head>
 <body>
 <div id="topbar">
-  <div id="hud">The <b>Tight&nbsp;Beam</b> Dispatch · org weather · <span id="mode" class="sample">connecting…</span></div>
+  <div id="hud"><span class="title">The <b>Tight&nbsp;Beam</b> Dispatch · org weather · </span><span id="mode" class="sample">connecting…</span></div>
   <div id="topright">
-    <div id="themehint">T theme · S select</div>
-    <div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> &nbsp;·&nbsp; <span id="selcount">0</span> selected &nbsp;·&nbsp; [ ] resize · f fit · d clear · esc/s exit</div>
+    <div id="themehint">T theme · S select · L legend</div>
+    <div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> · <span id="selcount">0</span> sel · [ ] size · f fit · d clear</div>
   </div>
 </div>
 <div id="legend"></div>
@@ -584,6 +587,7 @@ addEventListener('keydown', e=>{
   else if (e.key==='f' || e.key==='F' || e.key===' '){
     e.preventDefault(); fitSelection();
   }
+  else if (e.key==='l' || e.key==='L'){ document.getElementById('legend').classList.toggle('collapsed'); }
   else if (e.key==='['){ setRadius(selRadius - Math.max(4, selRadius*.15)); }
   else if (e.key===']'){ setRadius(selRadius + Math.max(4, selRadius*.15)); }
 });
