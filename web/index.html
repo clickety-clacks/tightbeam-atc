@@ -165,8 +165,8 @@ function renderLegend(){
     `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow edge: turn waiting</span>` +
     `<span style="margin-left:12px">hedron flashing = turn waiting · strobing shell = turn running · agent discs flash the same way</span>` +
     `<br><span>flat discs = agents, hanging below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow floor disc = mergeable</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discG)}">green floor disc = merged. we have landed</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow floor disc = not in the branch yet</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discG)}">green floor disc = in the branch. we have landed</span>` +
     `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring = orphaned</span>` +
     `<span style="margin-left:10px;color:${hx(T.pulse)}">pulses = wakes (agent → agent)</span>`;
 }
@@ -247,7 +247,7 @@ function buildItems(items){
     Object.assign(mesh.userData, {type:'item', w, phase:idx*1.3, landed, baseY: landed? null : pos.y});
     itemGroup.add(mesh); itemMeshes.push(mesh);
     if (landed){
-      const dcol = w.stage>=6 ? T.discG : T.discY;
+      const dcol = (w.stage>=6 || w.merged) ? T.discG : T.discY;
       const dgeo = new THREE.CylinderGeometry(1.65,1.75,.14,24);
       const disc = diagramMesh(dgeo, dcol);
       disc.position.set(pos.x,.07,pos.z);
@@ -405,6 +405,8 @@ addEventListener('pointermove', e=>{
     ).join('<br>') || 'no turns active';
     tip.innerHTML = '<div class="t">'+w.id+' — '+w.title+'</div>'
       +'<div>'+STAGE_NAMES[w.stage]+(!(w.holders||[]).length?' · ORPHANED':'')+'</div>'
+      +(w.stage>=5&&w.stage<6&&w.merged===true?'<div>in the branch · awaiting closure</div>':'')
+      +(w.stage>=5&&w.merged===false?'<div>NOT in the branch · merge pending</div>':'')
       +'<div class="seg">'+segs+'</div><div style="margin-top:4px" class="seg">'+acts+'</div>';
   } else {
     const a=u.a;

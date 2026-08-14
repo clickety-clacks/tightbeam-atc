@@ -10,12 +10,18 @@ Configuration (environment variables):
                    If unset, the snapshot is only written to TB_WEATHER_OUT —
                    use that when the web root is on the same machine.
   TB_WEATHER_KEY   Optional ssh identity file for the scp push.
+  TB_WEATHER_REPO  Optional path to a clone of the code repo. When set, each
+                   item's recorded commits are tested for ancestry in
+                   TB_WEATHER_BRANCH, which is the only reliable way to know
+                   whether work actually landed — review verdicts say the
+                   gate passed, not that code reached the branch.
+  TB_WEATHER_BRANCH  Branch to test against. Default: origin/main
 
 Every signal is derived from durable rows: stages from attest kinds and
 verdicts, running turns from open rows in `turns`, queued turns from pending
 `wakes`, pulses from recently fired wakes. Nothing is estimated.
 """
-import json, os, sqlite3, subprocess, time
+import json, os, re, sqlite3, subprocess, time
 from pathlib import Path
 
 BASE = Path(os.environ.get("TB_BASE_DIR", str(Path.home() / ".tightbeam")))
@@ -23,6 +29,8 @@ DB = f"file:{BASE}/state.db?mode=ro"
 OUT = os.environ.get("TB_WEATHER_OUT", "/tmp/tb-weather.json")
 DEST = os.environ.get("TB_WEATHER_DEST")
 KEY = os.environ.get("TB_WEATHER_KEY")
+REPO = os.environ.get("TB_WEATHER_REPO")            # optional git clone
+BRANCH = os.environ.get("TB_WEATHER_BRANCH", "origin/main")
 
 def kind_of(name):
     n = name.lower()
@@ -38,6 +46,31 @@ def kind_of(name):
 con = sqlite3.connect(DB, uri=True)
 con.row_factory = sqlite3.Row
 q = lambda sql, *a: con.execute(sql, a).fetchall()
+
+# ---- ground truth for "merged": ancestry in the real branch.
+# No attest kind carries this. An item can hold completion, reviewed-clean,
+# AND verified and still not be on the branch, so the branch is the only
+# authority. Without a configured repo, merge state is simply unknown.
+branch_shas, branch_pfx = set(), set()
+if REPO and Path(REPO, ".git").exists():
+    git = lambda *a: subprocess.run(["git", "-C", REPO, *a],
+                                    capture_output=True, text=True)
+    stamp = Path(OUT + ".fetch")                    # refresh at most every 5m
+    try: stale = time.time() - stamp.stat().st_mtime > 300
+    except OSError: stale = True
+    if stale:
+        git("fetch", "--quiet", "--all")
+        stamp.touch()
+    out = git("rev-list", BRANCH).stdout.split()
+    branch_shas = set(out)
+    branch_pfx = {s[:12] for s in out}
+
+def merged_in_branch(refs):
+    if not branch_shas or not refs: return None     # detection unavailable
+    for c in refs:
+        if c in branch_shas or c[:12] in branch_pfx: return True
+        if len(c) < 12 and any(s.startswith(c) for s in branch_shas): return True
+    return False
 
 # ---- agents: active sessions, plus retired ones still holding open cards
 rows = q("SELECT sessionKey, displayName, state, spawnedBy FROM sessions")
@@ -93,8 +126,12 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
     wid = r["id"]
     hs = q("SELECT DISTINCT holderKey FROM assignments WHERE workItemId=? AND state='open'", wid)
     holders = [ids[h["holderKey"]] for h in hs if h["holderKey"] in ids]
-    ev = q("""SELECT t.kind, t.verdictKind FROM attests t
+    ev = q("""SELECT t.kind, t.verdictKind, t.commitRefs FROM attests t
               JOIN assignments a ON a.id=t.assignmentId WHERE a.workItemId=?""", wid)
+    refs = set()
+    for e in ev:
+        if e["commitRefs"]:
+            refs.update(re.findall(r'"commit"\s*:\s*"([0-9a-f]{7,40})"', e["commitRefs"]))
     kinds = {e["kind"] for e in ev}
     verd = {e["verdictKind"] for e in ev if e["verdictKind"]}
     closed_at = None
@@ -119,7 +156,7 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
         elif sk in pending: turns[ids[sk]] = "wait"
     items.append({"id": wid[:11], "title": (r["title"] or "")[:60],
                   "stage": stage, "holders": holders, "turns": turns,
-                  "closedAt": closed_at})
+                  "closedAt": closed_at, "merged": merged_in_branch(refs)})
 # show the whole open sky so drainage is visible; landings by closure recency
 open_items = [w for w in items if w["stage"] < 6][:240]
 landed = sorted((w for w in items if w["stage"] >= 6),
@@ -150,5 +187,7 @@ if DEST:
     cmd = ["scp", "-q"]
     if KEY: cmd += ["-i", KEY, "-o", "IdentitiesOnly=yes"]
     subprocess.run(cmd + [OUT, DEST], check=True)
+pending = [w for w in open_items if w["stage"] >= 5 and w["merged"] is False]
 print(f"snapshot: {len(agents)} agents, {len(open_items)} open, "
-      f"{len(landed)} landed, {len(msgs)} msgs")
+      f"{len(landed)} landed, {len(msgs)} msgs, "
+      f"{len(pending)} awaiting a real merge")

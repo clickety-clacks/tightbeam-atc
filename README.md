@@ -16,8 +16,12 @@ Nothing is estimated.
   items enter high and descend one band per satisfied merge-law requirement
   (progress attest, tests-passed, completion, independent review,
   reviewed-clean verdict). Color runs red → green over the same stops.
-- **On the floor**: a work item over a **yellow disc** is mergeable and
-  awaiting merge; over a **green disc** it is merged. We have landed.
+- **On the floor**: a work item over a **yellow disc** carries all its
+  evidence but is **not in the branch yet**; over a **green disc** its code
+  is in the branch. We have landed. (Branch state is only distinguished when
+  a repo is configured — see `TB_WEATHER_REPO` below. Without it every
+  floor item reads as mergeable, which is what the ledger alone can tell
+  you: review verdicts prove a gate passed, never that code landed.)
 - **Activity**: an item whose outline **flashes** has a turn queued; a soft
   translucent **bubble** breathing around it means a turn is running right
   now. All bubbles breathe in unison. Agent discs flash the same way
@@ -76,6 +80,17 @@ Configuration is by environment variable:
 | `TB_WEATHER_OUT` | where `data.json` is written | `/tmp/tb-weather.json` |
 | `TB_WEATHER_DEST` | optional `scp` target when the web host is a different machine | unset |
 | `TB_WEATHER_KEY` | optional ssh identity for that push | unset |
+| `TB_WEATHER_REPO` | optional path to a clone of the code repo; enables merged-vs-pending detection | unset |
+| `TB_WEATHER_BRANCH` | branch to test commits against | `origin/main` |
+
+**Optional: real merge detection.** No attest kind means "merged" — an item
+can hold a completion, a reviewed-clean verdict, *and* a verified verdict and
+still not be on the branch. Point `TB_WEATHER_REPO` at a clone and the
+generator tests each commit recorded on an item's attests for ancestry in
+`TB_WEATHER_BRANCH` (fetching at most every five minutes), which separates
+work that truly awaits a merge from work that merged and merely awaits its
+bookkeeping. Leave it unset and merge state is reported as unknown rather
+than guessed.
 
 Same machine as the web server — write straight into the web root:
 
