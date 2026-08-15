@@ -123,6 +123,31 @@ One consequence worth knowing: while a filter or focus is in force, the human's
 brush can only reach what that scope shows. Narrowing the view narrows what
 they can select, so do not leave a filter on a view you have handed back.
 
+## Searches are kept as cards
+
+Every search is filed under the status strip as a card the human can click to
+run again. So `filter` is not a fleeting command — it leaves something behind.
+
+Pass `query` alongside `ids` and it becomes the card's label; without one the
+card just says how many nodes you picked, which is far less use to whoever
+finds it later.
+
+```bash
+curl -s -X POST localhost:8787/api/filter -H 'content-type: application/json' -d '{
+  "ids":["wi_1a2b…","wi_5e6f…"],
+  "query":"blocked on the auth fixture",
+  "author":"watchdog:018"}'
+```
+
+Identical searches are refreshed rather than duplicated, so re-running the same
+one on a cadence leaves a single card. `GET /api/searches` lists them,
+`POST /api/searches` with a `searchId` edits one in place, and
+`DELETE /api/searches/<id>` forgets it. Editing is how you revise a card you
+filed — change its `query` or `ids` — rather than filing a near-duplicate.
+
+Clearing a filter deactivates its card but keeps it, so a human can put the
+search back with one click. Do not delete cards you did not file.
+
 ## Tags
 
 A tag is a short label pinned above a node. Provenance shows as a drawn mark —

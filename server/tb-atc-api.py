@@ -20,6 +20,10 @@ what it currently has selected. External callers use the verbs below.
     DELETE /api/arrows?author=<who>      clear that author's
     DELETE /api/arrows?all=true          clear every author's
     DELETE /api/arrows/<arrowId>         clear one
+    GET    /api/searches                 [{searchId, query, ids, label, source, author, at}]
+    POST   /api/searches                 {searches:[{query|ids, label, author, searchId?}]}
+    DELETE /api/searches/<searchId>      forget one
+    DELETE /api/searches?author=<who>    forget that author's
     GET    /api/tags                     [{tagId, target, text, source, author, at}]
     POST   /api/tags                     {tags:[{target, text, source, color}]}
     DELETE /api/tags?author=<who>        clear that author's
@@ -71,6 +75,10 @@ TAG_COLORS = ("neutral", "red", "amber", "green", "cyan", "blue", "violet")
 MAX_ARROWS = 100
 MAX_ARROW_TEXT = 120
 MAX_AUTHOR = 48
+# Searches accumulate as cards a human can re-open, so the ceiling is a
+# readable pile rather than a log.
+MAX_SEARCHES = 40
+MAX_SEARCH_LABEL = 80
 MAX_ID = 128
 MAX_IDS_PER_CALL = 500
 CMD_HISTORY = 200
@@ -96,6 +104,11 @@ state = {
     "arrows": {},           # arrowId -> arrow
     "arrowSeq": 0,
     "arrowsRev": 0,
+    # A search a human or an agent ran, kept so it can be re-opened after it is
+    # dismissed. Applying one is still /api/filter; this is only the history.
+    "searches": {},         # searchId -> search
+    "searchSeq": 0,
+    "searchesRev": 0,
 }
 
 
@@ -113,7 +126,8 @@ def save_tags():
     try:
         STATE_FILE.write_text(json.dumps(
             {"tags": list(state["tags"].values()), "tagSeq": state["tagSeq"],
-             "arrows": list(state["arrows"].values()), "arrowSeq": state["arrowSeq"]}))
+             "arrows": list(state["arrows"].values()), "arrowSeq": state["arrowSeq"],
+             "searches": list(state["searches"].values()), "searchSeq": state["searchSeq"]}))
     except OSError:
         pass                            # a display, not a database: never fail a request on this
 
@@ -133,6 +147,11 @@ def load_tags():
             state["arrows"][a["arrowId"]] = a
     state["arrowSeq"] = max(int(d.get("arrowSeq") or 0), len(state["arrows"]))
     state["arrowsRev"] += 1
+    for q in d.get("searches", [])[:MAX_SEARCHES]:
+        if isinstance(q, dict) and q.get("searchId"):
+            state["searches"][q["searchId"]] = q
+    state["searchSeq"] = max(int(d.get("searchSeq") or 0), len(state["searches"]))
+    state["searchesRev"] += 1
 
 
 def clip(v, n):
@@ -221,7 +240,8 @@ class Handler(BaseHTTPRequestHandler):
                         "focused": list(state["focused"]), "focusMode": state["focusMode"],
                         "selectionAt": state["selectionAt"], "selectionBy": state["selectionBy"],
                         "tags": list(state["tags"].values()), "seq": state["seq"],
-                        "arrows": list(state["arrows"].values())}
+                        "arrows": list(state["arrows"].values()),
+                        "searches": list(state["searches"].values())}
         elif u.path == "/api/selection":
             # two distinct things: what a human brushed, and what a focus or
             # filter is currently highlighting. Neither implies the other.
@@ -236,6 +256,9 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/arrows":
             with lock:
                 snap = list(state["arrows"].values())
+        elif u.path == "/api/searches":
+            with lock:
+                snap = list(state["searches"].values())
         elif u.path == "/api/pull":
             try:
                 since = int((parse_qs(u.query).get("since") or ["0"])[0])
@@ -251,7 +274,9 @@ class Handler(BaseHTTPRequestHandler):
                         "gap": gap, "oldestSeq": state["oldestSeq"], "seq": state["seq"],
                         "tags": list(state["tags"].values()), "tagsRev": state["tagsRev"],
                         "arrows": list(state["arrows"].values()),
-                        "arrowsRev": state["arrowsRev"]}
+                        "arrowsRev": state["arrowsRev"],
+                        "searches": list(state["searches"].values()),
+                        "searchesRev": state["searchesRev"]}
         if snap is None:
             return self._send({"error": "not found"}, 404)
         self._send(snap)
@@ -282,14 +307,43 @@ class Handler(BaseHTTPRequestHandler):
                     out = (push("focus", id=clip(b.get("id"), MAX_ID), mode=mode), 200)
 
             if u.path == "/api/filter":
+                # Applying a search also files it, so it can be re-opened after
+                # it is dismissed. Identical searches are refreshed rather than
+                # piled up: a patrol re-running the same query every minute
+                # should leave one card, not sixty.
+                def _file_search(query, ids, author, source):
+                    key = (query or "", tuple(ids or ()))
+                    for rec in state["searches"].values():
+                        if (rec.get("query") or "", tuple(rec.get("ids") or ())) == key:
+                            rec["at"] = int(time.time() * 1000)
+                            state["searchesRev"] += 1
+                            return rec
+                    if len(state["searches"]) >= MAX_SEARCHES:
+                        oldest = min(state["searches"].values(), key=lambda x: x.get("at") or 0)
+                        del state["searches"][oldest["searchId"]]
+                    state["searchSeq"] += 1
+                    rec = {"searchId": f"q{state['searchSeq']}", "query": query or "",
+                           "ids": list(ids or []), "label": None,
+                           "source": source, "author": clip(author, MAX_AUTHOR) or None,
+                           "at": int(time.time() * 1000)}
+                    state["searches"][rec["searchId"]] = rec
+                    state["searchesRev"] += 1
+                    return rec
+
                 # an agent's filter is a membership list; the page ghosts
                 # everything outside it exactly as a typed query does
                 if b.get("clear"):
                     out = (push("filter", ids=[], clear=True), 200)
                 else:
                     ids = id_list(b.get("ids"))
-                    out = ((({"error": "ids required"}), 400) if not ids
-                           else (push("filter", ids=ids, clear=False), 200))
+                    if not ids:
+                        out = ({"error": "ids required"}, 400)
+                    else:
+                        rec = _file_search(clip(b.get("query"), MAX_SEARCH_LABEL),
+                                           ids, b.get("author"), "agent")
+                        save_tags()
+                        out = (push("filter", ids=ids, clear=False,
+                                    searchId=rec["searchId"]), 200)
 
             if u.path == "/api/fit":
                 out = (push("fit", on=bool(b.get("on", True))), 200)
@@ -373,6 +427,47 @@ class Handler(BaseHTTPRequestHandler):
                     save_tags()
                 out = ({"created": made}, 200)
 
+            if u.path == "/api/searches":
+                # Create or edit. A searchId edits that card in place, so a
+                # human can reopen a search and change its terms, and an agent
+                # can revise one it filed, without piling up near-duplicates.
+                made = []
+                raw = b.get("searches")
+                for q in (raw[:MAX_SEARCHES] if isinstance(raw, list) else []):
+                    if not isinstance(q, dict):
+                        continue
+                    sid = clip(q.get("searchId"), MAX_ID)
+                    prev = state["searches"].get(sid) if sid else None
+                    if not prev and len(state["searches"]) >= MAX_SEARCHES:
+                        # drop the oldest rather than refuse: the pile is a
+                        # convenience, and a full one must not block new work
+                        oldest = min(state["searches"].values(), key=lambda x: x.get("at") or 0)
+                        del state["searches"][oldest["searchId"]]
+                    query = (q.get("query") or "").strip()[:MAX_SEARCH_LABEL]
+                    ids = id_list(q.get("ids"))
+                    if not query and not ids and not prev:
+                        continue
+                    if prev:
+                        rec = dict(prev)
+                        if query or ids:
+                            rec["query"], rec["ids"] = query, ids
+                        if q.get("label") is not None:
+                            rec["label"] = clip(q.get("label"), MAX_SEARCH_LABEL)
+                    else:
+                        state["searchSeq"] += 1
+                        rec = {"searchId": f"q{state['searchSeq']}",
+                               "query": query, "ids": ids,
+                               "label": clip(q.get("label"), MAX_SEARCH_LABEL) or None,
+                               "source": "user" if q.get("source") == "user" else "agent",
+                               "author": clip(q.get("author"), MAX_AUTHOR) or None}
+                    rec["at"] = int(time.time() * 1000)
+                    state["searches"][rec["searchId"]] = rec
+                    made.append(rec)
+                if made:
+                    state["searchesRev"] += 1
+                    save_tags()
+                out = ({"searches": made}, 200)
+
             if u.path == "/api/tags/clear":
                 state["tags"].clear(); state["tagsRev"] += 1; save_tags()
                 out = ({"ok": True}, 200)
@@ -417,6 +512,14 @@ class Handler(BaseHTTPRequestHandler):
                 gone = state["tags"].pop(tid, None)
                 if gone:
                     state["tagsRev"] += 1; save_tags()
+                out = ({"deleted": bool(gone)}, 200 if gone else 404)
+            elif u.path == "/api/searches":
+                out = self._sweep("searches", "searchesRev", q)
+            elif u.path.startswith("/api/searches/"):
+                sid = u.path.rsplit("/", 1)[-1]
+                gone = state["searches"].pop(sid, None)
+                if gone:
+                    state["searchesRev"] += 1; save_tags()
                 out = ({"deleted": bool(gone)}, 200 if gone else 404)
             elif u.path.startswith("/api/arrows/"):
                 aid = u.path.rsplit("/", 1)[-1]

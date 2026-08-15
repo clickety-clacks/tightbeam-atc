@@ -42,26 +42,25 @@ of twelve results and it still reads "12 shown".
 A consequence worth stating: a neighbourhood click frames the clicked node's
 neighbourhood, not the filtered set. Framing the filter there was a bug.
 
-## 2. `f` / space is a selection lens
+## 2. `f` / space fits, it does not isolate
 
-While the fit owns the view, the selection *is* what is shown.
+Two separate things:
 
-    12 search results lit, 4 brushed
-    press f   ->  camera on the 4, only those 4 lit, the rest ghosted
-    press f   ->  camera exactly where it was, the 12 lit again
+- **Isolate** decides what is lit. A search does it. A focus does it.
+- **Fit** decides only where the camera is. `f` does it, and ghosts nothing.
 
-Entering the lens clears any focus, since a focus outranks it and the mode just
-entered would render nothing of its own. Emptying the selection collapses the
-lens. Pressing `f` while a fit is up dismisses the fit *and* any focus opened
-inside it; a background click pops just the focus and puts the camera back on
-the fit.
+So `f` frames what you have collected and leaves the org fully lit. The fit is
+live: the current selection defines the viewport, so every add and remove
+re-frames it. With nothing selected `f` does nothing at all.
 
-The second press restores both the camera and the lighting. This makes "fly to
-what I brushed" visually true even when the base view is filtered — previously
-the camera could sit on nodes that were themselves ghosted out.
+    4 brushed        ->  press f: camera on the 4, nothing ghosted
+    brush 4 more     ->  camera re-frames on all 8
+    click a node     ->  focus isolates it; the fit waits underneath
+    click background ->  camera back on the 8, nothing ghosted
+    press f          ->  focus dropped, camera back where it started
 
-The return is exact for camera pose and orbit. It is not pixel-identical across
-a viewport resize, and should not claim to be.
+A background click pops one layer at a time: focus, then the fit, then the
+search. Dismissing a search does not lose it — see below.
 
 ## 3. A human's stroke outranks an agent's command
 
@@ -85,3 +84,14 @@ The search took effect and found nothing; the view says so. It must not fall
 back to showing everything, which would read as "search off", nor keep lighting
 the previous match, which would leave the screen disagreeing with the box. The
 camera stays where it is — there is nothing to frame.
+
+## 5. A dismissed search is kept
+
+Every search — typed or applied by an agent — is filed as a card under the
+status strip, newest on top. Clicking one runs it again and puts its terms back
+in the box, where they can be edited rather than retyped. The × forgets it.
+
+That is what makes the third background click cheap: clearing a search is no
+longer destructive, so a click can do it. Identical searches are refreshed
+rather than piled up, so a patrol re-running the same query leaves one card and
+not sixty.

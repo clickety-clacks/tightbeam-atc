@@ -40,6 +40,25 @@
   #stack .chip.on .dot { background:currentColor; }
   #stack .chip b { color:inherit; font-weight:700; }
   body.light #stack .chip { background:#f2eee2e8; }
+  /* The pile of searches that have been run. Newest on top, because that is
+     the one most likely to be wanted back. */
+  #cards { display:flex; flex-direction:column-reverse; gap:4px; align-items:flex-start;
+    max-height:34vh; overflow-y:auto; }
+  #cards:empty { display:none; }
+  #cards .card { display:inline-flex; align-items:center; gap:8px; cursor:pointer;
+    font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+    color:#9a9ea6; background:#101214e6; border:1px solid #2a2d31;
+    border-left:3px solid #4bb8b8; border-radius:5px; padding:5px 8px; max-width:100%; }
+  #cards .card:hover { border-color:#4bb8b8; }
+  #cards .card.on { color:#4bb8b8; border-color:#4bb8b8; }
+  #cards .card .n { color:#7c8188; }
+  #cards .card .who { color:#7c8188; text-transform:none; letter-spacing:.04em; }
+  #cards .card .x { color:#7c8188; padding:0 2px; border-radius:3px; }
+  #cards .card .x:hover { color:#e0685c; }
+  #cards .card .term { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:22ch; }
+  body.light #cards .card { color:#5c6b78; background:#f2eee2e8; border-color:#c3cdd8;
+    border-left-color:#1f7a7a; }
+  body.light #cards .card.on { color:#1f7a7a; border-color:#1f7a7a; }
   #hud .live { color:#6fae4e; } #hud .sample { color:#c9a835; }
   /* the bottom bar spans both edges, so it can never run off either side */
   #legend { position:fixed; z-index:6;
@@ -169,6 +188,7 @@
   </div>
   <div id="topright">
     <div id="stack"></div>
+    <div id="cards"></div>
     <div id="themehint">/ search · S select · T theme · L legend · C clear notes</div>
     <div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> · <span id="selcount">0</span> sel · [ ] size · f fit · d clear</div>
   </div>
@@ -820,6 +840,79 @@ function setFilter(kind, {query = '', ids = null} = {}){
    each mode is recognisable without reading it. The chip that is actually
    deciding what you see is filled; the ones it is stacked on top of are
    outlined, because they are still there and you will land back on them. */
+/* ---------- the pile of searches ----------
+   Dismissing a search must not lose it. Every search a human types or an agent
+   applies is filed as a card; clicking one runs it again and puts its terms
+   back in the box where they can be edited, and the × forgets it for good.
+   That is what makes a background click cheap enough to also clear a search. */
+let searches = [], searchesRev = -1, activeSearchId = null;
+
+function renderCards(){
+  const el = document.getElementById('cards');
+  if (!el) return;
+  const list = [...searches].sort((a, b) => (a.at || 0) - (b.at || 0));
+  el.innerHTML = list.map(q => {
+    const term = q.label || q.query || ((q.ids || []).length + ' picked');
+    const who = q.author ? '<span class="who">' + esc(q.author) + '</span>' : '';
+    return '<span class="card' + (q.searchId === activeSearchId ? ' on' : '') + '"'
+         + ' data-id="' + q.searchId + '" title="' + esc(term) + '">'
+         + '<span class="term">' + esc(term) + '</span>' + who
+         + '<span class="x" data-x="' + q.searchId + '">×</span></span>';
+  }).join('');
+}
+function esc(v){ return String(v ?? '').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+document.getElementById('cards').addEventListener('click', ev => {
+  const kill = ev.target.closest('[data-x]');
+  if (kill){
+    ev.stopPropagation();
+    const id = kill.getAttribute('data-x');
+    if (id === activeSearchId) releaseFilter();
+    searches = searches.filter(q => q.searchId !== id);
+    renderCards();
+    apiFetch('/searches/' + encodeURIComponent(id), {method:'DELETE'}).catch(()=>{});
+    return;
+  }
+  const card = ev.target.closest('[data-id]');
+  if (!card) return;
+  const q = searches.find(x => x.searchId === card.getAttribute('data-id'));
+  if (q) openSearch(q);
+});
+
+/* Re-open a filed search: run it, and put its terms back in the box so they
+   can be edited rather than retyped. */
+function openSearch(q){
+  activeSearchId = q.searchId;
+  if ((q.ids || []).length){
+    searchEl.value = '';
+    setFilter('agent', {ids: q.ids});
+  } else {
+    searchEl.value = q.query || '';
+    setFilter('user', {query: q.query || ''});
+  }
+  searchClearBtn.style.display = searchEl.value ? 'block' : 'none';
+  renderCards();
+}
+
+/* File a search a human typed, editing the card in place while they keep
+   typing so one query does not leave a trail of prefixes. */
+let fileTimer = null;
+function fileSearch(query){
+  clearTimeout(fileTimer);
+  fileTimer = setTimeout(async () => {
+    if (!query) return;
+    try {
+      const body = {searches: [{query, source: 'user',
+                                searchId: activeSearchId || undefined}]};
+      const r = await apiFetch('/searches', {method:'POST',
+        headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
+      const rec = r?.searches?.[0];
+      if (rec){ activeSearchId = rec.searchId; searchesRev = -1; }
+    } catch(e){ /* the pile is a convenience; never fail a search on it */ }
+  }, 700);
+}
+
 function renderStack(){
   const el = document.getElementById('stack');
   if (!el) return;
@@ -1251,6 +1344,8 @@ const searchEl = document.getElementById('search');
 const searchClearBtn = document.getElementById('searchclear');
 function releaseFilter(){
   searchEl.value = '';
+  activeSearchId = null;                 /* the card stays; it is just not running */
+  if (typeof renderCards === 'function') renderCards();
   setFilter('none');
   searchEl.blur();
   /* an agent's filter lives on the server too; clearing it only locally would
@@ -1264,7 +1359,7 @@ searchEl.addEventListener('input', () => {
   const raw = searchEl.value.trim();
   searchTimer = setTimeout(() => {
     if (!raw) setFilter('none');
-    else setFilter('user', {query: raw});
+    else { setFilter('user', {query: raw}); fileSearch(raw); }
   }, 220);                                   /* settle before re-framing */
 });
 searchEl.addEventListener('keydown', e => {
@@ -1323,6 +1418,11 @@ async function apiPull(){
     }
     if (d.arrowsRev !== arrowsRev){
       arrowsRev = d.arrowsRev; arrows = Array.isArray(d.arrows) ? d.arrows : []; buildArrows();
+    }
+    if (d.searchesRev !== searchesRev){
+      searchesRev = d.searchesRev;
+      searches = Array.isArray(d.searches) ? d.searches : [];
+      renderCards();
     }
     if (typeof d.seq === 'number' && d.seq >= apiSeq) apiSeq = d.seq;
     apiUp = true;
@@ -1421,8 +1521,9 @@ function applyCommand(c){
     const m = focusMesh();
     if (m) flyToNode(m);
   } else if (c.kind === 'filter'){
-    if (c.clear || !(c.ids || []).length) setFilter('none');
-    else setFilter('agent', {ids: c.ids});
+    if (c.clear || !(c.ids || []).length){ setFilter('none'); activeSearchId = null; renderCards(); }
+    else { setFilter('agent', {ids: c.ids});
+           if (c.searchId){ activeSearchId = c.searchId; renderCards(); } }
   } else if (c.kind === 'fit'){
     if (c.on) fitSelection(); else if (camMark) restoreCamera();
   }

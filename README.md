@@ -177,7 +177,10 @@ work with it.
 | `POST` | `/api/select` | `{add:[id], remove:[id], clear:bool}` |
 | `POST` | `/api/focus` | `{id, mode:"single"\|"neighborhood"\|"clear"}` |
 | `POST` | `/api/fit` | `{on:bool}` |
-| `POST` | `/api/filter` | `{ids:[id]}` or `{clear:true}` — ghost everything else |
+| `POST` | `/api/filter` | `{ids:[id], query, author}` or `{clear:true}` — ghost everything else, and file it as a card |
+| `GET` | `/api/searches` | `[{searchId, query, ids, label, source, author, at}]` |
+| `POST` | `/api/searches` | `{searches:[{query\|ids, label, author, searchId?}]}` — file or edit |
+| `DELETE` | `/api/searches/<searchId>` | forget one |
 | `GET` | `/api/tags` | `[{tagId, target, text, source, color, author, at}]` |
 | `POST` | `/api/tags` | `{tags:[{target, text, source:"agent"\|"user", color, author}]}` |
 | `DELETE` | `/api/tags?author=<who>` | clear that author's |
