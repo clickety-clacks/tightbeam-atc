@@ -1133,6 +1133,11 @@ function applyView(){
     if (k) shadeSelected(m, view.selection.has(k));
   });
   document.getElementById('selcount').textContent = view.selection.size;
+  /* Meshes are rebuilt on every five-second refresh, taking their tag sprites
+     with them. Re-attaching only when the tag revision changes meant tags
+     appeared once and vanished at the next refresh. */
+  buildTags();
+  renderSearchChrome();
 }
 /* Whatever is ghosted is out of play. With no focus or filter the brush can
    reach anything; inside a focus or a filter it can only reach what that scope
