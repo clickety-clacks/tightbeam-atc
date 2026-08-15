@@ -119,6 +119,7 @@ The generator can also push the snapshot to another machine over ssh; see
 | `TB_ATC_HOST` | bind address | `127.0.0.1` |
 | `TB_ATC_PORT` | port | `8787` |
 | `TB_ATC_WEB` | directory holding `index.html` | `../web` |
+| `TB_ATC_STATE` | file tags are persisted to | `<web>/../tags.json` |
 | `TB_BASE_DIR` | Tightbeam base directory | `~/.tightbeam` |
 | `TB_WEATHER_OUT` | where the snapshot is written | `/tmp/tb-weather.json` |
 | `TB_WEATHER_DEST` | optional `scp` target when the web root is another machine | unset |

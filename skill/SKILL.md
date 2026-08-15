@@ -118,9 +118,9 @@ curl -s -X DELETE localhost:8787/api/tags/t3          # remove one
 curl -s -X DELETE localhost:8787/api/tags             # remove all
 ```
 
-Text is capped at 80 characters and at most four tags render per node. Tags are
-in memory only: they vanish on service restart, which is the right lifetime for
-a pointing device.
+Text is capped at 80 characters and at most four tags render per node. Tags
+persist across a service restart, so treat them as something you are leaving on
+someone's desk rather than a transient overlay — clean them up.
 
 ## Working well with the human
 

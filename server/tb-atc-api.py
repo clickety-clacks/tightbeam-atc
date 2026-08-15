@@ -31,6 +31,7 @@ Config:
   TB_ATC_HOST  bind address                     (default 127.0.0.1)
   TB_ATC_PORT  port                             (default 8787)
   TB_ATC_WEB   directory holding index.html etc (default ./web next to this file)
+  TB_ATC_STATE file tags are persisted to  (default <web>/../tags.json)
 """
 import json, os, posixpath, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -40,6 +41,9 @@ from pathlib import Path
 HOST = os.environ.get("TB_ATC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TB_ATC_PORT", "8787"))
 WEB = Path(os.environ.get("TB_ATC_WEB", Path(__file__).resolve().parent.parent / "web"))
+# Tags are somebody's annotations, so they must survive a restart of the
+# service that happens to be serving the page they are pinned to.
+STATE_FILE = Path(os.environ.get("TB_ATC_STATE", WEB.parent / "tags.json"))
 
 # Bounds. Everything here is in memory and reachable without credentials, so
 # each collection needs a ceiling; without one a single caller can exhaust the
@@ -78,6 +82,26 @@ def push(kind, **payload):
         del state["commands"][:-CMD_HISTORY]
         state["oldestSeq"] = state["commands"][0]["seq"]
     return cmd
+
+
+def save_tags():
+    try:
+        STATE_FILE.write_text(json.dumps(
+            {"tags": list(state["tags"].values()), "tagSeq": state["tagSeq"]}))
+    except OSError:
+        pass                            # a display, not a database: never fail a request on this
+
+
+def load_tags():
+    try:
+        d = json.loads(STATE_FILE.read_text())
+    except Exception:
+        return
+    for t in d.get("tags", [])[:MAX_TAGS]:
+        if isinstance(t, dict) and t.get("tagId"):
+            state["tags"][t["tagId"]] = t
+    state["tagSeq"] = max(int(d.get("tagSeq") or 0), len(state["tags"]))
+    state["tagsRev"] += 1
 
 
 def clip(v, n):
@@ -262,10 +286,11 @@ class Handler(BaseHTTPRequestHandler):
                     made.append(tag)
                 if made:
                     state["tagsRev"] += 1
+                    save_tags()
                 out = ({"created": made}, 200)
 
             if u.path == "/api/tags/clear":
-                state["tags"].clear(); state["tagsRev"] += 1
+                state["tags"].clear(); state["tagsRev"] += 1; save_tags()
                 out = ({"ok": True}, 200)
         if out is None:
             return self._send({"error": "not found"}, 404)
@@ -276,13 +301,13 @@ class Handler(BaseHTTPRequestHandler):
         out = None
         with lock:
             if u.path == "/api/tags":
-                state["tags"].clear(); state["tagsRev"] += 1
+                state["tags"].clear(); state["tagsRev"] += 1; save_tags()
                 out = ({"ok": True}, 200)
             elif u.path.startswith("/api/tags/"):
                 tid = u.path.rsplit("/", 1)[-1]
                 gone = state["tags"].pop(tid, None)
                 if gone:
-                    state["tagsRev"] += 1
+                    state["tagsRev"] += 1; save_tags()
                 out = ({"deleted": bool(gone)}, 200 if gone else 404)
         if out is None:
             return self._send({"error": "not found"}, 404)
@@ -290,6 +315,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    load_tags()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"tb-atc on http://{HOST}:{PORT}/  (web root: {WEB})", flush=True)
     srv.serve_forever()

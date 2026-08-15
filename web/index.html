@@ -968,6 +968,7 @@ window.__atc = {
   get tags(){ return tags; },
   get data(){ return DATA; },
   get apiUp(){ return apiUp; },
+  get scene(){ return scene; },
   get scope(){ return {items: hiItems && [...hiItems], agents: hiAgents && [...hiAgents]}; },
   inScope,
   pull: apiPull,
@@ -977,9 +978,13 @@ setInterval(apiReportSelection, 2000);
 
 /* ---------- click: focus an item, background zooms out ---------- */
 let downXY = null;
-addEventListener('pointerdown', e=>{ if (view.input==='brush') return; downXY=[e.clientX,e.clientY]; });
+/* Only the canvas drives the camera. Without this, clicking into the tag box
+   or the search field also lands as a background click and clears the focus
+   the box is attached to. */
+const onCanvas = e => e.target === renderer.domElement;
+addEventListener('pointerdown', e=>{ if (view.input==='brush' || !onCanvas(e)) return; downXY=[e.clientX,e.clientY]; });
 addEventListener('pointerup', e=>{
-  if (view.input==='brush') return;
+  if (view.input==='brush' || !onCanvas(e)) return;
   if (!downXY) return;
   const moved = Math.hypot(e.clientX-downXY[0], e.clientY-downXY[1]); downXY=null;
   if (moved > 6) return;                       /* it was a drag, not a click */
@@ -1192,7 +1197,7 @@ addEventListener('pointermove', e => {
   if (selecting) paintAt(e.clientX, e.clientY);
 }, true);
 addEventListener('pointerdown', e => {
-  if (view.input !== 'brush') return;
+  if (view.input !== 'brush' || e.target !== renderer.domElement) return;
   selecting = true; selOp = null;
   paintAt(e.clientX, e.clientY);
 }, true);
