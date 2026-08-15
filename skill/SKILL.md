@@ -1,6 +1,6 @@
 ---
 name: tightbeam-atc
-description: Drive the Tightbeam Air Traffic Control view — a live 3D display of the running org. Read what a human has selected, focus or select nodes, fit the camera, and attach text tags to agents and work items. Use when asked to show, point at, highlight, annotate, or look at something in the visualization, or to find out what the user is currently looking at.
+description: Drive the Tightbeam Air Traffic Control view — a live 3D display of the running org. Read what a human has selected, focus or select nodes, fit the camera, attach text tags to agents and work items, and draw labelled arrows between them to show a relation. Use when asked to show, point at, highlight, annotate, connect, or look at something in the visualization, or to find out what the user is currently looking at.
 ---
 
 # Air Traffic Control — driving the view
@@ -151,6 +151,49 @@ curl -s -X DELETE localhost:8787/api/tags             # remove all
 Text is capped at 80 characters and at most four tags render per node. Tags
 persist across a service restart, so treat them as something you are leaving on
 someone's desk rather than a transient overlay — clean them up.
+
+## Arrows
+
+A tag names one node; an **arrow** names a relation between two — this card
+blocks that one, this reviewer owns that item, this failure caused that one. It
+draws as a thick coloured curve with a head, heavier than any line the substrate
+draws, because an arrow is you pointing rather than the org's own traffic.
+
+```bash
+curl -s -X POST localhost:8787/api/arrows -H 'content-type: application/json' -d '{
+  "arrows":[
+    {"from":"wi_5870f52e-…","to":"wi_62ef32ae-…","text":"blocks","color":"red","source":"agent"},
+    {"from":"s_fde9b2be","to":"wi_5870f52e-…","text":"owns this card","color":"cyan","source":"agent"}
+  ]}'
+
+curl -s localhost:8787/api/arrows                       # read them all
+curl -s -X DELETE localhost:8787/api/arrows/r3          # remove one
+curl -s -X DELETE localhost:8787/api/arrows             # remove all
+```
+
+`from` and `to` are node ids, same as everywhere else, and direction is
+meaningful — the head lands on `to`. An arrow from a node to itself is refused.
+Colour comes from the same seven names tags use.
+
+**The label placement is automatic, and the length is the lever.** A short label
+rides the curve letter by letter, turning to follow it. A long one cannot do
+that without shrinking past reading size, so it falls back to the same card a
+tag draws, parked at the apex of the curve. Around thirty characters is the
+crossover. If you want the label *on* the line, keep it to two or three words —
+`blocks`, `owns this card`, `caused by` — and put the explanation in a tag.
+
+**Arrows ghost with their endpoints.** An arrow is a claim about both ends, so
+it only stays at full strength while both are in scope; focus or filter
+elsewhere and it fades with everything else, label first. That means an arrow
+drawn across the org stays legible when someone narrows to one end of it — it
+dims rather than floating over a view that has already dismissed its subject.
+
+Two arrows between the same pair bow apart rather than overlapping, so a
+back-and-forth relation reads as two curves.
+
+At most 100 arrows exist at once, and like tags they persist across a restart of
+the service. `c` on the keyboard clears every tag *and* every arrow, so a human
+can always reset the annotation layer — but clean up after yourself.
 
 ## Working well with the human
 

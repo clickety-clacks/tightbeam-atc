@@ -15,6 +15,10 @@ what it currently has selected. External callers use the verbs below.
     POST   /api/focus                    {id, mode:"single"|"neighborhood"|"clear"}
     POST   /api/fit                      {on:bool}
     POST   /api/filter                   {ids:[id]} | {clear:true}
+    POST   /api/arrows                   {arrows:[{from, to, text, color, source}]}
+    GET    /api/arrows                   [{arrowId, from, to, text, color, source, at}]
+    DELETE /api/arrows                   clear all
+    DELETE /api/arrows/<arrowId>         clear one
     GET    /api/tags                     [{tagId, target, text, source, at}]
     POST   /api/tags                     {tags:[{target, text, source, color}]}
     DELETE /api/tags                     clear all
@@ -54,6 +58,10 @@ MAX_TAG_TEXT = 80
 # Colours are named, not hex: the page resolves each name to a value that suits
 # the current theme, so a tag stays legible in both.
 TAG_COLORS = ("neutral", "red", "amber", "green", "cyan", "blue", "violet")
+# An arrow spans two nodes and draws thicker than anything else on screen, so
+# a smaller ceiling than tags: a hundred of them is already an unreadable view.
+MAX_ARROWS = 100
+MAX_ARROW_TEXT = 120
 MAX_ID = 128
 MAX_IDS_PER_CALL = 500
 CMD_HISTORY = 200
@@ -76,6 +84,9 @@ state = {
     "tags": {},             # tagId -> tag
     "tagSeq": 0,
     "tagsRev": 0,
+    "arrows": {},           # arrowId -> arrow
+    "arrowSeq": 0,
+    "arrowsRev": 0,
 }
 
 
@@ -92,7 +103,8 @@ def push(kind, **payload):
 def save_tags():
     try:
         STATE_FILE.write_text(json.dumps(
-            {"tags": list(state["tags"].values()), "tagSeq": state["tagSeq"]}))
+            {"tags": list(state["tags"].values()), "tagSeq": state["tagSeq"],
+             "arrows": list(state["arrows"].values()), "arrowSeq": state["arrowSeq"]}))
     except OSError:
         pass                            # a display, not a database: never fail a request on this
 
@@ -107,6 +119,11 @@ def load_tags():
             state["tags"][t["tagId"]] = t
     state["tagSeq"] = max(int(d.get("tagSeq") or 0), len(state["tags"]))
     state["tagsRev"] += 1
+    for a in d.get("arrows", [])[:MAX_ARROWS]:
+        if isinstance(a, dict) and a.get("arrowId"):
+            state["arrows"][a["arrowId"]] = a
+    state["arrowSeq"] = max(int(d.get("arrowSeq") or 0), len(state["arrows"]))
+    state["arrowsRev"] += 1
 
 
 def clip(v, n):
@@ -194,7 +211,8 @@ class Handler(BaseHTTPRequestHandler):
                 snap = {"generation": GENERATION, "selection": list(state["selection"]),
                         "focused": list(state["focused"]), "focusMode": state["focusMode"],
                         "selectionAt": state["selectionAt"], "selectionBy": state["selectionBy"],
-                        "tags": list(state["tags"].values()), "seq": state["seq"]}
+                        "tags": list(state["tags"].values()), "seq": state["seq"],
+                        "arrows": list(state["arrows"].values())}
         elif u.path == "/api/selection":
             # two distinct things: what a human brushed, and what a focus or
             # filter is currently highlighting. Neither implies the other.
@@ -206,6 +224,9 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/tags":
             with lock:
                 snap = list(state["tags"].values())
+        elif u.path == "/api/arrows":
+            with lock:
+                snap = list(state["arrows"].values())
         elif u.path == "/api/pull":
             try:
                 since = int((parse_qs(u.query).get("since") or ["0"])[0])
@@ -219,7 +240,9 @@ class Handler(BaseHTTPRequestHandler):
                 snap = {"generation": GENERATION,
                         "commands": [] if gap else [c for c in state["commands"] if c["seq"] > since],
                         "gap": gap, "oldestSeq": state["oldestSeq"], "seq": state["seq"],
-                        "tags": list(state["tags"].values()), "tagsRev": state["tagsRev"]}
+                        "tags": list(state["tags"].values()), "tagsRev": state["tagsRev"],
+                        "arrows": list(state["arrows"].values()),
+                        "arrowsRev": state["arrowsRev"]}
         if snap is None:
             return self._send({"error": "not found"}, 404)
         self._send(snap)
@@ -310,6 +333,35 @@ class Handler(BaseHTTPRequestHandler):
                     save_tags()
                 out = ({"created": made}, 200)
 
+            if u.path == "/api/arrows":
+                made = []
+                raw = b.get("arrows")
+                for a in (raw[:MAX_ARROWS] if isinstance(raw, list) else []):
+                    if not isinstance(a, dict):
+                        continue
+                    if len(state["arrows"]) >= MAX_ARROWS:
+                        break
+                    src, dst = clip(a.get("from"), MAX_ID), clip(a.get("to"), MAX_ID)
+                    # an arrow to itself has no direction to draw
+                    if not src or not dst or src == dst:
+                        continue
+                    state["arrowSeq"] += 1
+                    colour = a.get("color")
+                    arrow = {
+                        "arrowId": f"r{state['arrowSeq']}",
+                        "from": str(src), "to": str(dst),
+                        "text": ((a.get("text") or "").strip())[:MAX_ARROW_TEXT],
+                        "source": "user" if a.get("source") == "user" else "agent",
+                        "color": colour if colour in TAG_COLORS else "neutral",
+                        "at": int(time.time() * 1000),
+                    }
+                    state["arrows"][arrow["arrowId"]] = arrow
+                    made.append(arrow)
+                if made:
+                    state["arrowsRev"] += 1
+                    save_tags()
+                out = ({"created": made}, 200)
+
             if u.path == "/api/tags/clear":
                 state["tags"].clear(); state["tagsRev"] += 1; save_tags()
                 out = ({"ok": True}, 200)
@@ -324,11 +376,20 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/tags":
                 state["tags"].clear(); state["tagsRev"] += 1; save_tags()
                 out = ({"ok": True}, 200)
+            elif u.path == "/api/arrows":
+                state["arrows"].clear(); state["arrowsRev"] += 1; save_tags()
+                out = ({"ok": True}, 200)
             elif u.path.startswith("/api/tags/"):
                 tid = u.path.rsplit("/", 1)[-1]
                 gone = state["tags"].pop(tid, None)
                 if gone:
                     state["tagsRev"] += 1; save_tags()
+                out = ({"deleted": bool(gone)}, 200 if gone else 404)
+            elif u.path.startswith("/api/arrows/"):
+                aid = u.path.rsplit("/", 1)[-1]
+                gone = state["arrows"].pop(aid, None)
+                if gone:
+                    state["arrowsRev"] += 1; save_tags()
                 out = ({"deleted": bool(gone)}, 200 if gone else 404)
         if out is None:
             return self._send({"error": "not found"}, 404)

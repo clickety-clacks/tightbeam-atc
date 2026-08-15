@@ -9,7 +9,8 @@ estimated. Where the ledger cannot answer a question, the view says unknown
 rather than guessing.
 
 It also has a control plane, so an agent can point a human at something: read
-what is selected, focus a node, and pin short tags onto agents and work items.
+what is selected, focus a node, pin short tags onto agents and work items, and
+draw labelled arrows between them.
 
 ## Reading the picture
 
@@ -36,6 +37,12 @@ what is selected, focus a node, and pin short tags onto agents and work items.
 - **Tags** are short labels pinned above a node. A drawn mark carries
   provenance — a hexagon for an agent, a bust for a person — and the colour is
   the author's choice from seven named values that resolve per theme.
+- **Arrows** are annotations of a *relation* rather than a node: a thick curve
+  between two nodes, drawn heavier than any substrate line because it is
+  someone pointing rather than the org's own traffic. A short label rides the
+  curve letter by letter; one too long to fit falls back to the same card a tag
+  draws. Arrows ghost with their endpoints — an arrow is only at full strength
+  when both ends are.
 
 ## Keyboard
 
@@ -48,7 +55,7 @@ what is selected, focus a node, and pin short tags onto agents and work items.
 | `D` | clear selection |
 | `F` / space | fly to the selection; press again to return exactly where you were |
 | `L` | legend |
-| `C` | clear all tags |
+| `C` | clear all tags and arrows |
 
 There is deliberately no Escape binding: browsers claim that key in fullscreen,
 so it never reaches the page. The search field has an × to clear it, a
@@ -120,7 +127,7 @@ The generator can also push the snapshot to another machine over ssh; see
 | `TB_ATC_HOST` | bind address | `127.0.0.1` |
 | `TB_ATC_PORT` | port | `8787` |
 | `TB_ATC_WEB` | directory holding `index.html` | `../web` |
-| `TB_ATC_STATE` | file tags are persisted to | `<web>/../tags.json` |
+| `TB_ATC_STATE` | file tags and arrows are persisted to | `<web>/../tags.json` |
 | `TB_BASE_DIR` | Tightbeam base directory | `~/.tightbeam` |
 | `TB_WEATHER_OUT` | where the snapshot is written | `/tmp/tb-weather.json` |
 | `TB_WEATHER_DEST` | optional `scp` target when the web root is another machine | unset |
@@ -153,6 +160,10 @@ you mean otherwise.
 | `POST` | `/api/tags` | `{tags:[{target, text, source:"agent"\|"user", color}]}` |
 | `DELETE` | `/api/tags` | clear all |
 | `DELETE` | `/api/tags/<tagId>` | clear one |
+| `GET` | `/api/arrows` | `[{arrowId, from, to, text, source, color, at}]` |
+| `POST` | `/api/arrows` | `{arrows:[{from, to, text, source, color}]}` |
+| `DELETE` | `/api/arrows` | clear all |
+| `DELETE` | `/api/arrows/<arrowId>` | clear one |
 
 Ids are the feed's own: work items `wi_...`, agents their session suffix
 `s_...`. Both are stable across snapshots, so external callers can address them.
