@@ -747,7 +747,7 @@ tagInput.addEventListener('keydown', e => {
       apiPostTags([{target, text, source:'user'}]);
       tagInput.value = '';
     }
-  } else if (e.key === 'Escape'){ hideTagBox(); }
+  }
 });
 
 /* ---------- search box ----------
@@ -777,10 +777,10 @@ searchEl.addEventListener('input', () => {
 });
 searchEl.addEventListener('keydown', e => {
   e.stopPropagation();                       /* canvas hotkeys are not for typing */
-  if (e.key === 'Escape'){ releaseFilter(); }
-  /* Enter hands the keyboard back to the canvas: the filter is already applied
-     as you type, so the hotkeys should work again without a stray click */
-  else if (e.key === 'Enter'){ searchEl.blur(); }
+  /* No Escape binding anywhere in this page: browsers claim it in fullscreen,
+     so it never arrives, and a shortcut that silently does nothing is worse
+     than no shortcut. The × clears the filter. */
+  if (e.key === 'Enter'){ searchEl.blur(); }  /* hand the keyboard back */
 });
 
 /* ---------- control plane ----------
@@ -945,7 +945,6 @@ addEventListener('keydown', e=>{
   else if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
   else if (e.key==='s' || e.key==='S'){ setInputMode(view.input==='brush' ? 'navigate' : 'brush'); }
   else if (e.key==='d' || e.key==='D'){ view.selection.clear(); applyView(); }
-  else if (e.key==='Escape'){ clearFocus(); if (view.input==='brush') setInputMode('navigate'); }
   else if (e.key==='f' || e.key==='F' || e.key===' '){
     e.preventDefault(); fitSelection();
   }

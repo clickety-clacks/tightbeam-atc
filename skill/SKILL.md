@@ -92,7 +92,8 @@ curl -s -X POST localhost:8787/api/filter -H 'content-type: application/json' \
   -d '{"clear":true}'
 ```
 
-They can clear it themselves with the × in the search box, so a filter you
+They can clear it themselves with the × in the search box (there is no Escape
+binding — fullscreen browsers swallow that key), so a filter you
 leave behind is a nuisance rather than a trap — but clear it anyway when done.
 
 One consequence worth knowing: while a filter or focus is in force, the human's

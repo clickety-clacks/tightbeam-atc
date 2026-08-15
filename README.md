@@ -42,14 +42,16 @@ what is selected, focus a node, and pin short tags onto agents and work items.
 |---|---|
 | `T` | light / dark |
 | `/` | search — ghosts everything unmatched and frames the rest |
-| `Esc` | in the search box: release the filter (the × button does the same) |
 | `S` | select mode — drag a circular brush across nodes |
 | `[` `]` | brush radius |
 | `D` | clear selection |
 | `F` / space | fly to the selection; press again to return exactly where you were |
 | `L` | legend |
 | `C` | clear all tags |
-| `Esc` | clear focus |
+
+There is deliberately no Escape binding: browsers claim that key in fullscreen,
+so it never reaches the page. The search field has an × to clear it, a
+background click clears focus, and `S` again leaves brush mode.
 
 Click a node to focus it and fade the rest; click again for its neighbourhood;
 click the background to reset. While a single node is focused, a box appears for
