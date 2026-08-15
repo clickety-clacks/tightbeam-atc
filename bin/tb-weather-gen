@@ -198,10 +198,19 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
     ev = q("""SELECT t.kind, t.verdictKind, t.commitRefs, t.ts,
                      a.reviewsAssignmentId AS reviews FROM attests t
               JOIN assignments a ON a.id=t.assignmentId WHERE a.workItemId=?""", wid)
-    refs = set()
+    # A code review's reviewed-clean legitimately carries the commit under
+    # review, so review refs count. What must not count is an item that never
+    # produced code: a read-only DESIGN review cites the repository base it
+    # read at, and reading that as an output made design work show as merged
+    # off whatever happened to be the tip that day.
+    refs, prod_refs = set(), set()
     for e in ev:
-        if e["commitRefs"]:
-            refs.update(re.findall(r'"commit"\s*:\s*"([0-9a-f]{7,40})"', e["commitRefs"]))
+        if not e["commitRefs"]:
+            continue
+        found = re.findall(r'"commit"\s*:\s*"([0-9a-f]{7,40})"', e["commitRefs"])
+        refs.update(found)
+        if e["reviews"] is None:
+            prod_refs.update(found)     # a producer citing a commit means code
     kinds = {e["kind"] for e in ev}
     verd = {e["verdictKind"] for e in ev if e["verdictKind"]}
     closed_at = None
@@ -245,13 +254,15 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
     tgt = imminent[0]["sessionKey"] if imminent else None
     flow = {aid: ("in" if (tgt is None or sk == tgt) else "out")
             for aid, sk in turn_sk.items()}
+    is_code = True if code_items is None else (wid in code_items or bool(prod_refs))
     items.append({"id": wid[:11], "title": (r["title"] or "")[:60],
                   "stage": stage, "holders": holders, "turns": turns, "flow": flow,
-                  "closedAt": closed_at, "merged": merged_in_branch(refs),
-                  # a recorded commit is proof of code, whatever the effect
-                  # tags say — effect kinds are advisory and often incomplete
-                  "code": True if code_items is None
-                          else (wid in code_items or bool(refs))})
+                  # nothing to merge means no merge state, not a green ring
+                  "closedAt": closed_at,
+                  "merged": merged_in_branch(refs) if is_code else None,
+                  # effect tags are advisory and often incomplete, so a commit
+                  # filed BY A PRODUCER also proves code
+                  "code": is_code})
 # show the whole open sky so drainage is visible; landings by closure recency
 open_items = [w for w in items if w["stage"] < 6][:240]
 landed = sorted((w for w in items if w["stage"] >= 6),
