@@ -46,6 +46,19 @@ draw labelled arrows between them.
   draws. Arrows ghost with their endpoints — an arrow is only at full strength
   when both ends are.
 
+## What is in force
+
+Under the title bar, one chip per active display layer, outermost first, each
+in its own colour: a **search**, a **fit** (`f`/space, showing the selection), a
+**focus** or its **neighbourhood**, and **brush** mode alongside them. The chip
+with the filled dot is the layer actually deciding what you see; the outlined
+ones are still in force beneath it and are what you return to when you leave.
+
+Entering a mode renders that mode: focus a node and everything else ghosts,
+open its neighbourhood and the neighbourhood is what is lit. Leaving one puts
+back exactly what was true before it, camera included. `docs/display-rules.md`
+records the decisions.
+
 ## Keyboard
 
 | key | |

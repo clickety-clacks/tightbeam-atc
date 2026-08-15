@@ -26,6 +26,20 @@
     flex:1 1 auto; min-width:0; max-width:100%; box-sizing:border-box;
     overflow-wrap:anywhere; }
   #hud b { color:#b08d57; font-weight:600; }
+  /* Which layers are in force, outermost first, so the nesting is readable at
+     a glance and the one that decides what you are looking at is obvious. */
+  #stack { display:flex; gap:6px; flex-wrap:wrap; }
+  #stack:empty { display:none; }
+  #stack .chip { font-size:10.5px; letter-spacing:.12em; text-transform:uppercase;
+    border-radius:5px; padding:5px 9px; border:1px solid currentColor;
+    background:#101214e6; display:inline-flex; align-items:center; gap:6px;
+    opacity:.62; }
+  #stack .chip.on { opacity:1; }              /* the layer that is rendering */
+  #stack .chip .dot { width:6px; height:6px; border-radius:50%;
+    border:1px solid currentColor; }
+  #stack .chip.on .dot { background:currentColor; }
+  #stack .chip b { color:inherit; font-weight:700; }
+  body.light #stack .chip { background:#f2eee2e8; }
   #hud .live { color:#6fae4e; } #hud .sample { color:#c9a835; }
   /* the bottom bar spans both edges, so it can never run off either side */
   #legend { position:fixed; z-index:6;
@@ -154,6 +168,7 @@
     <button id="searchclear" title="clear" aria-label="clear search">×</button>
   </div>
   <div id="topright">
+    <div id="stack"></div>
     <div id="themehint">/ search · S select · T theme · L legend · C clear notes</div>
     <div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> · <span id="selcount">0</span> sel · [ ] size · f fit · d clear</div>
   </div>
@@ -786,6 +801,48 @@ function setFilter(kind, {query = '', ids = null} = {}){
     });
   }
 }
+/* The status strip: one chip per layer in force, outermost first, coloured so
+   each mode is recognisable without reading it. The chip that is actually
+   deciding what you see is filled; the ones it is stacked on top of are
+   outlined, because they are still there and you will land back on them. */
+function renderStack(){
+  const el = document.getElementById('stack');
+  if (!el) return;
+  const hot = k => (T.tag && T.tag[k]) || T.tag.neutral;
+  const layers = [];
+  if (view.filter.kind !== 'none'){
+    const n = (hiItems?.size || 0) + (hiAgents?.size || 0);
+    layers.push({ text: view.filter.kind === 'agent' ? 'agent search' : 'search',
+                  count: view.filter.kind === 'none' ? '' : (activeIs('filter') ? n : ''),
+                  colour: hot('cyan') });
+  }
+  if (view.lens === 'selection'){
+    layers.push({ text: 'fit', count: view.selection.size, colour: hot('amber') });
+  }
+  if (view.focus.stage === 1) layers.push({ text: 'focus', count: '', colour: hot('violet') });
+  if (view.focus.stage === 2){
+    layers.push({ text: 'neighbourhood',
+                  count: (hiItems?.size || 0) + (hiAgents?.size || 0), colour: hot('violet') });
+  }
+  if (view.input === 'brush'){
+    layers.push({ text: 'brush', count: view.selection.size, colour: hot('green'), aside: true });
+  }
+  el.innerHTML = layers.map((l, i) => {
+    /* the innermost non-aside layer is the one rendering */
+    const rendering = !l.aside && i === layers.filter(x => !x.aside).length - 1;
+    return '<span class="chip' + (rendering ? ' on' : '') + '" style="color:' + l.colour + '">'
+         + '<span class="dot"></span>' + l.text
+         + (l.count !== '' && l.count != null ? ' <b>' + l.count + '</b>' : '') + '</span>';
+  }).join('');
+}
+
+/* which layer is currently deciding the view */
+function activeIs(kind){
+  if (view.focus.stage >= 1) return kind === 'focus';
+  if (view.lens === 'selection' && view.selection.size) return kind === 'lens';
+  return kind === 'filter' && view.filter.kind !== 'none';
+}
+
 function renderSearchChrome(){
   const f = view.filter;
   document.getElementById('searchpill').style.display = f.kind === 'agent' ? 'inline-block' : 'none';
@@ -1866,6 +1923,7 @@ function applyView(){
   buildTags();
   buildArrows();
   renderSearchChrome();
+  renderStack();
   applyChromeOffset();          /* the detail pane may have just appeared */
 }
 /* Whatever is ghosted is out of play. With no focus or filter the brush can
@@ -1908,6 +1966,7 @@ function setInputMode(mode){
   selCursor.style.display = brushing ? 'block' : 'none';
   if (!brushing){ selecting = false; selOp = null; selCursor.classList.remove('unsel');
                   flushHeldCommands(); }
+  renderStack();                     /* the strip names the input mode too */
 }
 /* the ONLY place focus is dropped */
 function clearFocus(){
