@@ -172,6 +172,7 @@ import { LineSegments2 } from './addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from './addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from './addons/lines/LineMaterial.js';
 const edgeMats = new Set();
+let searchTimer = null;      /* declared here so setFilter, above the box, can cancel it */
 const TETHER_SEGS = 40;   /* subdivisions per tether, for the traveling wave */
 
 const STAGE_NAMES = ['specced','building','tests pass','reviewed','verdict clean','gate ready','merged'];
@@ -644,6 +645,12 @@ function filteredView(){
 
 /* apply a filter and frame what it found */
 function setFilter(kind, {query = '', ids = null} = {}){
+  /* Typing is debounced, so a keystroke leaves a timer holding the query as it
+     was 220ms ago. Anything else that sets the filter in that window — the ×,
+     an agent's command — was then undone when the timer fired: the box read
+     empty while the view stayed filtered by a word no longer written anywhere.
+     This is the single writer, so it is where the pending write is cancelled. */
+  if (typeof searchTimer !== 'undefined') clearTimeout(searchTimer);
   view.filter = { kind, query: (query || '').toLowerCase().trim(),
                   ids: ids ? new Set(ids.map(fullId)) : null };
   if (kind === 'none'){ view.filter.query = ''; view.filter.ids = null; }
@@ -1048,7 +1055,6 @@ tagInput.addEventListener('keydown', e => {
    both. */
 const searchEl = document.getElementById('search');
 const searchClearBtn = document.getElementById('searchclear');
-let searchTimer = null;
 function releaseFilter(){
   searchEl.value = '';
   setFilter('none');
