@@ -431,8 +431,15 @@ function computeHighlight(){
    sideways, so a fit computed from centres alone crops them at the edge of the
    viewport. Contribute the tag corners too. */
 const _fp = new THREE.Vector3();
-function fitPoints(m, out){
+/* Labels are annotations; the nodes are the subject. A tag quad reaches some
+   fifteen world units past its node, so framing one alongside a set of nodes
+   pushes the camera out until the nodes themselves are small — the view reads
+   as far too wide to answer a question about the nodes. Multi-node framings
+   fit the nodes and let labels overflow; single-object focus has room, so it
+   still frames the label with the thing it labels. */
+function fitPoints(m, out, tags = false){
   out.push(m.position.clone());
+  if (!tags) return;
   (m.userData.tagSprites || []).forEach(sp => {
     if (!sp.visible) return;
     sp.getWorldPosition(_fp);
@@ -469,6 +476,70 @@ function frameDistance(pts, center, e, {margin = 1.10, usableH = 1, usableV = 1}
       Math.abs(_fdv.dot(_fdr)) / tanH, Math.abs(_fdv.dot(_fdu)) / tanV));
   }
   return d;
+}
+
+/* The rectangle actually free of chrome. It is not symmetric — a bar across
+   the top, a taller legend along the bottom, the detail pane down one side —
+   so framing against the raw viewport centres content below the middle of the
+   space that is really available, which reads as a view wanting to be panned
+   up, and slides the lowest nodes under the legend. */
+function clearRect(){
+  const vw = innerWidth, vh = innerHeight;
+  const r = {left: 0, right: vw, top: 0, bottom: vh};
+  document.querySelectorAll('#topbar, #legend, #detail, #tagbox').forEach(el => {
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return;
+    const b = el.getBoundingClientRect();
+    if (!b.width || !b.height) return;
+    if (b.width / vw > .6){                       /* a band across the view */
+      if ((b.top + b.bottom) / 2 < vh / 2) r.top = Math.max(r.top, b.bottom);
+      else r.bottom = Math.min(r.bottom, b.top);
+    } else if ((b.left + b.right) / 2 > vw / 2){  /* hugging one side */
+      r.right = Math.min(r.right, b.left);
+    } else {
+      r.left = Math.max(r.left, b.right);
+    }
+  });
+  /* never let chrome starve the view: fall back to the viewport if it would */
+  if (r.right - r.left < vw * .3){ r.left = 0; r.right = vw; }
+  if (r.bottom - r.top < vh * .3){ r.top = 0; r.bottom = vh; }
+  return {...r, vw, vh};
+}
+
+/* Frame `pts` into that rectangle: solve the distance, then aim so the content
+   sits at the centre of the clear space rather than the centre of the screen. */
+function frameTo(pts, center, e, {margin = 1.15, floor = 6} = {}){
+  const b = clearRect();
+  const half = Math.tan(camera.fov * Math.PI / 360);
+  const right = new THREE.Vector3().crossVectors(camera.up, e).normalize();
+  const up = new THREE.Vector3().crossVectors(e, right).normalize();
+
+  /* Aim the middle of what is being framed, not the centroid of its points.
+     A lopsided set — a cluster one side, one node far off the other — puts the
+     centroid away from the middle, and the framing then looks off to one side
+     however exact the distance is. */
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  const _v = new THREE.Vector3();
+  for (const pt of pts){
+    _v.subVectors(pt, center);
+    const x = _v.dot(right), y = _v.dot(up);
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  const aim = center.clone()
+    .addScaledVector(right, (x0 + x1) / 2)
+    .addScaledVector(up,    (y0 + y1) / 2);
+
+  const dist = Math.max(floor, frameDistance(pts, aim, e, {
+    margin, usableH: (b.right - b.left) / b.vw, usableV: (b.bottom - b.top) / b.vh }));
+  /* then offset so that middle lands in the middle of the clear space rather
+     than the middle of the screen */
+  const ndcX = ((b.left + b.right) / 2 - b.vw / 2) / (b.vw / 2);
+  const ndcY = (b.vh / 2 - (b.top + b.bottom) / 2) / (b.vh / 2);
+  const target = aim
+    .addScaledVector(right, -ndcX * half * camera.aspect * dist)
+    .addScaledVector(up,    -ndcY * half * dist);
+  return {camPos: target.clone().addScaledVector(e, dist), target};
 }
 
 /* Where a framing approaches from: the camera's current bearing, lifted to a
@@ -513,13 +584,12 @@ function setFilter(kind, {query = '', ids = null} = {}){
   const nb = kind === 'none' ? null : filteredView();
   if (nb){
     const e = approachDir(nb.center);
-    const camPos = nb.center.clone().addScaledVector(
-      e, Math.max(6, frameDistance(nb.pts, nb.center, e)));
+    const {camPos, target} = frameTo(nb.pts, nb.center, e);
     view.framing = 'filter'; userMoved = true;
-    flyTo(camPos, nb.center.clone(), () => {
-      const d = camPos.clone().sub(nb.center);
+    flyTo(camPos, target.clone(), () => {
+      const d = camPos.clone().sub(target);
       orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
-      orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(nb.center);
+      orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(target);
       userMoved = false;
     });
   }
@@ -1152,6 +1222,9 @@ refresh(); setInterval(refresh, 5000);
 /* a read-only window onto the page's state, for tests and for anything
    driving the view from a console */
 window.__atc = {
+  /* framing internals, so a fit that looks wrong can be interrogated rather
+     than guessed at: which constraint bound, and how much room it asked for */
+  clearRect, frameDistance, frameTo, filteredView, neighbourhoodView,
   get view(){ return view; },
   get tags(){ return tags; },
   get data(){ return DATA; },
@@ -1461,37 +1534,20 @@ function flyToNode(o){
   const nb = view.focus.stage === 2 ? neighbourhoodView() : null;
   if (nb){
     const e = approachDir(nb.center);
-    const camPos = nb.center.clone().addScaledVector(
-      e, Math.max(7, frameDistance(nb.pts, nb.center, e)));
-    flyTo(camPos, nb.center);
+    const {camPos, target} = frameTo(nb.pts, nb.center, e, {floor: 7});
+    flyTo(camPos, target);
   } else {
-    const pts = []; fitPoints(o, pts);
+    const pts = []; fitPoints(o, pts, true);
     const pt = new THREE.Vector3();
     pts.forEach(v => pt.add(v)); pt.multiplyScalar(1 / pts.length);
-    /* The pane covers part of the viewport, so fit inside what it leaves and
-       bias the framing away from it: the node lands in the space that stays
-       visible rather than behind the card describing it. Left in landscape,
-       high in portrait. Taking the pane out of the usable frustum is what
-       keeps the node clear of it — shifting alone could push it back under. */
-    const portrait = innerHeight > innerWidth;
-    const paneFrac = portrait ? .40 : Math.min(380, innerWidth * .34) / innerWidth;
+    /* The detail pane is chrome like the bar and the legend, and applyView has
+       already put it on screen, so clearRect() sees it and the node is framed
+       into whatever it leaves — down one side in landscape, above it in
+       portrait. A lone node wants breathing room rather than to fill the
+       frame, which is all the wider margin here is for. */
     const e = approachDir(pt, .30);
-    /* a lone node wants breathing room, not to fill the frame */
-    const dist = Math.max(7, frameDistance(pts, pt, e, {margin: 2.0,
-      usableH: portrait ? 1 : 1 - paneFrac, usableV: portrait ? 1 - paneFrac : 1}));
-    const camPos = pt.clone().addScaledVector(e, dist);
-    const half = Math.tan(camera.fov * Math.PI / 360);
-    const shift = (portrait ? half : half * camera.aspect) * dist * paneFrac;
-    if (portrait){
-      /* The pane runs along the bottom, so the node belongs in the space above
-         it: look BELOW the node and it rides high in the frame. Looking above
-         it — which is what this did — slid the node down behind the card. */
-      camPos.y -= shift; pt.y -= shift;
-    } else {
-      const right = new THREE.Vector3().subVectors(camPos, pt).cross(camera.up).normalize();
-      camPos.addScaledVector(right, -shift); pt.addScaledVector(right, -shift);
-    }
-    flyTo(camPos, pt);
+    const {camPos, target} = frameTo(pts, pt, e, {margin: 2.0, floor: 7});
+    flyTo(camPos, target);
   }
   showTagBox();
 }
@@ -1541,16 +1597,16 @@ function fitSelection(){
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
   const e = approachDir(c);
-  const camPos = c.clone().addScaledVector(e, Math.max(6, frameDistance(pts, c, e)));
+  const {camPos, target} = frameTo(pts, c, e);
   /* hand the ambient orbit a new centre so it carousels around the selection
      once the flight lands, instead of resuming around the org's root */
   markCamera();                                /* first press: remember here */
-  flyTo(camPos, c.clone(), () => {
-    const d = camPos.clone().sub(c);
+  flyTo(camPos, target.clone(), () => {
+    const d = camPos.clone().sub(target);
     orbitR = Math.hypot(d.x, d.z);
     orbitH = d.y;
     orbitAngle = Math.atan2(d.x, d.z);
-    orbitTgt.copy(c);
+    orbitTgt.copy(target);
     userMoved = false;                         /* orbit carries on around what we framed */
   });
   view.framing = view.fitTarget; userMoved = true;
