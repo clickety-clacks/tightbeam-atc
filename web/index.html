@@ -681,6 +681,7 @@ function setFilter(kind, {query = '', ids = null} = {}){
   renderSearchChrome();
   const nb = kind === 'none' ? null : filteredView();
   if (nb){
+    camMark = null;                      /* framing the filter moves the camera too */
     const e = approachDir(nb.center);
     const {camPos, target} = frameTo(nb.pts, nb.center, e);
     view.framing = 'filter'; userMoved = true;
@@ -1833,6 +1834,12 @@ addEventListener('pointerup', () => {
 let camMark = null;
 /* the camera move a click (or an API focus) performs on a node */
 function flyToNode(o){
+  /* The f/space bookmark records where the camera was so a second press can
+     put it back. Any OTHER framing invalidates it — otherwise the next f reads
+     a mark left over from before and flies BACK instead of to the selection,
+     which is exactly what it looked like when f "stopped working". The click
+     path already did this; focus arriving from the control API did not. */
+  camMark = null;
   view.framing = 'focus'; userMoved = true;
   const nb = view.focus.stage === 2 ? neighbourhoodView() : null;
   let camPos, target;
