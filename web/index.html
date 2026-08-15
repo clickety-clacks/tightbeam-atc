@@ -272,16 +272,42 @@ function labelSprite(text){
   return sp;
 }
 /* a tag: short text pinned above a node, coloured by who wrote it */
+/* Provenance is drawn, not typed: an emoji would arrive in its own colours and
+   fight the tag's. A bust for a person, a hexagon for an agent — the hexagon
+   echoing the faceted geometry the agents themselves are drawn from. */
+function drawTagIcon(ctx, kind, cx, cy, r, color){
+  ctx.save();
+  ctx.strokeStyle = color; ctx.fillStyle = color;
+  ctx.lineWidth = Math.max(2, r * .22);
+  if (kind === 'user'){
+    ctx.beginPath();                                   /* head */
+    ctx.arc(cx, cy - r * .34, r * .40, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();                                   /* shoulders */
+    ctx.arc(cx, cy + r * .92, r * .78, Math.PI * 1.12, Math.PI * 1.88);
+    ctx.lineTo(cx + r * .74, cy + r * .96);
+    ctx.lineTo(cx - r * .74, cy + r * .96);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    ctx.beginPath();                                   /* hexagon */
+    for (let i = 0; i < 6; i++){
+      const a = Math.PI / 6 + i * Math.PI / 3;
+      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 function tagSprite(text, source, color){
-  /* Provenance is an icon, not a colour, because colour now belongs to the
-     author: ✎ for something a person wrote, ◆ for something an agent filed. */
-  const icon = source === 'user' ? '\u270E' : '\u25C6';
-  const label = icon + '  ' + text;
   const c = document.createElement('canvas'), ctx = c.getContext('2d');
   const font = '600 34px ui-sans-serif, -apple-system, "Helvetica Neue", Arial, sans-serif';
   ctx.font = font;
-  const text0 = text; text = label;
-  const w = Math.ceil(ctx.measureText(text).width) + 26;
+  const ICON = 34;                                     /* space reserved for the mark */
+  const w = Math.ceil(ctx.measureText(text).width) + 26 + ICON;
   c.width = w; c.height = 52;
   const ctx2 = c.getContext('2d');
   const hot = (T.tag && T.tag[color]) || T.tag.neutral;
@@ -294,8 +320,9 @@ function tagSprite(text, source, color){
   ctx2.lineTo(r,51); ctx2.quadraticCurveTo(1,51,1,51-r);
   ctx2.lineTo(1,r); ctx2.quadraticCurveTo(1,1,r,1); ctx2.closePath();
   ctx2.fill(); ctx2.stroke();
+  drawTagIcon(ctx2, source, 13 + ICON/2 - 4, 26, 11, hot);
   ctx2.font = font; ctx2.textBaseline = 'middle'; ctx2.fillStyle = hot;
-  ctx2.fillText(text, 13, 27);
+  ctx2.fillText(text, 13 + ICON, 27);
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({
     map: new THREE.CanvasTexture(c), transparent:true, depthTest:false }));
   sp.renderOrder = 12;

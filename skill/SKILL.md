@@ -102,9 +102,9 @@ they can select, so do not leave a filter on a view you have handed back.
 
 ## Tags
 
-A tag is a short label pinned above a node. Provenance shows as an icon — ◆ for
-an agent, ✎ for a person — so always file yours as `agent`; `user` is what the
-human types into the page.
+A tag is a short label pinned above a node. Provenance shows as a drawn mark —
+a hexagon for an agent, a bust for a person — so always file yours as `agent`;
+`user` is what the human types into the page.
 
 Colour is yours to choose, and carries meaning rather than provenance. Pass
 `color` as one of `neutral`, `red`, `amber`, `green`, `cyan`, `blue`, `violet`;

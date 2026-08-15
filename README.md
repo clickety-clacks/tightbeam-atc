@@ -33,9 +33,9 @@ what is selected, focus a node, and pin short tags onto agents and work items.
   **A strobing line is a message**: substrate messages rise from below, operator
   messages descend from above.
 - **A red ring around an item** means orphaned: no live holder.
-- **Tags** are short labels pinned above a node. An icon carries provenance —
-  ◆ filed by an agent, ✎ typed by a person — and the colour is the author's
-  choice from seven named values that resolve per theme.
+- **Tags** are short labels pinned above a node. A drawn mark carries
+  provenance — a hexagon for an agent, a bust for a person — and the colour is
+  the author's choice from seven named values that resolve per theme.
 
 ## Keyboard
 
