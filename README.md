@@ -35,8 +35,10 @@ draw labelled arrows between them.
   messages descend from above.
 - **A red ring around an item** means orphaned: no live holder.
 - **Tags** are short labels pinned above a node. A drawn mark carries
-  provenance — a hexagon for an agent, a bust for a person — and the colour is
-  the author's choice from seven named values that resolve per theme.
+  provenance — a hexagon for an agent, a bust for a person — and a named
+  `author` renders as a caption beneath the text, so a board carrying several
+  agents' notes says which one wrote each. Colour is the author's choice from
+  seven named values that resolve per theme.
 - **Arrows** are annotations of a *relation* rather than a node: a thick curve
   between two nodes, drawn heavier than any substrate line because it is
   someone pointing rather than the org's own traffic. A short label rides the
@@ -55,7 +57,7 @@ draw labelled arrows between them.
 | `D` | clear selection |
 | `F` / space | fly to the selection; press again to return exactly where you were |
 | `L` | legend |
-| `C` | clear all tags and arrows |
+| `C` | clear every tag and arrow, whoever wrote them |
 
 There is deliberately no Escape binding: browsers claim that key in fullscreen,
 so it never reaches the page. The search field has an × to clear it, a
@@ -148,6 +150,13 @@ Anything that can reach the service can drive the view. There is no
 authentication: it controls a display and nothing else. Bind to localhost unless
 you mean otherwise.
 
+Because several agents may annotate one board, `author` is carried on tags and
+arrows and the unqualified clear-all verbs are refused: a caller must say whose
+notes it is removing, or ask for `?all=true` deliberately. The field is a
+signature rather than a credential — nothing verifies it — and it exists so the
+view can show provenance and so one caller's cleanup does not take another's
+work with it.
+
 | verb | path | body |
 |---|---|---|
 | `GET` | `/api/state` | selection, tags, generation, sequence |
@@ -156,13 +165,15 @@ you mean otherwise.
 | `POST` | `/api/focus` | `{id, mode:"single"\|"neighborhood"\|"clear"}` |
 | `POST` | `/api/fit` | `{on:bool}` |
 | `POST` | `/api/filter` | `{ids:[id]}` or `{clear:true}` — ghost everything else |
-| `GET` | `/api/tags` | `[{tagId, target, text, source, color, at}]` |
-| `POST` | `/api/tags` | `{tags:[{target, text, source:"agent"\|"user", color}]}` |
-| `DELETE` | `/api/tags` | clear all |
+| `GET` | `/api/tags` | `[{tagId, target, text, source, color, author, at}]` |
+| `POST` | `/api/tags` | `{tags:[{target, text, source:"agent"\|"user", color, author}]}` |
+| `DELETE` | `/api/tags?author=<who>` | clear that author's |
+| `DELETE` | `/api/tags?all=true` | clear every author's |
 | `DELETE` | `/api/tags/<tagId>` | clear one |
-| `GET` | `/api/arrows` | `[{arrowId, from, to, text, source, color, at}]` |
-| `POST` | `/api/arrows` | `{arrows:[{from, to, text, source, color}]}` |
-| `DELETE` | `/api/arrows` | clear all |
+| `GET` | `/api/arrows` | `[{arrowId, from, to, text, source, color, author, at}]` |
+| `POST` | `/api/arrows` | `{arrows:[{from, to, text, source, color, author}]}` |
+| `DELETE` | `/api/arrows?author=<who>` | clear that author's |
+| `DELETE` | `/api/arrows?all=true` | clear every author's |
 | `DELETE` | `/api/arrows/<arrowId>` | clear one |
 
 Ids are the feed's own: work items `wi_...`, agents their session suffix

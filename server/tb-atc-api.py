@@ -15,14 +15,22 @@ what it currently has selected. External callers use the verbs below.
     POST   /api/focus                    {id, mode:"single"|"neighborhood"|"clear"}
     POST   /api/fit                      {on:bool}
     POST   /api/filter                   {ids:[id]} | {clear:true}
-    POST   /api/arrows                   {arrows:[{from, to, text, color, source}]}
-    GET    /api/arrows                   [{arrowId, from, to, text, color, source, at}]
-    DELETE /api/arrows                   clear all
+    POST   /api/arrows                   {arrows:[{from, to, text, color, source, author}]}
+    GET    /api/arrows                   [{arrowId, from, to, text, color, source, author, at}]
+    DELETE /api/arrows?author=<who>      clear that author's
+    DELETE /api/arrows?all=true          clear every author's
     DELETE /api/arrows/<arrowId>         clear one
-    GET    /api/tags                     [{tagId, target, text, source, at}]
+    GET    /api/tags                     [{tagId, target, text, source, author, at}]
     POST   /api/tags                     {tags:[{target, text, source, color}]}
-    DELETE /api/tags                     clear all
+    DELETE /api/tags?author=<who>        clear that author's
+    DELETE /api/tags?all=true            clear every author's
     DELETE /api/tags/<tagId>             clear one
+
+`author` is who is speaking — a name a reader would recognise, e.g.
+"watchdog:018". It is not a credential and nothing verifies it; it exists so a
+board carrying several agents' notes can show who wrote what, and so an agent
+tidying up can remove its own without taking everyone else's. A bare
+`DELETE /api/tags` is refused for exactly that reason: say whose.
     GET    /api/pull?since=<seq>         page only: commands + tags
 
 Node ids are the ones the feed publishes: work items as `wi_...`, agents as
@@ -62,6 +70,7 @@ TAG_COLORS = ("neutral", "red", "amber", "green", "cyan", "blue", "violet")
 # a smaller ceiling than tags: a hundred of them is already an unreadable view.
 MAX_ARROWS = 100
 MAX_ARROW_TEXT = 120
+MAX_AUTHOR = 48
 MAX_ID = 128
 MAX_IDS_PER_CALL = 500
 CMD_HISTORY = 200
@@ -324,6 +333,7 @@ class Handler(BaseHTTPRequestHandler):
                         "text": text[:MAX_TAG_TEXT],
                         "source": "user" if t.get("source") == "user" else "agent",
                         "color": colour if colour in TAG_COLORS else "neutral",
+                        "author": clip(t.get("author"), MAX_AUTHOR) or None,
                         "at": int(time.time() * 1000),
                     }
                     state["tags"][tag["tagId"]] = tag
@@ -353,6 +363,7 @@ class Handler(BaseHTTPRequestHandler):
                         "text": ((a.get("text") or "").strip())[:MAX_ARROW_TEXT],
                         "source": "user" if a.get("source") == "user" else "agent",
                         "color": colour if colour in TAG_COLORS else "neutral",
+                        "author": clip(a.get("author"), MAX_AUTHOR) or None,
                         "at": int(time.time() * 1000),
                     }
                     state["arrows"][arrow["arrowId"]] = arrow
@@ -369,16 +380,38 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"error": "not found"}, 404)
         self._send(out[0], out[1])
 
+    def _sweep(self, coll, rev, q):
+        """Remove a whole collection, or one author's share of it.
+
+        Several agents annotate the same board, so an unqualified clear is an
+        accident waiting to happen: one agent tidying up after itself takes
+        everyone else's notes with it. Saying whose is the whole point, and
+        `all=true` is there for a human resetting the board deliberately."""
+        author = (q.get("author") or [None])[0]
+        wants_all = (q.get("all") or [""])[0].lower() in ("1", "true", "yes")
+        if not author and not wants_all:
+            return ({"error": "say whose: pass ?author=<who>, or ?all=true to "
+                              "clear every author's"}, 400)
+        if wants_all:
+            gone = len(state[coll]); state[coll].clear()
+        else:
+            doomed = [k for k, v in state[coll].items() if (v.get("author") or None) == author]
+            for k in doomed:
+                del state[coll][k]
+            gone = len(doomed)
+        if gone:
+            state[rev] += 1; save_tags()
+        return ({"deleted": gone, "author": None if wants_all else author}, 200)
+
     def do_DELETE(self):
         u = urlparse(self.path)
+        q = parse_qs(u.query)
         out = None
         with lock:
             if u.path == "/api/tags":
-                state["tags"].clear(); state["tagsRev"] += 1; save_tags()
-                out = ({"ok": True}, 200)
+                out = self._sweep("tags", "tagsRev", q)
             elif u.path == "/api/arrows":
-                state["arrows"].clear(); state["arrowsRev"] += 1; save_tags()
-                out = ({"ok": True}, 200)
+                out = self._sweep("arrows", "arrowsRev", q)
             elif u.path.startswith("/api/tags/"):
                 tid = u.path.rsplit("/", 1)[-1]
                 gone = state["tags"].pop(tid, None)

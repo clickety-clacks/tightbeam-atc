@@ -367,16 +367,25 @@ function wrapTag(ctx, text, first, rest){
   return out;
 }
 
-function tagSprite(text, source, color){
+const TAG_AUTHOR_PX = 32;            /* caption line: who is speaking */
+
+function tagSprite(text, source, color, author){
   const c = document.createElement('canvas'), ctx = c.getContext('2d');
   const font = '600 34px ui-sans-serif, -apple-system, "Helvetica Neue", Arial, sans-serif';
   ctx.font = font;
   const ICON = 34;                                     /* space reserved for the mark */
   /* the mark sits on the first line, so that line has less room than the rest */
   const lines = wrapTag(ctx, text, TAG_WRAP_PX - ICON, TAG_WRAP_PX);
-  const textW = Math.max(...lines.map((l, i) => ctx.measureText(l).width + (i ? 0 : ICON)));
+  /* The mark says whether a person or an agent wrote this. With several agents
+     annotating one board that is no longer enough — which agent matters — so a
+     named author gets a caption under the text. Agents had started writing it
+     into the text themselves, "[watchdog:018] ...", which is the same need. */
+  const authorFont = '600 25px ui-sans-serif, -apple-system, "Helvetica Neue", Arial, sans-serif';
+  let authorW = 0;
+  if (author){ ctx.font = authorFont; authorW = ctx.measureText(author).width; ctx.font = font; }
+  const textW = Math.max(...lines.map((l, i) => ctx.measureText(l).width + (i ? 0 : ICON)), authorW);
   const w = Math.ceil(textW) + 26;
-  const h = lines.length * TAG_LINE_PX + 14;
+  const h = lines.length * TAG_LINE_PX + (author ? TAG_AUTHOR_PX : 0) + 14;
   c.width = w; c.height = h;
   const g = c.getContext('2d');
   const hot = (T.tag && T.tag[color]) || T.tag.neutral;
@@ -399,6 +408,16 @@ function tagSprite(text, source, color){
   lines.forEach((l, i) => g.strokeText(l, 13 + (i ? 0 : ICON), firstY + i * TAG_LINE_PX));
   g.fillStyle = hot;
   lines.forEach((l, i) => g.fillText(l, 13 + (i ? 0 : ICON), firstY + i * TAG_LINE_PX));
+  if (author){
+    g.font = authorFont;
+    /* the card is 7px padding, then the text lines, then this caption, then
+       7px again — measuring it from firstY instead put it half a line low and
+       the descenders fell off the bottom edge */
+    const ay = 7 + lines.length * TAG_LINE_PX + TAG_AUTHOR_PX / 2;
+    g.lineWidth = 5; g.strokeStyle = T.tagHalo || T.tagBg;
+    g.strokeText(author, 13, ay);
+    g.globalAlpha = .7; g.fillText(author, 13, ay); g.globalAlpha = 1;
+  }
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({
     map: new THREE.CanvasTexture(c), transparent:true, depthTest:false }));
   sp.renderOrder = 12;
@@ -1188,8 +1207,10 @@ async function apiClearTags(){
   /* never clear locally on failure: the page would show an empty board while
      the server still holds the tags, and the revision would not correct it */
   try {
-    await apiFetch('/tags', {method:'DELETE'});
-    await apiFetch('/arrows', {method:'DELETE'});   /* one key resets the whole annotation layer */
+    /* the board carries several authors' notes, so the server refuses an
+       unqualified sweep; this key IS the deliberate one, so it says so */
+    await apiFetch('/tags?all=true', {method:'DELETE'});
+    await apiFetch('/arrows?all=true', {method:'DELETE'});
     apiTagsRev = -1; arrowsRev = -1; await apiPull();
   } catch(e){ apiUp = false; }
 }
@@ -1510,7 +1531,7 @@ function buildTags(){
     const list = byKey[selKey(m)]; if (!list) return;
     let y = 1.5;
     list.slice(0, 4).forEach(t => {
-      const sp = tagSprite(t.text, t.source, t.color || 'neutral');
+      const sp = tagSprite(t.text, t.source, t.color || 'neutral', t.author);
       /* stack by actual height: a wrapped tag is two or three lines tall, and a
          fixed step drew the next one straight through it */
       y += sp.scale.y / 2;
@@ -1648,7 +1669,7 @@ function buildArrows(){
         });
         g.userData.textLen = need;
       } else {
-        const sp = tagSprite(ar.text, ar.source, ar.color || 'neutral');
+        const sp = tagSprite(ar.text, ar.source, ar.color || 'neutral', ar.author);
         sp.renderOrder = 13;
         g.add(sp); g.userData.sprites.push(sp); g.userData.mats.push(sp.material);
         g.userData.hint = sp;

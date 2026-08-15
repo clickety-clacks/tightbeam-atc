@@ -139,14 +139,29 @@ differently.
 ```bash
 curl -s -X POST localhost:8787/api/tags -H 'content-type: application/json' -d '{
   "tags":[
-    {"target":"wi_5870f52e","text":"review stale since Aug 11","source":"agent","color":"amber"},
-    {"target":"wi_62ef32ae","text":"off-branch","source":"agent","color":"amber"}
+    {"target":"wi_5870f52e","text":"review stale since Aug 11","source":"agent",
+     "color":"amber","author":"watchdog:018"},
+    {"target":"wi_62ef32ae","text":"off-branch","source":"agent",
+     "color":"amber","author":"watchdog:018"}
   ]}'
 
-curl -s localhost:8787/api/tags                       # read them all
-curl -s -X DELETE localhost:8787/api/tags/t3          # remove one
-curl -s -X DELETE localhost:8787/api/tags             # remove all
+curl -s localhost:8787/api/tags                              # read them all
+curl -s -X DELETE localhost:8787/api/tags/t3                 # remove one
+curl -s -X DELETE 'localhost:8787/api/tags?author=watchdog:018'   # remove yours
 ```
+
+## Say who you are
+
+**Always pass `author`.** It is a name a reader would recognise — `watchdog:018`,
+`tester:018-shrdlu`, the role you are filling — and the card renders it as a
+caption under the text, so a board carrying several agents' notes says who
+wrote what. Nothing verifies it; it is a signature, not a credential.
+
+It is also how you clean up without harming anyone else. Several agents
+annotate the same board at once, so **a bare `DELETE /api/tags` is refused** —
+pass `?author=<you>` to take back your own. `?all=true` clears every author's
+and is meant for a human resetting the board, not for an agent tidying up.
+Tags and arrows behave identically here.
 
 Text is capped at 80 characters and at most four tags render per node. Tags
 persist across a service restart, so treat them as something you are leaving on
@@ -162,13 +177,13 @@ draws, because an arrow is you pointing rather than the org's own traffic.
 ```bash
 curl -s -X POST localhost:8787/api/arrows -H 'content-type: application/json' -d '{
   "arrows":[
-    {"from":"wi_5870f52e-…","to":"wi_62ef32ae-…","text":"blocks","color":"red","source":"agent"},
+    {"from":"wi_5870f52e-…","to":"wi_62ef32ae-…","text":"blocks","color":"red","source":"agent","author":"watchdog:018"},
     {"from":"s_fde9b2be","to":"wi_5870f52e-…","text":"owns this card","color":"cyan","source":"agent"}
   ]}'
 
-curl -s localhost:8787/api/arrows                       # read them all
-curl -s -X DELETE localhost:8787/api/arrows/r3          # remove one
-curl -s -X DELETE localhost:8787/api/arrows             # remove all
+curl -s localhost:8787/api/arrows                              # read them all
+curl -s -X DELETE localhost:8787/api/arrows/r3                 # remove one
+curl -s -X DELETE 'localhost:8787/api/arrows?author=watchdog:018'   # remove yours
 ```
 
 `from` and `to` are node ids, same as everywhere else, and direction is
