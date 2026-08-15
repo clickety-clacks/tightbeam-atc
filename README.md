@@ -149,7 +149,7 @@ you mean otherwise.
 | `POST` | `/api/focus` | `{id, mode:"single"\|"neighborhood"\|"clear"}` |
 | `POST` | `/api/fit` | `{on:bool}` |
 | `POST` | `/api/filter` | `{ids:[id]}` or `{clear:true}` — ghost everything else |
-| `GET` | `/api/tags` | `[{tagId, target, text, source, at}]` |
+| `GET` | `/api/tags` | `[{tagId, target, text, source, color, at}]` |
 | `POST` | `/api/tags` | `{tags:[{target, text, source:"agent"\|"user", color}]}` |
 | `DELETE` | `/api/tags` | clear all |
 | `DELETE` | `/api/tags/<tagId>` | clear one |
