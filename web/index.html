@@ -1053,6 +1053,17 @@ function selKeyFor(id){
   return s.startsWith('wi_') ? 'i:' + fullId(s) : 'a:' + s;
 }
 
+/* A feed whose ids change shape would strand every key the view holds — the
+   selection would empty and a focus would quietly stop highlighting anything,
+   with no sign that it had. Re-resolve them whenever a snapshot lands. */
+function migrateViewKeys(){
+  const remap = k => k.startsWith('i:') ? 'i:' + fullId(k.slice(2)) : k;
+  const sel = [...view.selection].map(remap);
+  view.selection.clear(); sel.forEach(k => view.selection.add(k));
+  if (view.focus.key) view.focus.key = remap(view.focus.key);
+  if (view.filter.ids) view.filter.ids = new Set([...view.filter.ids].map(fullId));
+}
+
 /* ---------- live feed ---------- */
 async function refresh(){
   try {
@@ -1061,6 +1072,7 @@ async function refresh(){
     const d = await r.json();
     if (d.generatedAt === lastGen) return;
     lastGen = d.generatedAt; DATA = d;
+    migrateViewKeys();
     const h = d.agents.map(a=>a.id+(a.retired?1:0)+(a.turn||'')).join('|');
     if (h !== agentsHash){ agentsHash = h; buildGround(d.agents); }
     buildItems(d.items);
