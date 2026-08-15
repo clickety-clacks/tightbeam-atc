@@ -750,11 +750,27 @@ function showTagBox(){
   const label = m?.userData.w ? m.userData.w.id : (m?.userData.a ? m.userData.a.name : '');
   tagBox.querySelector('.who').textContent = label ? '· ' + String(label).slice(0, 26) : '';
   tagBox.style.display = 'block';
-  tagBox.style.left = '18px';
-  tagBox.style.top = 'calc(50% - 40px)';
   tagInput.value = '';
+  positionTagBox();
 }
 function hideTagBox(){ tagBox.style.display = 'none'; tagInput.blur(); }
+/* The composer sits just under the node it writes to, and tracks it — the node
+   keeps bobbing and the camera keeps turning, so a fixed corner would drift
+   away from its subject. */
+const _tv = new THREE.Vector3();
+function positionTagBox(){
+  if (tagBox.style.display !== 'block') return;
+  const m = focusMesh();
+  if (!m){ hideTagBox(); return; }
+  m.getWorldPosition(_tv).project(camera);
+  if (_tv.z > 1){ tagBox.style.visibility = 'hidden'; return; }   /* behind us */
+  tagBox.style.visibility = 'visible';
+  const x = (_tv.x * .5 + .5) * innerWidth, y = (-_tv.y * .5 + .5) * innerHeight;
+  const r = tagBox.getBoundingClientRect();
+  tagBox.style.left = Math.round(Math.min(Math.max(10, x - r.width / 2),
+                                          innerWidth - r.width - 10)) + 'px';
+  tagBox.style.top  = Math.round(Math.min(y + 26, innerHeight - r.height - 10)) + 'px';
+}
 tagInput.addEventListener('keydown', e => {
   e.stopPropagation();                       /* the canvas hotkeys are not for typing */
   if (e.key === 'Enter'){
@@ -1474,6 +1490,7 @@ function tickFrame(){
     p.position.copy(p.userData.curve.getPoint(p.userData.t));
     p.material.opacity = 1-p.userData.t;
   }
+  positionTagBox();
   controls.update();
   renderer.render(scene, camera);
 }
