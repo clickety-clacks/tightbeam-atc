@@ -18,10 +18,26 @@ Search establishes the working set; clicking inspects one of its results.
     click background   ->  back to the 12
     empty the box      ->  back to everything
 
-So the effective scope is `focus ∩ filter` when both are set. A background click
-clears the focus only: an explicit search needs an explicit release, and a
-stray click must not destroy a result set that was deliberately built. The
-search chrome always describes the search, never the focus within it.
+These are **layers on a stack**, not sets to intersect:
+
+    filter   a search, or an agent's id list        (outermost)
+    lens     f / space, showing the selection
+    focus    a clicked node, then its neighbourhood (innermost)
+
+**The innermost layer renders.** Enter a mode and that mode is what you see —
+focus a node and only that node is lit, open its neighbourhood and the whole
+neighbourhood is lit, including parts the search underneath would not have
+matched. The layers below are remembered, not combined, so leaving one puts
+back exactly what was true before it, camera included.
+
+The same stack decides what you can reach: while a focus is up, hover, click
+and the brush are limited to what it lights. A ghosted node is out of play —
+clicking one does nothing, and it does not block a lit node behind it.
+
+A background click pops the innermost layer. An explicit search needs an
+explicit release, so it is never popped by a click; only the × or emptying the
+box releases it. The search chrome always reports the search itself — focus one
+of twelve results and it still reads "12 shown".
 
 A consequence worth stating: a neighbourhood click frames the clicked node's
 neighbourhood, not the filtered set. Framing the filter there was a bug.
@@ -33,6 +49,12 @@ While the fit owns the view, the selection *is* what is shown.
     12 search results lit, 4 brushed
     press f   ->  camera on the 4, only those 4 lit, the rest ghosted
     press f   ->  camera exactly where it was, the 12 lit again
+
+Entering the lens clears any focus, since a focus outranks it and the mode just
+entered would render nothing of its own. Emptying the selection collapses the
+lens. Pressing `f` while a fit is up dismisses the fit *and* any focus opened
+inside it; a background click pops just the focus and puts the camera back on
+the fit.
 
 The second press restores both the camera and the lighting. This makes "fly to
 what I brushed" visually true even when the base view is filtered — previously

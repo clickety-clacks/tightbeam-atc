@@ -742,6 +742,8 @@ function frameCurrentScope(){
     const on = u.w ? hiItems?.has(u.w.id) : (u.a && hiAgents?.has(u.a.id));
     if (on) fitPoints(m, pts);
   });
+  /* with nothing restricting the view the parent IS the whole org */
+  if (!pts.length && !hiAgents) selectables().forEach(m => fitPoints(m, pts));
   if (!pts.length) return false;
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
@@ -850,7 +852,11 @@ function renderSearchChrome(){
   if (f.kind === 'agent') box.value = '';
   box.placeholder = f.kind === 'agent' ? 'agent-supplied selection'
                                        : 'filter — press / to search';
-  const n = (hiItems?.size || 0) + (hiAgents?.size || 0);
+  /* The count belongs to the search layer, not to whatever is stacked above
+     it: focusing one of twelve results must still read "12 shown", and a
+     zero-match search must still say so with a focus lit on top of it. */
+  const fs = filterScope();
+  const n = fs ? fs.items.size + fs.agents.size : 0;
   document.getElementById('searchcount').textContent =
     f.kind === 'none' ? '' : (n ? n + ' shown' : 'no match');
   document.getElementById('searchclear').style.display =
@@ -1476,7 +1482,7 @@ addEventListener('keydown', e=>{
   if (e.key==='c' || e.key==='C'){ apiClearTags(); }
   else if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
   else if (e.key==='s' || e.key==='S'){ setInputMode(view.input==='brush' ? 'navigate' : 'brush'); }
-  else if (e.key==='d' || e.key==='D'){ view.selection.clear(); applyView(); }
+  else if (e.key==='d' || e.key==='D'){ clearSelection(); }
   else if (e.key==='f' || e.key==='F' || e.key===' '){
     e.preventDefault(); fitSelection();
   }
@@ -1575,18 +1581,22 @@ function pickNode(ev){
      must follow what is visible, not what is nearest — otherwise clicking a
      tag selects whatever geometry happens to sit in front of it. */
   const sprites = [];
-  const collect = m => (m.userData.tagSprites || []).forEach(sp => sprites.push(sp));
+  const collect = m => (m.userData.tagSprites || []).forEach(sp => { if (sp.visible) sprites.push(sp); });
   itemMeshes.forEach(collect);
   Object.values(agentMeshes).forEach(collect);
   const tagHit = ray.intersectObjects(sprites, false)[0];
   if (tagHit){
     const owner = ownerOf(tagHit.object);
-    if (owner) return owner;
+    if (owner && inScope(owner)) return owner;
   }
+  /* A ghosted node is out of play: it must not be clickable, and it must not
+     block a lit node behind it either. Walking every hit and taking the first
+     one that is in scope does both — rejecting only the nearest ghost would
+     leave lit geometry behind it unreachable. */
   const hits = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], true);
   for (const h of hits){
     const owner = ownerOf(h.object);
-    if (owner) return owner;
+    if (owner && inScope(owner)) return owner;
   }
   return null;
 }
@@ -1929,6 +1939,8 @@ function applyView(){
 /* Whatever is ghosted is out of play. With no focus or filter the brush can
    reach anything; inside a focus or a filter it can only reach what that scope
    is showing, which is the same rule hover already follows. */
+/* One predicate for everything a human can reach: what the active layer lights.
+   Rendering, hover, click and brush all ask this, so they cannot disagree. */
 function inScope(m){
   if (!hiAgents) return true;
   const u = m.userData;
@@ -1957,6 +1969,18 @@ function paintAt(px, py){
   });
   document.getElementById('selcount').textContent = view.selection.size;
 }
+/* Emptying the selection collapses the lens that was showing it: a lens with
+   nothing in it renders nothing and would silently fall through to its parent
+   while still holding the camera bookmark. */
+function clearSelection(){
+  view.selection.clear();
+  if (view.lens === 'selection'){
+    if (camMark) return restoreCamera();
+    view.lens = 'none';
+  }
+  applyView();
+}
+
 /* the ONLY place input mode changes; focus and selection are untouched */
 function setInputMode(mode){
   view.input = mode;
@@ -2106,7 +2130,14 @@ function fitSelection(){
   const e = approachDir(c);
   /* raise the lens BEFORE framing so the fit is solved against what will
      actually be lit, then re-derive so the rest of the org ghosts */
-  if (view.fitTarget === 'selection'){ view.lens = 'selection'; applyView(); }
+  if (view.fitTarget === 'selection'){
+    /* focus outranks the lens, so a focus left standing would keep rendering
+       and the lens we just entered would show nothing of its own */
+    if (view.focus.stage >= 1){ view.focus.key = null; view.focus.stage = 0;
+                                if (typeof hideTagBox === 'function') hideTagBox();
+                                if (typeof detailEl !== 'undefined') detailEl.style.display = 'none'; }
+    view.lens = 'selection'; applyView();
+  }
   const {camPos, target} = frameTo(pts, c, e);
   /* hand the ambient orbit a new centre so it carousels around the selection
      once the flight lands, instead of resuming around the org's root */
@@ -2184,8 +2215,13 @@ function tickFrame(){
     if (u.arc){ m.material.opacity = (!dimming || (hiAgents.has(u.from) && hiAgents.has(u.to))) ? .9 : .12; return; }
     if (u.a){
       const f = fa(u.a.id);
-      if (!u.selected){ shade(m.material, u.baseFill, f);
-        if (u.lineMat){ u.lineMat.color.copy(u.baseStroke); u.lineMat.opacity = .6 * f; } }
+      /* Selection is an overlay, not an exemption: a brushed node still ghosts
+         when the active layer says it is out of scope. Skipping shade() here
+         left every selected node bright underneath a focus, so "everything
+         else ghosted" was false exactly where it mattered. */
+      shade(m.material, u.selected ? null : u.baseFill, f);
+      if (u.lineMat && !u.selected){ u.lineMat.color.copy(u.baseStroke); }
+      if (u.lineMat) u.lineMat.opacity = .6 * f;
       u.dim = f;
       m.children.forEach(ch => {
         if (!ch.isSprite) return;
@@ -2202,8 +2238,13 @@ function tickFrame(){
     const u=m.userData;
     if (u.w){
       const f = fi(u.w.id);
-      if (!u.selected){ shade(m.material, u.baseFill, f);
-        if (u.lineMat){ u.lineMat.color.copy(u.baseStroke); u.lineMat.opacity = .6 * f; } }
+      /* Selection is an overlay, not an exemption: a brushed node still ghosts
+         when the active layer says it is out of scope. Skipping shade() here
+         left every selected node bright underneath a focus, so "everything
+         else ghosted" was false exactly where it mattered. */
+      shade(m.material, u.selected ? null : u.baseFill, f);
+      if (u.lineMat && !u.selected){ u.lineMat.color.copy(u.baseStroke); }
+      if (u.lineMat) u.lineMat.opacity = .6 * f;
       u.dim = f;
     }
     /* A FOCUSED item holds still: the tag and composer anchored to it would
