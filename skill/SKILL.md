@@ -102,15 +102,22 @@ they can select, so do not leave a filter on a view you have handed back.
 
 ## Tags
 
-A tag is a short label pinned above a node. Provenance is rendered: **agent**
-tags draw blue, **user** tags draw amber (red on the light theme). Always file
-yours as `agent` — `user` is what the human types into the page.
+A tag is a short label pinned above a node. Provenance shows as an icon — ◆ for
+an agent, ✎ for a person — so always file yours as `agent`; `user` is what the
+human types into the page.
+
+Colour is yours to choose, and carries meaning rather than provenance. Pass
+`color` as one of `neutral`, `red`, `amber`, `green`, `cyan`, `blue`, `violet`;
+anything else falls back to neutral. Each name resolves to a value suited to the
+current theme, so the tag stays legible in both. Use it to group a batch — one
+colour per question you are answering — rather than decorating each tag
+differently.
 
 ```bash
 curl -s -X POST localhost:8787/api/tags -H 'content-type: application/json' -d '{
   "tags":[
-    {"target":"wi_5870f52e","text":"review stale since Aug 11","source":"agent"},
-    {"target":"wi_62ef32ae","text":"off-branch","source":"agent"}
+    {"target":"wi_5870f52e","text":"review stale since Aug 11","source":"agent","color":"amber"},
+    {"target":"wi_62ef32ae","text":"off-branch","source":"agent","color":"amber"}
   ]}'
 
 curl -s localhost:8787/api/tags                       # read them all

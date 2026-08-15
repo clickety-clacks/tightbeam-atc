@@ -73,6 +73,11 @@
     padding:5px 7px; font-size:12px; font-family:inherit; letter-spacing:0;
     text-transform:none; }
   #tagbox .who { color:#b08d57; }
+  #tagswatches { display:flex; gap:5px; margin-top:7px; }
+  #tagswatches button { width:15px; height:15px; border-radius:50%; padding:0;
+    border:1.5px solid transparent; cursor:pointer; }
+  #tagswatches button.on { border-color:#d8d6d1; }
+  body.light #tagswatches button.on { border-color:#26323c; }
   body.light #tagbox { background:#faf7eef2; border-color:#b8c7d9; border-left-color:#c23b22; color:#5c6b78; }
   body.light #tagbox input { background:#fff; border-color:#b8c7d9; color:#26323c; }
   body.light #tagbox .who { color:#c23b22; }
@@ -131,7 +136,7 @@
 <div id="legend"></div>
 <div id="tip"></div>
 <div id="tagbox">tag <span class="who"></span><input id="taginput" type="text"
-  placeholder="type a note, enter to attach" maxlength="80"></div>
+  placeholder="type a note, enter to attach" maxlength="80"><div id="tagswatches"></div></div>
 <div id="selcursor"></div>
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
@@ -154,6 +159,9 @@ const THEMES = {
     stage:[0xc4453c,0xc97b35,0xc9a835,0xa3b23c,0x6fae4e,0x3f9d63,0x2c7a4b],
     kind:{main:0xb08d57,po:0xa58968,patrol:0xc9a835,orch:0x8a8f96,coder:0x7f8890,rev:0x6b7684,spec:0x91836b},
     liveHot:0x3d8fd6, liveCold:0x4e545c,
+    tag:{neutral:'#9aa0a8', red:'#e0685c', amber:'#d9a441', green:'#6fae4e',
+         cyan:'#4bb8b8', blue:'#5aa9e6', violet:'#a98bd8'},
+    tagBg:'rgba(16,18,20,.92)',
     retired:0x33363a, arcA:0xb08d57, arcB:0x22252a,
     tetherRun:0x6fae4e, tetherWait:0xc9a835, tetherSched:0xb9bfc7, pulse:0xb08d57, pulseSub:0x5f6670, pulseUser:0x6f9ecf,
     discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63, shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
@@ -167,6 +175,9 @@ const THEMES = {
     stage:[0xc23b22,0xd07a2a,0xc9a227,0x8a9a2e,0x4e8a4e,0x2e7d5b,0x1f5e46],
     kind:{main:0xc23b22,po:0xb06a3b,patrol:0xc9a227,orch:0x5c6b78,coder:0x6e7b87,rev:0x52616e,spec:0x7a6a4f},
     liveHot:0x2f6fb5, liveCold:0xaab3bc,
+    tag:{neutral:'#5c6b78', red:'#c23b22', amber:'#b8860b', green:'#2e7d4f',
+         cyan:'#1f7a7a', blue:'#2f6fb5', violet:'#6f4fa8'},
+    tagBg:'rgba(250,247,238,.95)',
     retired:0xcdc7b8, arcA:0x26323c, arcB:0xd8dfe6,
     tetherRun:0x2e7d4f, tetherWait:0xb8860b, tetherSched:0x1b232b, pulse:0xc23b22, pulseSub:0x8a97a3, pulseUser:0x3d6ea8,
     discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3, shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
@@ -261,16 +272,20 @@ function labelSprite(text){
   return sp;
 }
 /* a tag: short text pinned above a node, coloured by who wrote it */
-function tagSprite(text, source){
+function tagSprite(text, source, color){
+  /* Provenance is an icon, not a colour, because colour now belongs to the
+     author: ✎ for something a person wrote, ◆ for something an agent filed. */
+  const icon = source === 'user' ? '\u270E' : '\u25C6';
+  const label = icon + '  ' + text;
   const c = document.createElement('canvas'), ctx = c.getContext('2d');
   const font = '600 34px ui-sans-serif, -apple-system, "Helvetica Neue", Arial, sans-serif';
   ctx.font = font;
+  const text0 = text; text = label;
   const w = Math.ceil(ctx.measureText(text).width) + 26;
   c.width = w; c.height = 52;
   const ctx2 = c.getContext('2d');
-  const hot = source === 'user' ? (T.name==='light' ? '#c23b22' : '#d9a441')
-                                : (T.name==='light' ? '#2f6fb5' : '#5aa9e6');
-  ctx2.fillStyle = T.name==='light' ? 'rgba(250,247,238,.94)' : 'rgba(16,18,20,.9)';
+  const hot = (T.tag && T.tag[color]) || T.tag.neutral;
+  ctx2.fillStyle = T.tagBg;
   ctx2.strokeStyle = hot; ctx2.lineWidth = 2;
   const r = 9;
   ctx2.beginPath();
@@ -318,6 +333,7 @@ function applyTheme(){
   grid.material.transparent = true; grid.material.opacity = .35;
   grid.position.y = 0; scene.add(grid);
   renderLegend();
+  if (typeof renderSwatches === 'function' && tagBox.style.display === 'block') renderSwatches();
   if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); buildLinks(DATA.links);
              applyView(); }
 }
@@ -744,6 +760,22 @@ function autoCollapseLegend(){
    'user' provenance so it renders differently from anything an agent wrote. */
 const tagBox = document.getElementById('tagbox');
 const tagInput = document.getElementById('taginput');
+const swatchEl = document.getElementById('tagswatches');
+let tagColor = 'neutral';
+function renderSwatches(){
+  swatchEl.innerHTML = '';
+  Object.entries(T.tag).forEach(([name, hex]) => {
+    const b = document.createElement('button');
+    b.style.background = hex;
+    b.title = name;
+    b.className = name === tagColor ? 'on' : '';
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      tagColor = name; renderSwatches(); tagInput.focus();
+    });
+    swatchEl.appendChild(b);
+  });
+}
 function showTagBox(){
   if (view.focus.stage !== 1 || !view.focus.key){ hideTagBox(); return; }
   const m = focusMesh();
@@ -751,6 +783,7 @@ function showTagBox(){
   tagBox.querySelector('.who').textContent = label ? '· ' + String(label).slice(0, 26) : '';
   tagBox.style.display = 'block';
   tagInput.value = '';
+  renderSwatches();
   positionTagBox();
 }
 function hideTagBox(){ tagBox.style.display = 'none'; tagInput.blur(); }
@@ -777,7 +810,7 @@ tagInput.addEventListener('keydown', e => {
     const text = tagInput.value.trim();
     const target = view.focus.key ? view.focus.key.slice(2) : null;
     if (text && target){
-      apiPostTags([{target, text, source:'user'}]);
+      apiPostTags([{target, text, source:'user', color: tagColor}]);
       tagInput.value = '';
     }
   }
@@ -1180,7 +1213,7 @@ function buildTags(){
   selectables().forEach(m => {
     const list = byKey[selKey(m)]; if (!list) return;
     list.slice(0, 4).forEach((t, i) => {
-      const sp = tagSprite(t.text, t.source);
+      const sp = tagSprite(t.text, t.source, t.color || 'neutral');
       sp.position.set(0, 1.5 + i * 1.25, 0);
       m.add(sp); m.userData.tagSprites.push(sp);
     });
@@ -1393,14 +1426,26 @@ function tickFrame(){
   const dimming = !!hiAgents;
   const fa = id => (!dimming || hiAgents.has(id)) ? 1 : DIM;
   const fi = id => (!dimming || hiItems.has(id)) ? 1 : DIM;
-  const bg = new THREE.Color(T.bg);
-  const shade = (mat, base, f) => { if (base) mat.color.copy(base).lerp(bg, 1 - f); };
+  /* Ghosting is real translucency, not a colour lerp toward the background.
+     The lerp only worked on paper: in the dark theme the background is nearly
+     black and most node colours are already dark, so fading toward it changed
+     almost nothing. Alpha behaves identically in both themes.
+     Ghosted meshes stop writing depth so the lit ones read through them; the
+     hidden-line look is preserved for everything at full strength. */
+  const shade = (mat, base, f) => {
+    if (base) mat.color.copy(base);
+    const ghost = f < .999;
+    if (mat.transparent !== ghost){ mat.transparent = ghost; mat.needsUpdate = true; }
+    mat.opacity = f;
+    mat.depthWrite = !ghost;
+  };
   groundGroup.children.forEach(m=>{
     const u=m.userData;
     if (u.arc){ m.material.opacity = (!dimming || (hiAgents.has(u.from) && hiAgents.has(u.to))) ? .9 : .12; return; }
     if (u.a){
       const f = fa(u.a.id);
-      if (!u.selected){ shade(m.material, u.baseFill, f); if (u.lineMat) shade(u.lineMat, u.baseStroke, f); }
+      if (!u.selected){ shade(m.material, u.baseFill, f);
+        if (u.lineMat){ u.lineMat.color.copy(u.baseStroke); u.lineMat.opacity = .6 * f; } }
       u.dim = f;
       m.children.forEach(ch => {
         if (!ch.isSprite) return;
@@ -1417,7 +1462,8 @@ function tickFrame(){
     const u=m.userData;
     if (u.w){
       const f = fi(u.w.id);
-      if (!u.selected){ shade(m.material, u.baseFill, f); if (u.lineMat) shade(u.lineMat, u.baseStroke, f); }
+      if (!u.selected){ shade(m.material, u.baseFill, f);
+        if (u.lineMat){ u.lineMat.color.copy(u.baseStroke); u.lineMat.opacity = .6 * f; } }
       u.dim = f;
     }
     if (u.baseY){ m.position.y = u.baseY + Math.sin(t*1.2+u.phase)*.5; m.rotation.y += .004; }

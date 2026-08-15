@@ -16,7 +16,7 @@ what it currently has selected. External callers use the verbs below.
     POST   /api/fit                      {on:bool}
     POST   /api/filter                   {ids:[id]} | {clear:true}
     GET    /api/tags                     [{tagId, target, text, source, at}]
-    POST   /api/tags                     {tags:[{target, text, source}]}
+    POST   /api/tags                     {tags:[{target, text, source, color}]}
     DELETE /api/tags                     clear all
     DELETE /api/tags/<tagId>             clear one
     GET    /api/pull?since=<seq>         page only: commands + tags
@@ -51,6 +51,9 @@ STATE_FILE = Path(os.environ.get("TB_ATC_STATE", WEB.parent / "tags.json"))
 MAX_BODY = 256 * 1024
 MAX_TAGS = 500
 MAX_TAG_TEXT = 80
+# Colours are named, not hex: the page resolves each name to a value that suits
+# the current theme, so a tag stays legible in both.
+TAG_COLORS = ("neutral", "red", "amber", "green", "cyan", "blue", "violet")
 MAX_ID = 128
 MAX_IDS_PER_CALL = 500
 CMD_HISTORY = 200
@@ -275,11 +278,13 @@ class Handler(BaseHTTPRequestHandler):
                     if not target or not text:
                         continue
                     state["tagSeq"] += 1
+                    colour = t.get("color")
                     tag = {
                         "tagId": f"t{state['tagSeq']}",
                         "target": str(target),
                         "text": text[:MAX_TAG_TEXT],
                         "source": "user" if t.get("source") == "user" else "agent",
+                        "color": colour if colour in TAG_COLORS else "neutral",
                         "at": int(time.time() * 1000),
                     }
                     state["tags"][tag["tagId"]] = tag

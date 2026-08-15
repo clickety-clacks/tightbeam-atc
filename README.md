@@ -33,8 +33,9 @@ what is selected, focus a node, and pin short tags onto agents and work items.
   **A strobing line is a message**: substrate messages rise from below, operator
   messages descend from above.
 - **A red ring around an item** means orphaned: no live holder.
-- **Tags** are short labels pinned above a node. Agent tags draw blue, human
-  tags amber.
+- **Tags** are short labels pinned above a node. An icon carries provenance —
+  ◆ filed by an agent, ✎ typed by a person — and the colour is the author's
+  choice from seven named values that resolve per theme.
 
 ## Keyboard
 
@@ -149,7 +150,7 @@ you mean otherwise.
 | `POST` | `/api/fit` | `{on:bool}` |
 | `POST` | `/api/filter` | `{ids:[id]}` or `{clear:true}` — ghost everything else |
 | `GET` | `/api/tags` | `[{tagId, target, text, source, at}]` |
-| `POST` | `/api/tags` | `{tags:[{target, text, source:"agent"\|"user"}]}` |
+| `POST` | `/api/tags` | `{tags:[{target, text, source:"agent"\|"user", color}]}` |
 | `DELETE` | `/api/tags` | clear all |
 | `DELETE` | `/api/tags/<tagId>` | clear one |
 
