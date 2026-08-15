@@ -144,7 +144,7 @@ you mean otherwise.
 | verb | path | body |
 |---|---|---|
 | `GET` | `/api/state` | selection, tags, generation, sequence |
-| `GET` | `/api/selection` | `[{id, type, title}]` |
+| `GET` | `/api/selection` | `{selected:[…], focused:{mode, nodes:[…]}}` — brushed vs highlighted |
 | `POST` | `/api/select` | `{add:[id], remove:[id], clear:bool}` |
 | `POST` | `/api/focus` | `{id, mode:"single"\|"neighborhood"\|"clear"}` |
 | `POST` | `/api/fit` | `{on:bool}` |

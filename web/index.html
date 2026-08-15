@@ -965,13 +965,24 @@ async function apiLoop(){
 let lastReport = '', reportSkips = 0;
 async function apiReportSelection(){
   if (!apiUp) return;
-  const sel = [...view.selection].map(k => {
-    const kind = k.slice(0,1), id = k.slice(2);
-    const w = kind === 'i' ? (DATA?.items || []).find(x => x.id === id) : null;
-    const a = kind === 'a' ? (DATA?.agents || []).find(x => x.id === id) : null;
-    return {id, type: kind === 'i' ? 'item' : 'agent', title: w ? w.title : (a ? a.name : null)};
-  });
-  const body = JSON.stringify({clientId: CLIENT_ID, selection: sel});
+  const describe = (kind, id) => {
+    const w = kind === 'item' ? (DATA?.items || []).find(x => x.id === id) : null;
+    const a = kind === 'agent' ? (DATA?.agents || []).find(x => x.id === id) : null;
+    return {id, type: kind, title: w ? w.title : (a ? a.name : null)};
+  };
+  const sel = [...view.selection].map(k =>
+    describe(k.slice(0,1) === 'i' ? 'item' : 'agent', k.slice(2)));
+  /* What a focus or filter is highlighting is a different question from what a
+     human brushed, so report both rather than conflating them. */
+  const foc = [
+    ...[...(hiItems || [])].map(id => describe('item', id)),
+    ...[...(hiAgents || [])].map(id => describe('agent', id)),
+  ];
+  const mode = view.filter.kind !== 'none' ? 'filter'
+             : view.focus.stage === 2 ? 'neighborhood'
+             : view.focus.stage === 1 ? 'single' : 'none';
+  const body = JSON.stringify({clientId: CLIENT_ID, selection: sel,
+                               focused: foc, focusMode: mode});
   /* Re-assert periodically even when unchanged. Selection is last-writer-wins
      across pages, so a page that goes quiet can be overwritten by another and
      would otherwise never correct the record. */

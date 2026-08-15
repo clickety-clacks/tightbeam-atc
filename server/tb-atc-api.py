@@ -10,7 +10,7 @@ The page polls /api/pull, applies any commands it has not seen, and reports
 what it currently has selected. External callers use the verbs below.
 
     GET    /api/state                    everything at once
-    GET    /api/selection                [{id, type, title}]
+    GET    /api/selection                {selected:[...], focused:{mode, nodes:[...]}}
     POST   /api/select                   {add:[id], remove:[id], clear:bool}
     POST   /api/focus                    {id, mode:"single"|"neighborhood"|"clear"}
     POST   /api/fit                      {on:bool}
@@ -65,7 +65,9 @@ GENERATION = uuid.uuid4().hex[:12]
 
 lock = threading.Lock()
 state = {
-    "selection": [],        # last reported by a page — telemetry, not truth
+    "selection": [],        # brushed by a human — telemetry, not truth
+    "focused": [],          # highlighted by a focus or filter, whoever set it
+    "focusMode": "none",    # none | single | neighborhood | filter
     "selectionAt": 0,
     "selectionBy": None,
     "commands": [],         # [{seq, kind, ...}] — a broadcast log, trimmed
@@ -190,11 +192,17 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/state":
             with lock:
                 snap = {"generation": GENERATION, "selection": list(state["selection"]),
+                        "focused": list(state["focused"]), "focusMode": state["focusMode"],
                         "selectionAt": state["selectionAt"], "selectionBy": state["selectionBy"],
                         "tags": list(state["tags"].values()), "seq": state["seq"]}
         elif u.path == "/api/selection":
+            # two distinct things: what a human brushed, and what a focus or
+            # filter is currently highlighting. Neither implies the other.
             with lock:
-                snap = list(state["selection"])
+                snap = {"selected": list(state["selection"]),
+                        "focused": {"mode": state["focusMode"],
+                                    "nodes": list(state["focused"])},
+                        "at": state["selectionAt"]}
         elif u.path == "/api/tags":
             with lock:
                 snap = list(state["tags"].values())
@@ -261,6 +269,14 @@ class Handler(BaseHTTPRequestHandler):
                     {"id": clip(x.get("id"), MAX_ID), "type": clip(x.get("type"), 8),
                      "title": clip(x.get("title"), 120)}
                     for x in sel if isinstance(x, dict)]
+                foc = b.get("focused")
+                state["focused"] = [
+                    {"id": clip(x.get("id"), MAX_ID), "type": clip(x.get("type"), 8),
+                     "title": clip(x.get("title"), 120)}
+                    for x in (foc[:MAX_IDS_PER_CALL] if isinstance(foc, list) else [])
+                    if isinstance(x, dict)]
+                mode = b.get("focusMode")
+                state["focusMode"] = mode if mode in ("none","single","neighborhood","filter") else "none"
                 state["selectionAt"] = int(time.time() * 1000)
                 state["selectionBy"] = clip(b.get("clientId"), 32)
                 out = ({"ok": True, "count": len(state["selection"])}, 200)

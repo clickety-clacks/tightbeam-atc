@@ -33,12 +33,25 @@ to resolve a name to an id.
 
 ```bash
 curl -s localhost:8787/api/selection
-# [{"id":"wi_5870f52e","type":"item","title":"FIX SPEC+IMPL — supervision liveness…"}]
 ```
 
-`/api/state` returns the selection, all tags and the command sequence at once.
-Selection is reported by the page every couple of seconds, so it is current to
-within about that.
+```json
+{
+  "selected": [{"id":"wi_5870f52e","type":"item","title":"FIX SPEC+IMPL — supervision liveness…"}],
+  "focused":  {"mode":"neighborhood",
+               "nodes":[{"id":"wi_5870f52e","type":"item","title":"…"},
+                        {"id":"s_fde9b2be","type":"agent","title":"Product owner — Tightbeam"}]}
+}
+```
+
+Two different questions, so read the right one. **`selected`** is what a human
+brushed. **`focused`** is what a focus or filter is currently highlighting, with
+`mode` telling you which — `none`, `single`, `neighborhood` or `filter`. Neither
+implies the other: a human can brush inside a filter, and a filter you set
+yourself appears under `focused`, not `selected`.
+
+`/api/state` returns both, all tags and the command sequence at once. The page
+reports every couple of seconds, so both are current to within about that.
 
 ## Pointing at something
 
