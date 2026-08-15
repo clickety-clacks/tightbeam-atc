@@ -510,7 +510,6 @@ function clearRect(){
    sits at the centre of the clear space rather than the centre of the screen. */
 function frameTo(pts, center, e, {margin = 1.15, floor = 6} = {}){
   const b = clearRect();
-  const half = Math.tan(camera.fov * Math.PI / 360);
   const right = new THREE.Vector3().crossVectors(camera.up, e).normalize();
   const up = new THREE.Vector3().crossVectors(e, right).normalize();
 
@@ -532,14 +531,25 @@ function frameTo(pts, center, e, {margin = 1.15, floor = 6} = {}){
 
   const dist = Math.max(floor, frameDistance(pts, aim, e, {
     margin, usableH: (b.right - b.left) / b.vw, usableV: (b.bottom - b.top) / b.vh }));
-  /* then offset so that middle lands in the middle of the clear space rather
-     than the middle of the screen */
-  const ndcX = ((b.left + b.right) / 2 - b.vw / 2) / (b.vw / 2);
-  const ndcY = (b.vh / 2 - (b.top + b.bottom) / 2) / (b.vh / 2);
-  const target = aim
-    .addScaledVector(right, -ndcX * half * camera.aspect * dist)
-    .addScaledVector(up,    -ndcY * half * dist);
-  return {camPos: target.clone().addScaledVector(e, dist), target};
+  /* The camera targets the middle of what it frames and nothing else. Getting
+     that middle to sit in the clear space is applyChromeOffset()'s job, and it
+     does it by displacing the projection — aiming off-centre here instead
+     would make everything orbit around a point that is not the subject. */
+  return {camPos: aim.clone().addScaledVector(e, dist), target: aim};
+}
+
+/* The chrome is asymmetric, so the middle of the canvas is not the middle of
+   what a viewer can actually see. Displace the projection by the difference:
+   the camera keeps looking straight at its subject — so OrbitControls and the
+   ambient spin both turn around that subject — while the image lands in the
+   space the bar, the legend and the detail pane leave free. */
+function applyChromeOffset(){
+  const b = clearRect();
+  const dx = (b.left + b.right) / 2 - b.vw / 2;
+  const dy = (b.top + b.bottom) / 2 - b.vh / 2;
+  if (Math.abs(dx) < .5 && Math.abs(dy) < .5) camera.clearViewOffset();
+  else camera.setViewOffset(b.vw, b.vh, -dx, -dy, b.vw, b.vh);
+  camera.updateProjectionMatrix();
 }
 
 /* Where a framing approaches from: the camera's current bearing, lifted to a
@@ -1225,6 +1235,7 @@ window.__atc = {
   /* framing internals, so a fit that looks wrong can be interrogated rather
      than guessed at: which constraint bound, and how much room it asked for */
   clearRect, frameDistance, frameTo, filteredView, neighbourhoodView,
+  get controls(){ return controls; },
   get view(){ return view; },
   get tags(){ return tags; },
   get data(){ return DATA; },
@@ -1448,6 +1459,7 @@ function applyView(){
      appeared once and vanished at the next refresh. */
   buildTags();
   renderSearchChrome();
+  applyChromeOffset();          /* the detail pane may have just appeared */
 }
 /* Whatever is ghosted is out of play. With no focus or filter the brush can
    reach anything; inside a focus or a filter it can only reach what that scope
@@ -1532,10 +1544,10 @@ let camMark = null;
 function flyToNode(o){
   view.framing = 'focus'; userMoved = true;
   const nb = view.focus.stage === 2 ? neighbourhoodView() : null;
+  let camPos, target;
   if (nb){
     const e = approachDir(nb.center);
-    const {camPos, target} = frameTo(nb.pts, nb.center, e, {floor: 7});
-    flyTo(camPos, target);
+    ({camPos, target} = frameTo(nb.pts, nb.center, e, {floor: 7}));
   } else {
     const pts = []; fitPoints(o, pts, true);
     const pt = new THREE.Vector3();
@@ -1546,9 +1558,17 @@ function flyToNode(o){
        portrait. A lone node wants breathing room rather than to fill the
        frame, which is all the wider margin here is for. */
     const e = approachDir(pt, .30);
-    const {camPos, target} = frameTo(pts, pt, e, {margin: 2.0, floor: 7});
-    flyTo(camPos, target);
+    ({camPos, target} = frameTo(pts, pt, e, {margin: 2.0, floor: 7}));
   }
+  /* Hand the ambient spin the same centre the framing used, the way the filter
+     and selection framings do — otherwise a focused view either sat frozen or
+     resumed carouselling around the org's root rather than the subject. */
+  flyTo(camPos, target.clone(), () => {
+    const d = camPos.clone().sub(target);
+    orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+    orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(target);
+    userMoved = false;
+  });
   showTagBox();
 }
 function markCamera(){
@@ -1767,6 +1787,7 @@ function fitViewport(){
   renderer.setSize(w, h, false);
   edgeMats.forEach(m => m.resolution.set(w, h));
   autoCollapseLegend();
+  applyChromeOffset();          /* the legend just collapsed or grew */
 }
 let fitQueued = false;
 function queueFit(){
