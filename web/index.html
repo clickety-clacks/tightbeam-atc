@@ -67,8 +67,11 @@
      content to a pane that owns the right edge — or the bottom in portrait,
      where horizontal room is the scarce thing. */
   #detail { position:fixed; z-index:7; display:none; box-sizing:border-box;
-    top:76px; right:18px; width:min(380px, 34vw); max-height:calc(100vh - 190px);
-    overflow:auto; background:#1b1e22f2; border:1px solid #3a3d42;
+    top:76px; right:18px; width:min(400px, 36vw); max-height:calc(100vh - 120px);
+    /* the pane never trims: it scrolls, and the scroll stays inside it */
+    overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+    scrollbar-width:thin; overflow-wrap:anywhere;
+    background:#1b1e22f2; border:1px solid #3a3d42;
     border-left:3px solid #b08d57; border-radius:5px; padding:12px 14px;
     color:#d8d6d1; font-size:12.5px; line-height:1.55; }
   #detail .t { color:#b08d57; font-weight:650; font-size:13px; display:block; margin-bottom:6px; }
@@ -81,7 +84,7 @@
   body.light #detail .seg, body.light #detail .k { color:#5c6b78; }
   @media (max-aspect-ratio: 1/1){
     #detail { top:auto; left:18px; right:18px; width:auto;
-      bottom:calc(14px + env(safe-area-inset-bottom)); max-height:42vh; }
+      bottom:calc(14px + env(safe-area-inset-bottom)); max-height:46vh; }
   }
   /* five lines then an ellipsis — never a silent trim */
   .clamp5 { display:-webkit-box; -webkit-line-clamp:5; -webkit-box-orient:vertical; overflow:hidden; }
