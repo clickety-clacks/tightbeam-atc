@@ -14,7 +14,7 @@ what it currently has selected. External callers use the verbs below.
     POST   /api/select                   {add:[id], remove:[id], clear:bool}
     POST   /api/focus                    {id, mode:"single"|"neighborhood"|"clear"}
     POST   /api/fit                      {on:bool}
-    POST   /api/filter                   {ids:[id]} | {clear:true}
+    POST   /api/filter                   {ids:[id]} | {query:"text"} | {clear:true}
     POST   /api/arrows                   {arrows:[{from, to, text, color, source, author}]}
     GET    /api/arrows                   [{arrowId, from, to, text, color, source, author, at}]
     DELETE /api/arrows?author=<who>      clear that author's
@@ -336,8 +336,19 @@ class Handler(BaseHTTPRequestHandler):
                     out = (push("filter", ids=[], clear=True), 200)
                 else:
                     ids = id_list(b.get("ids"))
-                    if not ids:
-                        out = ({"error": "ids required"}, 400)
+                    query = clip(b.get("query"), MAX_SEARCH_LABEL)
+                    if not ids and query:
+                        # a text search, the same thing a human types: the page
+                        # matches it against titles and ids. Without this the
+                        # only way to express a filter on the wire was a picked
+                        # set, so re-running a typed search had to be sent as a
+                        # clear — which cleared it.
+                        rec = _file_search(query, [], b.get("author"), "agent")
+                        save_tags()
+                        out = (push("filter", ids=[], clear=False, query=query,
+                                    searchId=rec["searchId"]), 200)
+                    elif not ids:
+                        out = ({"error": "ids or query required"}, 400)
                     else:
                         rec = _file_search(clip(b.get("query"), MAX_SEARCH_LABEL),
                                            ids, b.get("author"), "agent")

@@ -42,7 +42,7 @@
   body.light #stack .chip { background:#f2eee2e8; }
   /* The pile of searches that have been run. Newest on top, because that is
      the one most likely to be wanted back. */
-  #cards { display:flex; flex-direction:column-reverse; gap:4px; align-items:flex-start;
+  #cards { display:flex; flex-direction:column; gap:4px; align-items:flex-end;
     max-height:34vh; overflow-y:auto; }
   #cards:empty { display:none; }
   #cards .card { display:inline-flex; align-items:center; gap:8px; cursor:pointer;
@@ -188,8 +188,8 @@
   </div>
   <div id="topright">
     <div id="stack"></div>
-    <div id="cards"></div>
     <div id="themehint">/ search · S select · T theme · L legend · C clear notes</div>
+    <div id="cards"></div>
     <div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> · <span id="selcount">0</span> sel · [ ] size · f fit · d clear</div>
   </div>
 </div>
@@ -855,7 +855,7 @@ let typingCardId = null;
 function renderCards(){
   const el = document.getElementById('cards');
   if (!el) return;
-  const list = [...searches].sort((a, b) => (a.at || 0) - (b.at || 0));
+  const list = [...searches].sort((a, b) => (b.at || 0) - (a.at || 0));  /* newest first */
   el.innerHTML = list.map(q => {
     const term = q.label || q.query || ((q.ids || []).length + ' picked');
     const who = q.author ? '<span class="who">' + esc(q.author) + '</span>' : '';
@@ -903,6 +903,13 @@ function openSearch(q){
   if ((q.ids || []).length) setFilter('agent', {ids: q.ids});
   else setFilter('user', {query: q.query || ''});
   renderCards();
+  /* Re-opening a search is applying it, so it belongs on the wire like any
+     other filter — otherwise a second page, or an agent asking what is on
+     screen, still believes the old one is running. */
+  apiFetch('/filter', {method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify((q.ids || []).length
+      ? {ids: q.ids, query: q.query || undefined}
+      : {query: q.query || ''})}).catch(()=>{});
 }
 
 /* File a search a human typed, editing the card in place while they keep
@@ -1538,9 +1545,17 @@ function applyCommand(c){
     const m = focusMesh();
     if (m) flyToNode(m);
   } else if (c.kind === 'filter'){
-    if (c.clear || !(c.ids || []).length){ setFilter('none'); activeSearchId = null; renderCards(); }
-    else { setFilter('agent', {ids: c.ids});
-           if (c.searchId){ activeSearchId = c.searchId; renderCards(); } }
+    if (c.clear){ setFilter('none'); activeSearchId = typingCardId = null; renderCards(); }
+    else if ((c.ids || []).length){
+      setFilter('agent', {ids: c.ids});
+      if (c.searchId){ activeSearchId = c.searchId; renderCards(); }
+    } else if (c.query){
+      /* a text search on the wire — the same thing a human types */
+      searchEl.value = c.query;
+      searchClearBtn.style.display = 'block';
+      setFilter('user', {query: c.query});
+      if (c.searchId){ activeSearchId = typingCardId = c.searchId; renderCards(); }
+    } else { setFilter('none'); activeSearchId = typingCardId = null; renderCards(); }
   } else if (c.kind === 'fit'){
     if (c.on) fitSelection(); else if (camMark) restoreCamera();
   }
