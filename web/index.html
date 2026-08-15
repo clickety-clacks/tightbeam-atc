@@ -119,9 +119,9 @@
   <div id="hud"><span class="title"><b>Tightbeam</b> · air traffic control · </span><span id="mode" class="sample">connecting…</span></div>
   <div id="searchwrap">
     <span id="searchpill">agent search</span>
-    <input id="search" type="text" placeholder="filter — / to focus, esc to clear" autocomplete="off">
+    <input id="search" type="text" placeholder="filter — press / to search" autocomplete="off">
     <span id="searchcount"></span>
-    <button id="searchclear" title="clear (esc)" aria-label="clear search">×</button>
+    <button id="searchclear" title="clear" aria-label="clear search">×</button>
   </div>
   <div id="topright">
     <div id="themehint">/ search · S select · T theme · L legend · C tags</div>
@@ -131,7 +131,7 @@
 <div id="legend"></div>
 <div id="tip"></div>
 <div id="tagbox">tag <span class="who"></span><input id="taginput" type="text"
-  placeholder="type a note, enter to attach, esc to close" maxlength="80"></div>
+  placeholder="type a note, enter to attach" maxlength="80"></div>
 <div id="selcursor"></div>
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
@@ -409,8 +409,8 @@ function renderSearchChrome(){
   document.getElementById('searchpill').style.display = f.kind === 'agent' ? 'inline-block' : 'none';
   const box = document.getElementById('search');
   if (f.kind === 'agent') box.value = '';
-  box.placeholder = f.kind === 'agent' ? 'agent-supplied selection — clear to release'
-                                       : 'filter — / to focus, esc to clear';
+  box.placeholder = f.kind === 'agent' ? 'agent-supplied selection'
+                                       : 'filter — press / to search';
   const n = (hiItems?.size || 0) + (hiAgents?.size || 0);
   document.getElementById('searchcount').textContent =
     f.kind === 'none' ? '' : (n ? n + ' shown' : 'no match');
