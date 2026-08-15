@@ -187,7 +187,8 @@ const THEMES = {
     liveHot:0x3d8fd6, liveCold:0x4e545c,
     tag:{neutral:'#9aa0a8', red:'#e0685c', amber:'#d9a441', green:'#6fae4e',
          cyan:'#4bb8b8', blue:'#5aa9e6', violet:'#a98bd8'},
-    tagBg:'rgba(16,18,20,.92)',
+    tagBg:'rgba(16,18,20,.62)',      /* the card lets the scene through */
+    tagHalo:'rgba(16,18,20,.93)',    /* but each glyph keeps its own backing */
     retired:0x33363a, arcA:0xb08d57, arcB:0x22252a,
     tetherRun:0x6fae4e, tetherWait:0xc9a835, tetherSched:0xb9bfc7, pulse:0xb08d57, pulseSub:0x5f6670, pulseUser:0x6f9ecf,
     discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63, shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
@@ -203,7 +204,8 @@ const THEMES = {
     liveHot:0x2f6fb5, liveCold:0xaab3bc,
     tag:{neutral:'#5c6b78', red:'#c23b22', amber:'#b8860b', green:'#2e7d4f',
          cyan:'#1f7a7a', blue:'#2f6fb5', violet:'#6f4fa8'},
-    tagBg:'rgba(250,247,238,.95)',
+    tagBg:'rgba(250,247,238,.68)',
+    tagHalo:'rgba(250,247,238,.96)',
     retired:0xcdc7b8, arcA:0x26323c, arcB:0xd8dfe6,
     tetherRun:0x2e7d4f, tetherWait:0xb8860b, tetherSched:0x1b232b, pulse:0xc23b22, pulseSub:0x8a97a3, pulseUser:0x3d6ea8,
     discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3, shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
@@ -388,7 +390,13 @@ function tagSprite(text, source, color){
   g.fill(); g.stroke();
   const firstY = 7 + TAG_LINE_PX / 2;
   drawTagIcon(g, source, 13 + ICON/2 - 4, firstY, 11, hot);
-  g.font = font; g.textBaseline = 'middle'; g.fillStyle = hot;
+  g.font = font; g.textBaseline = 'middle';
+  /* Ink first as a halo, then the letter: the card is translucent now, so a
+     glyph crossing a bright node needs its own opacity rather than relying on
+     the panel behind it. */
+  g.lineJoin = 'round'; g.lineWidth = 6; g.strokeStyle = T.tagHalo || T.tagBg;
+  lines.forEach((l, i) => g.strokeText(l, 13 + (i ? 0 : ICON), firstY + i * TAG_LINE_PX));
+  g.fillStyle = hot;
   lines.forEach((l, i) => g.fillText(l, 13 + (i ? 0 : ICON), firstY + i * TAG_LINE_PX));
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({
     map: new THREE.CanvasTexture(c), transparent:true, depthTest:false }));
@@ -1535,7 +1543,7 @@ function glyphTexture(ch, hex){
   const g = c.getContext('2d');
   g.font = font; g.textBaseline = 'middle';
   /* a halo in the card colour, so a letter crossing a bright node still reads */
-  g.lineJoin = 'round'; g.lineWidth = 8; g.strokeStyle = T.tagBg;
+  g.lineJoin = 'round'; g.lineWidth = 8; g.strokeStyle = T.tagHalo || T.tagBg;
   g.strokeText(ch, 7, 31);
   g.fillStyle = hex; g.fillText(ch, 7, 31);
   const tx = new THREE.CanvasTexture(c);
