@@ -970,6 +970,8 @@ window.__atc = {
   get data(){ return DATA; },
   get apiUp(){ return apiUp; },
   get scene(){ return scene; },
+  get camera(){ return camera; },
+  get THREE(){ return THREE; },
   get scope(){ return {items: hiItems && [...hiItems], agents: hiAgents && [...hiAgents]}; },
   inScope,
   pull: apiPull,
@@ -989,11 +991,8 @@ addEventListener('pointerup', e=>{
   if (!downXY) return;
   const moved = Math.hypot(e.clientX-downXY[0], e.clientY-downXY[1]); downXY=null;
   if (moved > 6) return;                       /* it was a drag, not a click */
-  mouse.set((e.clientX/innerWidth)*2-1, -(e.clientY/innerHeight)*2+1);
-  ray.setFromCamera(mouse, camera);
-  const hit = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], false)[0];
-  if (hit && hit.object.userData.type){
-    const o = hit.object;
+  const o = pickNode(e);
+  if (o){
     camMark = null;                       /* the click moved us; the old mark is stale */
     const k = selKey(o);
     if (view.focus.key && view.focus.key === k) view.focus.stage = view.focus.stage === 1 ? 2 : 1;
@@ -1022,14 +1021,43 @@ addEventListener('pointerup', e=>{
   }
 });
 
+/* A tag, a name label, an orphan ring and a turn shell are all children of the
+   node they describe, so hitting any of them means hitting that node. Raycast
+   recursively and walk back up to the owner. */
+function ownerOf(obj){
+  let o = obj;
+  while (o && !o.userData?.type) o = o.parent;
+  return (o && o.userData.type) ? o : null;
+}
+function pickNode(ev){
+  mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  /* Tags draw with depth testing off, so they appear above everything. Picking
+     must follow what is visible, not what is nearest — otherwise clicking a
+     tag selects whatever geometry happens to sit in front of it. */
+  const sprites = [];
+  const collect = m => (m.userData.tagSprites || []).forEach(sp => sprites.push(sp));
+  itemMeshes.forEach(collect);
+  Object.values(agentMeshes).forEach(collect);
+  const tagHit = ray.intersectObjects(sprites, false)[0];
+  if (tagHit){
+    const owner = ownerOf(tagHit.object);
+    if (owner) return owner;
+  }
+  const hits = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], true);
+  for (const h of hits){
+    const owner = ownerOf(h.object);
+    if (owner) return owner;
+  }
+  return null;
+}
+
 /* ---------- tooltip ---------- */
 const ray = new THREE.Raycaster(), mouse = new THREE.Vector2(), tip = document.getElementById('tip');
 addEventListener('pointermove', e=>{
-  mouse.set((e.clientX/innerWidth)*2-1, -(e.clientY/innerHeight)*2+1);
-  ray.setFromCamera(mouse, camera);
-  const hit = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], false)[0];
-  if (!hit){ tip.style.display='none'; return; }
-  const u = hit.object.userData;
+  const node = pickNode(e);
+  if (!node){ tip.style.display='none'; return; }
+  const u = node.userData;
   if (!u.type){ tip.style.display='none'; return; }
   if (view.input !== 'brush' && hiAgents){   /* outside the neighbourhood: dead to hover */
     const inside = u.type === 'item' ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
