@@ -1553,10 +1553,10 @@ function tickFrame(){
         if (u.lineMat){ u.lineMat.color.copy(u.baseStroke); u.lineMat.opacity = .6 * f; } }
       u.dim = f;
     }
-    /* A focused or selected item holds still. Bobbing is ambient texture for
-       the field at rest; under inspection it makes the tag and the composer
-       anchored to it jitter, which is hard to read and hard to click. */
-    const heldStill = u.w && (view.focus.key === 'i:' + u.w.id || view.selection.has('i:' + u.w.id));
+    /* A FOCUSED item holds still: the tag and composer anchored to it would
+       otherwise jitter, which is hard to read and hard to click. Selection is
+       not inspection — a brushed item keeps whatever motion it had. */
+    const heldStill = u.w && view.focus.key === 'i:' + u.w.id;
     if (u.baseY){
       m.position.y = heldStill ? u.baseY : u.baseY + Math.sin(t*1.2+u.phase)*.5;
       if (!heldStill) m.rotation.y += .004;
