@@ -284,6 +284,7 @@ function tagSprite(text, source){
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({
     map: new THREE.CanvasTexture(c), transparent:true, depthTest:false }));
   sp.renderOrder = 12;
+  sp.userData.isTag = true;
   const h = 1.1; sp.scale.set(h * w / 52, h, 1);
   return sp;
 }
@@ -1337,7 +1338,7 @@ function tickFrame(){
       const f = fa(u.a.id);
       if (!u.selected){ shade(m.material, u.baseFill, f); if (u.lineMat) shade(u.lineMat, u.baseStroke, f); }
       u.dim = f;
-      m.children.forEach(ch => { if (ch.isSprite) ch.material.opacity = .85 * f; });
+      m.children.forEach(ch => { if (ch.isSprite) ch.material.opacity = (ch.userData.isTag ? 1 : .85) * f; });
     }
     if (u && u.flash && u.lineMat){
       const fast = u.flash==='run';
@@ -1356,6 +1357,9 @@ function tickFrame(){
     if (u.w && (u.baseY || u.landed)) spin.set(u.w.id, m.rotation.y);
     if (u.waitFlash && u.lineMat){ u.lineMat.opacity = (.15 + (0.5+0.5*Math.sin(t*2.6+u.phase))*.6) * (u.dim ?? 1); }
     m.children.forEach(ch=>{
+      /* an item's tag must ghost with its node, or a dimmed scene keeps a
+         bright label floating over nothing */
+      if (ch.isSprite){ ch.material.opacity = (u.dim ?? 1); return; }
       if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=(.4+Math.abs(Math.sin(t*3))*.5)*(u.dim ?? 1); const sc=1+Math.sin(t*3)*.18; ch.scale.set(sc,sc,sc); }
       if (ch.userData.act==='run'){ ch.material.opacity = (.04 + (0.5+0.5*Math.sin(t*2.2))*.18) * (u.dim ?? 1); }
       if (ch.userData.orphanRing){ ch.lookAt(camera.position); ch.material.opacity = .55 * (u.dim ?? 1); }
