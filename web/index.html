@@ -254,6 +254,10 @@ const view = {
      seconds, so an object reference goes stale and takes hover, dimming and
      framing with it. focusMesh() resolves the key against the current scene. */
   focus: { key: null, stage: 0 },
+  /* While f/space owns the view the selection is the lens: only what was
+     brushed stays lit, and the second press restores the scope underneath
+     along with the camera. 'none' the rest of the time. */
+  lens: 'none',
   input: 'navigate',
   /* a filter narrows the whole view: everything unmatched ghosts exactly as it
      does under focus. A human types a query; an agent supplies an id list. The
@@ -461,37 +465,84 @@ function applyTheme(){
 }
 
 /* the ghost set is derived from focus alone — never stored independently */
-function computeHighlight(){
-  if (view.filter.kind !== 'none'){
-    hiAgents = new Set(); hiItems = new Set();
-    const f = view.filter;
-    (DATA?.items || []).forEach(w => { if (filterMatches('i', w)) hiItems.add(w.id); });
-    (DATA?.agents || []).forEach(a => { if (filterMatches('a', a)) hiAgents.add(a.id); });
-    return;
-  }
+/* ---------- scope ----------
+   Two things can restrict what is in play, and they compose rather than
+   compete: a search establishes the working set, a focus inspects within it.
+   Effective scope is their intersection. Filter used to win outright and the
+   focus underneath it did nothing, which is why clicking a search result did
+   not narrow and a neighbourhood click framed the search instead of the node.
+
+   docs/display-rules.md is the decision this implements. */
+function filterScope(){
+  if (view.filter.kind === 'none') return null;
+  const sc = {agents: new Set(), items: new Set()};
+  (DATA?.items  || []).forEach(w => { if (filterMatches('i', w)) sc.items.add(w.id); });
+  (DATA?.agents || []).forEach(a => { if (filterMatches('a', a)) sc.agents.add(a.id); });
+  return sc;                                  /* may be empty: that is "no match" */
+}
+
+function focusScope(){
   const obj = focusMesh();
-  if (!obj || view.focus.stage < 1 || !DATA){ hiAgents = hiItems = null; return; }
-  hiAgents = new Set(); hiItems = new Set();
+  if (!obj || view.focus.stage < 1 || !DATA) return null;
+  const sc = {agents: new Set(), items: new Set()};
   const u = obj.userData;
-  /* stage 1 lights only the node itself; everything else fades the same way it
-     does in neighbourhood mode */
   if (view.focus.stage === 1){
-    if (u.w) hiItems.add(u.w.id); else if (u.a) hiAgents.add(u.a.id);
-    return;
+    if (u.w) sc.items.add(u.w.id); else if (u.a) sc.agents.add(u.a.id);
+    return sc;
   }
+  /* the neighbourhood of the node that was clicked — derived from that node,
+     never from whatever happens to be lit at the time */
   if (u.type === 'item'){
-    hiItems.add(u.w.id);
-    Object.keys(u.w.turns || {}).forEach(h => hiAgents.add(h));
-    (u.w.holders || []).forEach(h => hiAgents.add(h));
+    sc.items.add(u.w.id);
+    Object.keys(u.w.turns || {}).forEach(h => sc.agents.add(h));
+    (u.w.holders || []).forEach(h => sc.agents.add(h));
   } else if (u.a){
     const id = u.a.id;
-    hiAgents.add(id);
-    if (u.a.parent) hiAgents.add(u.a.parent);
-    (DATA.agents || []).forEach(x => { if (x.parent === id) hiAgents.add(x.id); });
-    (DATA.items || []).forEach(w => {
-      if ((w.turns || {})[id] || (w.holders || []).includes(id)) hiItems.add(w.id);
+    sc.agents.add(id);
+    if (u.a.parent) sc.agents.add(u.a.parent);
+    (DATA.agents || []).forEach(x => { if (x.parent === id) sc.agents.add(x.id); });
+    (DATA.items  || []).forEach(w => {
+      if ((w.turns || {})[id] || (w.holders || []).includes(id)) sc.items.add(w.id);
     });
   }
+  return sc;
+}
+
+/* While f owns the view the selection IS what is shown, so it replaces the
+   scope rather than intersecting with it — otherwise flying to a selection
+   that sits outside the current search would frame nodes that are ghosted. */
+function selectionScope(){
+  const sc = {agents: new Set(), items: new Set()};
+  view.selection.forEach(k => {
+    const id = k.slice(2);
+    (k.startsWith('i:') ? sc.items : sc.agents).add(id);
+  });
+  return sc;
+}
+
+/* Scope is a STACK, and the innermost layer renders. Enter a mode and that
+   mode is what you see: focus a node and only that node is lit, open its
+   neighbourhood and the whole neighbourhood is lit — even the parts that the
+   search underneath it would not have matched. The layers below are not
+   intersected, they are remembered, so that leaving one puts back exactly what
+   was true before it.
+
+       filter   a search, or an agent's id list      (outermost)
+       lens     f/space, showing the selection
+       focus    a clicked node, then its neighbourhood   (innermost)
+
+   The same stack decides what the brush can reach, so while a focus is up you
+   can only add to or remove from the selection within it. */
+function activeScope(){
+  if (view.focus.stage >= 1){ const sc = focusScope(); if (sc) return sc; }
+  if (view.lens === 'selection' && view.selection.size) return selectionScope();
+  return filterScope();
+}
+
+function computeHighlight(){
+  const sc = activeScope();
+  if (!sc){ hiAgents = hiItems = null; return; }    /* nothing restricts the view */
+  hiAgents = sc.agents; hiItems = sc.items;
 }
 /* frame everything currently highlighted */
 /* one predicate for both provenances: a typed query matches text, an agent's
@@ -666,6 +717,47 @@ function filteredView(){
   return { center: c, pts, count: pts.length };
 }
 
+/* Fly to whatever the current layer lights, without touching the fit's
+   bookmark. Used when a layer is popped: leaving a focus must put back the
+   framing that was true underneath it, not fly home. */
+function frameCurrentScope(){
+  const pts = [];
+  selectables().forEach(m => {
+    const u = m.userData;
+    const on = u.w ? hiItems?.has(u.w.id) : (u.a && hiAgents?.has(u.a.id));
+    if (on) fitPoints(m, pts);
+  });
+  if (!pts.length) return false;
+  const c = new THREE.Vector3();
+  pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
+  const e = approachDir(c);
+  const {camPos, target} = frameTo(pts, c, e);
+  userMoved = true;
+  flyTo(camPos, target.clone(), () => {
+    const d = camPos.clone().sub(target);
+    orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+    orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(target);
+    userMoved = false;
+  });
+  return true;
+}
+
+/* Leave the innermost layer and put back what was true beneath it — lighting
+   and camera together. Returns false when there is nothing left to pop, and
+   the caller falls back to flying home. */
+function popScope(){
+  if (view.focus.stage >= 1){
+    clearFocus();                        /* clearFocus re-derives the lighting */
+    return frameCurrentScope();
+  }
+  if (view.lens === 'selection'){        /* pops the fit itself */
+    if (camMark) restoreCamera();
+    else { view.lens = 'none'; applyView(); frameCurrentScope(); }
+    return true;
+  }
+  return false;                          /* a search is released explicitly, not by a click */
+}
+
 /* apply a filter and frame what it found */
 function setFilter(kind, {query = '', ids = null} = {}){
   /* Typing is debounced, so a keystroke leaves a timer holding the query as it
@@ -682,6 +774,7 @@ function setFilter(kind, {query = '', ids = null} = {}){
   const nb = kind === 'none' ? null : filteredView();
   if (nb){
     camMark = null;                      /* framing the filter moves the camera too */
+    view.lens = 'none';
     const e = approachDir(nb.center);
     const {camPos, target} = frameTo(nb.pts, nb.center, e);
     view.framing = 'filter'; userMoved = true;
@@ -1219,7 +1312,25 @@ async function apiClearTags(){
     apiTagsRev = -1; arrowsRev = -1; await apiPull();
   } catch(e){ apiUp = false; }
 }
+/* A human's stroke outranks an agent's command. Applied mid-drag, a focus or
+   filter changes which nodes the brush can reach halfway through, so one
+   stroke collects from two different scopes — and it starts a camera flight
+   while brush mode claims the camera is frozen. Hold them and replay in
+   command order once the pointer lifts. Selection commands are exempt: they
+   add to the same set the human is filling and do not move the goalposts. */
+const heldCommands = [];
+function flushHeldCommands(){
+  while (heldCommands.length){
+    const c = heldCommands.shift();
+    try { applyCommand(c); } catch(e){ /* one bad command must not wedge the rest */ }
+  }
+}
+
 function applyCommand(c){
+  if (selecting && (c.kind === 'focus' || c.kind === 'filter' || c.kind === 'fit')){
+    heldCommands.push(c);
+    return;
+  }
   if (c.kind === 'select'){
     if (c.clear) view.selection.clear();
     (Array.isArray(c.add) ? c.add : []).forEach(id => view.selection.add(selKeyFor(id)));
@@ -1360,13 +1471,17 @@ addEventListener('pointerup', e=>{
   if (moved > 6) return;                       /* it was a drag, not a click */
   const o = pickNode(e);
   if (o){
-    camMark = null;                       /* the click moved us; the old mark is stale */
+    /* A click pushes a focus layer on top of whatever is showing. The fit's
+       bookmark survives deliberately: clicking the background must be able to
+       put the camera back on the fit it came from. */
     const k = selKey(o);
     if (view.focus.key && view.focus.key === k) view.focus.stage = view.focus.stage === 1 ? 2 : 1;
     else { view.focus.key = k; view.focus.stage = 1; }
     applyView();
     view.framing = 'focus'; userMoved = true;
     flyToNode(o);
+  } else if (popScope()){
+    /* one layer came off and its parent is framed again */
   } else if (view.framing !== 'none'){
     camMark = null;
     clearFocus();
@@ -1791,7 +1906,8 @@ function setInputMode(mode){
   controls.enabled = !brushing;
   selUI.classList.toggle('off', !brushing);
   selCursor.style.display = brushing ? 'block' : 'none';
-  if (!brushing){ selecting = false; selOp = null; selCursor.classList.remove('unsel'); }
+  if (!brushing){ selecting = false; selOp = null; selCursor.classList.remove('unsel');
+                  flushHeldCommands(); }
 }
 /* the ONLY place focus is dropped */
 function clearFocus(){
@@ -1824,6 +1940,7 @@ addEventListener('pointerdown', e => {
 addEventListener('pointerup', () => {
   if (view.input !== 'brush') return;
   selecting = false; selOp = null; selCursor.classList.remove('unsel');
+  flushHeldCommands();                 /* the stroke is committed; agents may act now */
 }, true);
 
 /* f/space is a round trip: the first press remembers exactly where the camera
@@ -1839,7 +1956,6 @@ function flyToNode(o){
      a mark left over from before and flies BACK instead of to the selection,
      which is exactly what it looked like when f "stopped working". The click
      path already did this; focus arriving from the control API did not. */
-  camMark = null;
   view.framing = 'focus'; userMoved = true;
   const nb = view.focus.stage === 2 ? neighbourhoodView() : null;
   let camPos, target;
@@ -1878,6 +1994,8 @@ function markCamera(){
 }
 function restoreCamera(){
   const m = camMark; camMark = null;
+  view.lens = 'none';                  /* the lens lifts with the camera */
+  applyView();
   view.framing = 'restoring';
   userMoved = true;
   flyTo(m.pos, m.tgt, () => {
@@ -1888,7 +2006,14 @@ function restoreCamera(){
   return true;
 }
 function fitSelection(){
-  if (camMark) return restoreCamera();      /* second press: go back */
+  if (camMark){
+    /* second press dismisses the whole transaction — the fit and any focus
+       opened inside it — and returns the camera where it started */
+    view.focus.key = null; view.focus.stage = 0;
+    if (typeof hideTagBox === 'function') hideTagBox();
+    if (typeof detailEl !== 'undefined') detailEl.style.display = 'none';
+    return restoreCamera();
+  }
   /* f/space toggles between the two framings: whatever focus mode is showing,
      and the brushed selection. With only one of them available it just frames
      that one, and with neither it frames the whole org. */
@@ -1910,11 +2035,19 @@ function fitSelection(){
      first press to the view you were already looking at. */
   view.fitTarget = selPts.length ? 'selection' : 'focus';
   let pts = selPts.length ? selPts : focusPts;
-  if (!pts.length){ pts = []; selectables().forEach(m => fitPoints(m, pts)); }
+  if (!pts.length){
+    /* A filter that matched nothing is not an absent filter: framing the whole
+       org here would read as "search off" while the box still says no match. */
+    if (view.filter.kind !== 'none') return false;
+    pts = []; selectables().forEach(m => fitPoints(m, pts));
+  }
   if (!pts.length) return false;
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
   const e = approachDir(c);
+  /* raise the lens BEFORE framing so the fit is solved against what will
+     actually be lit, then re-derive so the rest of the org ghosts */
+  if (view.fitTarget === 'selection'){ view.lens = 'selection'; applyView(); }
   const {camPos, target} = frameTo(pts, c, e);
   /* hand the ambient orbit a new centre so it carousels around the selection
      once the flight lands, instead of resuming around the org's root */
