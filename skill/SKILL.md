@@ -76,6 +76,25 @@ curl -s -X POST localhost:8787/api/fit -H 'content-type: application/json' -d '{
 `fit` is a round trip: the first call remembers the camera, the second puts it
 back, including the rotation it was doing.
 
+## Narrowing the whole view
+
+`/api/filter` ghosts everything except the ids you name and frames what is
+left — the same display a human gets by typing in the search box, except the
+box shows an "agent search" pill so they know it came from you. This is usually
+better than selecting: it answers "show me only these" without touching what
+they had selected.
+
+```bash
+curl -s -X POST localhost:8787/api/filter -H 'content-type: application/json' \
+  -d '{"ids":["wi_1a2b3c4d","wi_5e6f7a8b","s_1234abcd"]}'
+
+curl -s -X POST localhost:8787/api/filter -H 'content-type: application/json' \
+  -d '{"clear":true}'
+```
+
+They can clear it themselves by emptying the search box, so a filter you leave
+behind is a nuisance rather than a trap — but clear it anyway when done.
+
 ## Tags
 
 A tag is a short label pinned above a node. Provenance is rendered: **agent**

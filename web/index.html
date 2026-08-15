@@ -76,6 +76,21 @@
   body.light #tagbox { background:#faf7eef2; border-color:#b8c7d9; border-left-color:#c23b22; color:#5c6b78; }
   body.light #tagbox input { background:#fff; border-color:#b8c7d9; color:#26323c; }
   body.light #tagbox .who { color:#c23b22; }
+  #searchwrap { display:flex; align-items:center; gap:7px; pointer-events:auto;
+    background:#101214e6; border:1px solid #2a2d31; border-radius:5px;
+    padding:5px 8px; box-sizing:border-box; max-width:100%; }
+  #search { background:transparent; border:0; outline:0; color:#d8d6d1;
+    font-family:inherit; font-size:12px; width:min(240px, 40vw); padding:2px 0; }
+  #search::placeholder { color:#6b7077; }
+  #searchpill { display:none; font-size:9.5px; letter-spacing:.1em;
+    text-transform:uppercase; color:#101214; background:#5aa9e6;
+    border-radius:3px; padding:2px 6px; white-space:nowrap; }
+  #searchcount { font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+    color:#7c8188; white-space:nowrap; }
+  body.light #searchwrap { background:#f2eee2e8; border-color:#c3cdd8; }
+  body.light #search { color:#26323c; }
+  body.light #searchpill { background:#2f6fb5; color:#fff; }
+  body.light #searchcount { color:#5c6b78; }
   #selcursor { position:fixed; border:1.5px solid #b08d57; border-radius:50%;
     pointer-events:none; display:none; transform:translate(-50%,-50%); z-index:5;
     box-shadow:0 0 0 1px rgba(0,0,0,.25) inset; }
@@ -95,8 +110,13 @@
 <body>
 <div id="topbar">
   <div id="hud"><span class="title"><b>Tightbeam</b> · air traffic control · </span><span id="mode" class="sample">connecting…</span></div>
+  <div id="searchwrap">
+    <span id="searchpill">agent search</span>
+    <input id="search" type="text" placeholder="filter — / to focus, esc to clear" autocomplete="off">
+    <span id="searchcount"></span>
+  </div>
   <div id="topright">
-    <div id="themehint">T theme · S select · L legend · C tags</div>
+    <div id="themehint">/ search · S select · T theme · L legend · C tags</div>
     <div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> · <span id="selcount">0</span> sel · [ ] size · f fit · d clear</div>
   </div>
 </div>
@@ -187,6 +207,10 @@ const view = {
      framing with it. focusMesh() resolves the key against the current scene. */
   focus: { key: null, stage: 0 },
   input: 'navigate',
+  /* a filter narrows the whole view: everything unmatched ghosts exactly as it
+     does under focus. A human types a query; an agent supplies an id list. The
+     display is identical either way — only the provenance pill differs. */
+  filter: { kind: 'none', query: '', ids: null },
   framing: 'none',               /* 'none' | 'focus' | 'selection' — camera intent */
   fitTarget: 'selection',        /* which framing f/space lands on next */
 };
@@ -291,6 +315,13 @@ function applyTheme(){
 
 /* the ghost set is derived from focus alone — never stored independently */
 function computeHighlight(){
+  if (view.filter.kind !== 'none'){
+    hiAgents = new Set(); hiItems = new Set();
+    const f = view.filter;
+    (DATA?.items || []).forEach(w => { if (filterMatches('i', w)) hiItems.add(w.id); });
+    (DATA?.agents || []).forEach(a => { if (filterMatches('a', a)) hiAgents.add(a.id); });
+    return;
+  }
   const obj = focusMesh();
   if (!obj || view.focus.stage < 1 || !DATA){ hiAgents = hiItems = null; return; }
   hiAgents = new Set(); hiItems = new Set();
@@ -316,6 +347,67 @@ function computeHighlight(){
   }
 }
 /* frame everything currently highlighted */
+/* one predicate for both provenances: a typed query matches text, an agent's
+   list matches membership */
+function filterMatches(kind, node){
+  const f = view.filter;
+  if (f.kind === 'agent') return f.ids.has(kind === 'i' ? node.id : node.id);
+  const q = f.query;
+  if (!q) return false;
+  const hay = kind === 'i' ? ((node.title || '') + ' ' + node.id)
+                           : ((node.name || '') + ' ' + node.id);
+  return hay.toLowerCase().includes(q);
+}
+
+function filteredView(){
+  const pts = [];
+  selectables().forEach(m => {
+    const u = m.userData;
+    const on = u.w ? hiItems?.has(u.w.id) : (u.a && hiAgents?.has(u.a.id));
+    if (on) pts.push(m.position);
+  });
+  if (!pts.length) return null;
+  const c = new THREE.Vector3();
+  pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
+  let r = 3; pts.forEach(v => r = Math.max(r, v.distanceTo(c)));
+  return { center: c, radius: r, count: pts.length };
+}
+
+/* apply a filter and frame what it found */
+function setFilter(kind, {query = '', ids = null} = {}){
+  view.filter = { kind, query: (query || '').toLowerCase().trim(), ids: ids ? new Set(ids) : null };
+  if (kind === 'none'){ view.filter.query = ''; view.filter.ids = null; }
+  applyView();
+  renderSearchChrome();
+  const nb = kind === 'none' ? null : filteredView();
+  if (nb){
+    const dir = camera.position.clone().sub(nb.center); dir.y = 0;
+    if (dir.lengthSq() < .01) dir.set(1, 0, 1);
+    const fov = camera.fov * Math.PI / 180;
+    dir.normalize().multiplyScalar((nb.radius / Math.tan(fov / 2)) / Math.min(1, camera.aspect) + 8);
+    const camPos = nb.center.clone().add(dir);
+    camPos.y = nb.center.y + nb.radius * .8 + 5;
+    view.framing = 'filter'; userMoved = true;
+    flyTo(camPos, nb.center.clone(), () => {
+      const d = camPos.clone().sub(nb.center);
+      orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+      orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(nb.center);
+      userMoved = false;
+    });
+  }
+}
+function renderSearchChrome(){
+  const f = view.filter;
+  document.getElementById('searchpill').style.display = f.kind === 'agent' ? 'inline-block' : 'none';
+  const box = document.getElementById('search');
+  if (f.kind === 'agent') box.value = '';
+  box.placeholder = f.kind === 'agent' ? 'agent-supplied selection — clear to release'
+                                       : 'filter — / to focus, esc to clear';
+  const n = (hiItems?.size || 0) + (hiAgents?.size || 0);
+  document.getElementById('searchcount').textContent =
+    f.kind === 'none' ? '' : (n ? n + ' shown' : 'no match');
+}
+
 function neighbourhoodView(){
   const pts = [];
   itemMeshes.forEach(m => { if (m.userData.w && hiItems && hiItems.has(m.userData.w.id)) pts.push(m.position); });
@@ -648,6 +740,25 @@ tagInput.addEventListener('keydown', e => {
   } else if (e.key === 'Escape'){ hideTagBox(); }
 });
 
+/* ---------- search box ----------
+   Typing sets a user filter. Emptying the box clears whatever filter is in
+   force, including one an agent supplied — the field is the release valve for
+   both. */
+const searchEl = document.getElementById('search');
+let searchTimer = null;
+searchEl.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  const raw = searchEl.value.trim();
+  searchTimer = setTimeout(() => {
+    if (!raw) setFilter('none');
+    else setFilter('user', {query: raw});
+  }, 220);                                   /* settle before re-framing */
+});
+searchEl.addEventListener('keydown', e => {
+  e.stopPropagation();                       /* canvas hotkeys are not for typing */
+  if (e.key === 'Escape'){ searchEl.value = ''; setFilter('none'); searchEl.blur(); }
+});
+
 /* ---------- control plane ----------
    A small API lets anything drive this view: read the selection, focus a node,
    select by id, fit, and attach tags. We poll it for commands we have not seen
@@ -703,7 +814,7 @@ async function apiLoop(){
     await new Promise(r => setTimeout(r, 1000));
   }
 }
-let lastReport = '';
+let lastReport = '', reportSkips = 0;
 async function apiReportSelection(){
   if (!apiUp) return;
   const sel = [...view.selection].map(k => {
@@ -713,7 +824,11 @@ async function apiReportSelection(){
     return {id, type: kind === 'i' ? 'item' : 'agent', title: w ? w.title : (a ? a.name : null)};
   });
   const body = JSON.stringify({clientId: CLIENT_ID, selection: sel});
-  if (body === lastReport) return;               /* do not fight other pages with no news */
+  /* Re-assert periodically even when unchanged. Selection is last-writer-wins
+     across pages, so a page that goes quiet can be overwritten by another and
+     would otherwise never correct the record. */
+  if (body === lastReport && ++reportSkips < 5) return;
+  reportSkips = 0;
   try {
     await apiFetch('/selection', {method:'POST', headers:{'content-type':'application/json'}, body});
     lastReport = body;
@@ -743,6 +858,9 @@ function applyCommand(c){
     applyView();
     const m = focusMesh();
     if (m) flyToNode(m);
+  } else if (c.kind === 'filter'){
+    if (c.clear || !(c.ids || []).length) setFilter('none');
+    else setFilter('agent', {ids: c.ids});
   } else if (c.kind === 'fit'){
     if (c.on) fitSelection(); else if (camMark) restoreCamera();
   }
@@ -789,6 +907,7 @@ async function refresh(){
 /* ---------- theme toggle ---------- */
 addEventListener('keydown', e=>{
   if (e.target && e.target.tagName === 'INPUT') return;
+  if (e.key === '/'){ e.preventDefault(); searchEl.focus(); searchEl.select(); return; }
   if (e.key==='c' || e.key==='C'){ apiClearTags(); }
   else if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
   else if (e.key==='s' || e.key==='S'){ setInputMode(view.input==='brush' ? 'navigate' : 'brush'); }
@@ -872,7 +991,7 @@ addEventListener('pointermove', e=>{
   if (!hit){ tip.style.display='none'; return; }
   const u = hit.object.userData;
   if (!u.type){ tip.style.display='none'; return; }
-  if (view.input !== 'brush' && view.focus.stage >= 1 && hiAgents){   /* outside the neighbourhood: dead to hover */
+  if (view.input !== 'brush' && hiAgents){   /* outside the neighbourhood: dead to hover */
     const inside = u.type === 'item' ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
     if (!inside){ tip.style.display='none'; return; }
   }
@@ -1093,7 +1212,7 @@ function fitSelection(){
   selectables().forEach(m => {
     const k = selKey(m);
     if (k && view.selection.has(k)) selPts.push(m.position);
-    if (view.focus.stage >= 1 && hiAgents){
+    if (hiAgents){
       const u = m.userData;
       const inside = u.w ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
       if (inside) focusPts.push(m.position);
@@ -1153,7 +1272,7 @@ function tickFrame(){
                         orbitTgt.z + Math.cos(orbitAngle)*orbitR);
     controls.target.copy(orbitTgt); camera.lookAt(orbitTgt);
   }
-  const dimming = view.focus.stage >= 1 && hiAgents;
+  const dimming = !!hiAgents;
   const fa = id => (!dimming || hiAgents.has(id)) ? 1 : DIM;
   const fi = id => (!dimming || hiItems.has(id)) ? 1 : DIM;
   const bg = new THREE.Color(T.bg);

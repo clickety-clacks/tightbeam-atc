@@ -41,6 +41,7 @@ what is selected, focus a node, and pin short tags onto agents and work items.
 | key | |
 |---|---|
 | `T` | light / dark |
+| `/` | search — ghosts everything unmatched and frames the rest |
 | `S` | select mode — drag a circular brush across nodes |
 | `[` `]` | brush radius |
 | `D` | clear selection |
@@ -52,6 +53,12 @@ what is selected, focus a node, and pin short tags onto agents and work items.
 Click a node to focus it and fade the rest; click again for its neighbourhood;
 click the background to reset. While a single node is focused, a box appears for
 typing a tag onto it.
+
+**Search is deliberately asymmetric.** A human types a query and everything
+unmatched ghosts, with the camera framing what remains. An agent achieves the
+same display by supplying a list of ids to `/api/filter` — identical ghosting
+and framing, but the box shows an *agent search* pill so it is never mistaken
+for something you typed. Emptying the box releases either kind.
 
 ## Requirements
 
@@ -132,6 +139,7 @@ you mean otherwise.
 | `POST` | `/api/select` | `{add:[id], remove:[id], clear:bool}` |
 | `POST` | `/api/focus` | `{id, mode:"single"\|"neighborhood"\|"clear"}` |
 | `POST` | `/api/fit` | `{on:bool}` |
+| `POST` | `/api/filter` | `{ids:[id]}` or `{clear:true}` — ghost everything else |
 | `GET` | `/api/tags` | `[{tagId, target, text, source, at}]` |
 | `POST` | `/api/tags` | `{tags:[{target, text, source:"agent"\|"user"}]}` |
 | `DELETE` | `/api/tags` | clear all |
@@ -167,8 +175,9 @@ looking at, tag what it found, and frame something when asked. It carries the
 etiquette as well — read the selection before choosing your own subject, prefer
 tagging over seizing the camera, say what you tagged, and clean up afterwards.
 
-    mkdir -p ~/.claude/skills/tightbeam-atc
+    mkdir -p ~/.claude/skills/tightbeam-atc ~/.codex/skills/tightbeam-atc
     cp skill/SKILL.md ~/.claude/skills/tightbeam-atc/
+    cp skill/SKILL.md ~/.codex/skills/tightbeam-atc/
 
 Adjust the host and port inside it if you did not use the defaults.
 

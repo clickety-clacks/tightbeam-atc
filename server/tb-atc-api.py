@@ -14,6 +14,7 @@ what it currently has selected. External callers use the verbs below.
     POST   /api/select                   {add:[id], remove:[id], clear:bool}
     POST   /api/focus                    {id, mode:"single"|"neighborhood"|"clear"}
     POST   /api/fit                      {on:bool}
+    POST   /api/filter                   {ids:[id]} | {clear:true}
     GET    /api/tags                     [{tagId, target, text, source, at}]
     POST   /api/tags                     {tags:[{target, text, source}]}
     DELETE /api/tags                     clear all
@@ -212,6 +213,16 @@ class Handler(BaseHTTPRequestHandler):
                     out = ({"error": "id required"}, 400)
                 else:
                     out = (push("focus", id=clip(b.get("id"), MAX_ID), mode=mode), 200)
+
+            if u.path == "/api/filter":
+                # an agent's filter is a membership list; the page ghosts
+                # everything outside it exactly as a typed query does
+                if b.get("clear"):
+                    out = (push("filter", ids=[], clear=True), 200)
+                else:
+                    ids = id_list(b.get("ids"))
+                    out = ((({"error": "ids required"}), 400) if not ids
+                           else (push("filter", ids=ids, clear=False), 200))
 
             if u.path == "/api/fit":
                 out = (push("fit", on=bool(b.get("on", True))), 200)
