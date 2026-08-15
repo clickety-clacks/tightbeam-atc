@@ -1366,7 +1366,11 @@ function tickFrame(){
       const f = fa(u.a.id);
       if (!u.selected){ shade(m.material, u.baseFill, f); if (u.lineMat) shade(u.lineMat, u.baseStroke, f); }
       u.dim = f;
-      m.children.forEach(ch => { if (ch.isSprite) ch.material.opacity = (ch.userData.isTag ? 1 : .85) * f; });
+      m.children.forEach(ch => {
+        if (!ch.isSprite) return;
+        ch.visible = f > .9;                       /* same rule as items */
+        ch.material.opacity = (ch.userData.isTag ? 1 : .85) * f;
+      });
     }
     if (u && u.flash && u.lineMat){
       const fast = u.flash==='run';
@@ -1387,7 +1391,15 @@ function tickFrame(){
     m.children.forEach(ch=>{
       /* an item's tag must ghost with its node, or a dimmed scene keeps a
          bright label floating over nothing */
-      if (ch.isSprite){ ch.material.opacity = (u.dim ?? 1); return; }
+      /* Geometry ghosts by lerping into the background and all but vanishes.
+         A label at the same factor is still perfectly legible, so it reads as
+         unfaded next to its own node — ghosted tags drop out entirely. */
+      if (ch.isSprite){
+        const f = u.dim ?? 1;
+        ch.visible = f > .9;
+        ch.material.opacity = f;
+        return;
+      }
       if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=(.4+Math.abs(Math.sin(t*3))*.5)*(u.dim ?? 1); const sc=1+Math.sin(t*3)*.18; ch.scale.set(sc,sc,sc); }
       if (ch.userData.act==='run'){ ch.material.opacity = (.04 + (0.5+0.5*Math.sin(t*2.2))*.18) * (u.dim ?? 1); }
       if (ch.userData.orphanRing){ ch.lookAt(camera.position); ch.material.opacity = .55 * (u.dim ?? 1); }
