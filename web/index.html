@@ -792,6 +792,11 @@ function frameCurrentScope(){
 function popScope(){
   if (view.focus.stage >= 1){
     clearFocus();                        /* clearFocus re-derives the lighting */
+    /* The parent of a focus is whatever framed the camera before it. Since a
+       fit no longer isolates, nothing is lit-restricted underneath it, and
+       asking what is lit answered "everything" — so leaving a focus flew the
+       camera out to the whole org while the bar still read FIT. */
+    if (view.fit && view.selection.size){ refitToSelection(); return true; }
     return frameCurrentScope();
   }
   if (view.fit){                         /* then the fit */
