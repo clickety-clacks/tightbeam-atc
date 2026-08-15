@@ -358,6 +358,22 @@ function computeHighlight(){
 /* frame everything currently highlighted */
 /* one predicate for both provenances: a typed query matches text, an agent's
    list matches membership */
+/* A node's visible extent is not just its centre: tags sit above it and run
+   sideways, so a fit computed from centres alone crops them at the edge of the
+   viewport. Contribute the tag corners too. */
+const _fp = new THREE.Vector3();
+function fitPoints(m, out){
+  out.push(m.position.clone());
+  (m.userData.tagSprites || []).forEach(sp => {
+    if (!sp.visible) return;
+    sp.getWorldPosition(_fp);
+    const rx = sp.scale.x * .5, ry = sp.scale.y * .5;
+    out.push(_fp.clone().add(new THREE.Vector3( rx, 0, 0)));
+    out.push(_fp.clone().add(new THREE.Vector3(-rx, 0, 0)));
+    out.push(_fp.clone().add(new THREE.Vector3(0, ry, 0)));
+  });
+}
+
 function filterMatches(kind, node){
   const f = view.filter;
   if (f.kind === 'agent') return f.ids.has(kind === 'i' ? node.id : node.id);
@@ -373,7 +389,7 @@ function filteredView(){
   selectables().forEach(m => {
     const u = m.userData;
     const on = u.w ? hiItems?.has(u.w.id) : (u.a && hiAgents?.has(u.a.id));
-    if (on) pts.push(m.position);
+    if (on) fitPoints(m, pts);
   });
   if (!pts.length) return null;
   const c = new THREE.Vector3();
@@ -421,8 +437,8 @@ function renderSearchChrome(){
 
 function neighbourhoodView(){
   const pts = [];
-  itemMeshes.forEach(m => { if (m.userData.w && hiItems && hiItems.has(m.userData.w.id)) pts.push(m.position); });
-  Object.entries(agentMeshes).forEach(([id,m]) => { if (hiAgents && hiAgents.has(id)) pts.push(m.position); });
+  itemMeshes.forEach(m => { if (m.userData.w && hiItems && hiItems.has(m.userData.w.id)) fitPoints(m, pts); });
+  Object.entries(agentMeshes).forEach(([id,m]) => { if (hiAgents && hiAgents.has(id)) fitPoints(m, pts); });
   if (!pts.length) return null;
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1/pts.length);
@@ -1258,11 +1274,15 @@ function flyToNode(o){
     camPos.y = nb.center.y + nb.radius * 1.1 + 6;
     flyTo(camPos, nb.center);
   } else {
-    const pt = o.position.clone();
+    const pts = []; fitPoints(o, pts);
+    const pt = new THREE.Vector3();
+    pts.forEach(v => pt.add(v)); pt.multiplyScalar(1 / pts.length);
+    let r = 1.2; pts.forEach(v => r = Math.max(r, v.distanceTo(pt)));
     const dir = camera.position.clone().sub(pt); dir.y = 0;
     if (dir.lengthSq() < .01) dir.set(1,0,1);
-    dir.normalize().multiplyScalar(9);
-    const camPos = pt.clone().add(dir); camPos.y = pt.y + 4.5;
+    const fov = camera.fov * Math.PI / 180;
+    dir.normalize().multiplyScalar(Math.max(9, (r / Math.tan(fov / 2)) / Math.min(1, camera.aspect) + 4));
+    const camPos = pt.clone().add(dir); camPos.y = pt.y + Math.max(4.5, r * .8);
     flyTo(camPos, pt);
   }
   showTagBox();
@@ -1293,11 +1313,11 @@ function fitSelection(){
   const selPts = [], focusPts = [];
   selectables().forEach(m => {
     const k = selKey(m);
-    if (k && view.selection.has(k)) selPts.push(m.position);
+    if (k && view.selection.has(k)) fitPoints(m, selPts);
     if (hiAgents){
       const u = m.userData;
       const inside = u.w ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
-      if (inside) focusPts.push(m.position);
+      if (inside) fitPoints(m, focusPts);
     }
   });
   if (!focusPts.length){ const fm = focusMesh(); if (fm) focusPts.push(fm.position); }
@@ -1308,7 +1328,7 @@ function fitSelection(){
      first press to the view you were already looking at. */
   view.fitTarget = selPts.length ? 'selection' : 'focus';
   let pts = selPts.length ? selPts : focusPts;
-  if (!pts.length){ pts = []; selectables().forEach(m => pts.push(m.position)); }
+  if (!pts.length){ pts = []; selectables().forEach(m => fitPoints(m, pts)); }
   if (!pts.length) return false;
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
