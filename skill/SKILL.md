@@ -92,8 +92,12 @@ curl -s -X POST localhost:8787/api/filter -H 'content-type: application/json' \
   -d '{"clear":true}'
 ```
 
-They can clear it themselves by emptying the search box, so a filter you leave
-behind is a nuisance rather than a trap — but clear it anyway when done.
+They can clear it themselves with the × in the search box, so a filter you
+leave behind is a nuisance rather than a trap — but clear it anyway when done.
+
+One consequence worth knowing: while a filter or focus is in force, the human's
+brush can only reach what that scope shows. Narrowing the view narrows what
+they can select, so do not leave a filter on a view you have handed back.
 
 ## Tags
 

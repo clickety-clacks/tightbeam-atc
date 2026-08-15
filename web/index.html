@@ -87,6 +87,13 @@
     border-radius:3px; padding:2px 6px; white-space:nowrap; }
   #searchcount { font-size:10px; letter-spacing:.1em; text-transform:uppercase;
     color:#7c8188; white-space:nowrap; }
+  #searchclear { display:none; flex:0 0 auto; width:15px; height:15px;
+    border-radius:50%; border:0; padding:0; cursor:pointer; line-height:15px;
+    text-align:center; font-size:11px; font-family:inherit;
+    background:#3a3d42; color:#d8d6d1; pointer-events:auto; }
+  #searchclear:hover { background:#4c5158; }
+  body.light #searchclear { background:#c3cdd8; color:#26323c; }
+  body.light #searchclear:hover { background:#aab8c6; }
   body.light #searchwrap { background:#f2eee2e8; border-color:#c3cdd8; }
   body.light #search { color:#26323c; }
   body.light #searchpill { background:#2f6fb5; color:#fff; }
@@ -114,6 +121,7 @@
     <span id="searchpill">agent search</span>
     <input id="search" type="text" placeholder="filter — / to focus, esc to clear" autocomplete="off">
     <span id="searchcount"></span>
+    <button id="searchclear" title="clear (esc)" aria-label="clear search">×</button>
   </div>
   <div id="topright">
     <div id="themehint">/ search · S select · T theme · L legend · C tags</div>
@@ -406,6 +414,8 @@ function renderSearchChrome(){
   const n = (hiItems?.size || 0) + (hiAgents?.size || 0);
   document.getElementById('searchcount').textContent =
     f.kind === 'none' ? '' : (n ? n + ' shown' : 'no match');
+  document.getElementById('searchclear').style.display =
+    (f.kind !== 'none' || box.value) ? 'block' : 'none';
 }
 
 function neighbourhoodView(){
@@ -745,8 +755,16 @@ tagInput.addEventListener('keydown', e => {
    force, including one an agent supplied — the field is the release valve for
    both. */
 const searchEl = document.getElementById('search');
+const searchClearBtn = document.getElementById('searchclear');
 let searchTimer = null;
+function releaseFilter(){
+  searchEl.value = '';
+  setFilter('none');
+  searchEl.blur();
+}
+searchClearBtn.addEventListener('click', releaseFilter);
 searchEl.addEventListener('input', () => {
+  searchClearBtn.style.display = searchEl.value ? 'block' : 'none';
   clearTimeout(searchTimer);
   const raw = searchEl.value.trim();
   searchTimer = setTimeout(() => {
@@ -756,7 +774,10 @@ searchEl.addEventListener('input', () => {
 });
 searchEl.addEventListener('keydown', e => {
   e.stopPropagation();                       /* canvas hotkeys are not for typing */
-  if (e.key === 'Escape'){ searchEl.value = ''; setFilter('none'); searchEl.blur(); }
+  if (e.key === 'Escape'){ releaseFilter(); }
+  /* Enter hands the keyboard back to the canvas: the filter is already applied
+     as you type, so the hotkeys should work again without a stray click */
+  else if (e.key === 'Enter'){ searchEl.blur(); }
 });
 
 /* ---------- control plane ----------
@@ -936,6 +957,8 @@ window.__atc = {
   get tags(){ return tags; },
   get data(){ return DATA; },
   get apiUp(){ return apiUp; },
+  get scope(){ return {items: hiItems && [...hiItems], agents: hiAgents && [...hiAgents]}; },
+  inScope,
   pull: apiPull,
 };
 apiLoop();
@@ -1095,10 +1118,19 @@ function applyView(){
   });
   document.getElementById('selcount').textContent = view.selection.size;
 }
+/* Whatever is ghosted is out of play. With no focus or filter the brush can
+   reach anything; inside a focus or a filter it can only reach what that scope
+   is showing, which is the same rule hover already follows. */
+function inScope(m){
+  if (!hiAgents) return true;
+  const u = m.userData;
+  return u.w ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
+}
 function paintAt(px, py){
   const r2 = selRadius * selRadius;
   const hits = [];
   selectables().forEach(m => {
+    if (!inScope(m)) return;
     const [x, y, z] = screenXY(m);
     if (z > 1) return;                                  /* behind the camera */
     const dx = x - px, dy = y - py;

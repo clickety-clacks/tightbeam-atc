@@ -42,6 +42,7 @@ what is selected, focus a node, and pin short tags onto agents and work items.
 |---|---|
 | `T` | light / dark |
 | `/` | search — ghosts everything unmatched and frames the rest |
+| `Esc` | in the search box: release the filter (the × button does the same) |
 | `S` | select mode — drag a circular brush across nodes |
 | `[` `]` | brush radius |
 | `D` | clear selection |
@@ -53,6 +54,10 @@ what is selected, focus a node, and pin short tags onto agents and work items.
 Click a node to focus it and fade the rest; click again for its neighbourhood;
 click the background to reset. While a single node is focused, a box appears for
 typing a tag onto it.
+
+**Selection follows scope.** With nothing focused or filtered the brush reaches
+anything; inside a focus or a filter it can only reach what that scope is
+showing, which is the same rule hover follows. Narrow first, then brush.
 
 **Search is deliberately asymmetric.** A human types a query and everything
 unmatched ghosts, with the camera framing what remains. An agent achieves the
