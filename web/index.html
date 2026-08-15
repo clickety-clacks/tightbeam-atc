@@ -42,8 +42,13 @@
   body.light #stack .chip { background:#f2eee2e8; }
   /* The pile of searches that have been run. Newest on top, because that is
      the one most likely to be wanted back. */
+  /* The top bar ignores the mouse so the scene can be orbited through it, and
+     anything meant to be clicked has to opt back in. Without this the cards
+     looked interactive and were not: clicks fell through to the canvas, where
+     they read as background clicks and popped a layer — which is exactly what
+     "the x does nothing and the display jitters" was. */
   #cards { display:flex; flex-direction:column; gap:4px; align-items:flex-end;
-    max-height:34vh; overflow-y:auto; }
+    max-height:34vh; overflow-y:auto; pointer-events:auto; }
   #cards:empty { display:none; }
   #cards .card { display:inline-flex; align-items:center; gap:8px; cursor:pointer;
     font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
