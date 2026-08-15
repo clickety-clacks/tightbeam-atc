@@ -63,6 +63,28 @@
     #hud, #themehint, #selui { letter-spacing:.08em; font-size:10px; }
   }
 
+  /* Hovering shows a transient card; focusing one node promotes the same
+     content to a pane that owns the right edge — or the bottom in portrait,
+     where horizontal room is the scarce thing. */
+  #detail { position:fixed; z-index:7; display:none; box-sizing:border-box;
+    top:76px; right:18px; width:min(380px, 34vw); max-height:calc(100vh - 190px);
+    overflow:auto; background:#1b1e22f2; border:1px solid #3a3d42;
+    border-left:3px solid #b08d57; border-radius:5px; padding:12px 14px;
+    color:#d8d6d1; font-size:12.5px; line-height:1.55; }
+  #detail .t { color:#b08d57; font-weight:650; font-size:13px; display:block; margin-bottom:6px; }
+  #detail .seg { color:#9a9ea6; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
+  #detail .k { color:#7c8188; text-transform:uppercase; letter-spacing:.12em;
+    font-size:9.5px; display:block; margin:10px 0 3px; }
+  body.light #detail { background:#faf7eef7; border-color:#b8c7d9;
+    border-left-color:#c23b22; color:#26323c; }
+  body.light #detail .t { color:#c23b22; }
+  body.light #detail .seg, body.light #detail .k { color:#5c6b78; }
+  @media (max-aspect-ratio: 1/1){
+    #detail { top:auto; left:18px; right:18px; width:auto;
+      bottom:calc(14px + env(safe-area-inset-bottom)); max-height:42vh; }
+  }
+  /* five lines then an ellipsis — never a silent trim */
+  .clamp5 { display:-webkit-box; -webkit-line-clamp:5; -webkit-box-orient:vertical; overflow:hidden; }
   #tagbox { position:fixed; z-index:7; display:none; background:#1b1e22f2;
     border:1px solid #3a3d42; border-left:3px solid #b08d57; border-radius:5px;
     padding:9px 11px; color:#9a9ea6; font-size:11px; letter-spacing:.06em;
@@ -135,6 +157,7 @@
 </div>
 <div id="legend"></div>
 <div id="tip"></div>
+<div id="detail"></div>
 <div id="tagbox">tag <span class="who"></span><input id="taginput" type="text"
   placeholder="type a note, enter to attach" maxlength="80"><div id="tagswatches"></div></div>
 <div id="selcursor"></div>
@@ -829,7 +852,8 @@ function positionTagBox(){
   const r = tagBox.getBoundingClientRect();
   tagBox.style.left = Math.round(Math.min(Math.max(10, x - r.width / 2),
                                           innerWidth - r.width - 10)) + 'px';
-  tagBox.style.top  = Math.round(Math.min(y + 26, innerHeight - r.height - 10)) + 'px';
+  /* clear of the node, not sitting on it */
+  tagBox.style.top  = Math.round(Math.min(y + 74, innerHeight - r.height - 10)) + 'px';
 }
 tagInput.addEventListener('keydown', e => {
   e.stopPropagation();                       /* the canvas hotkeys are not for typing */
@@ -1144,6 +1168,43 @@ function pickNode(ev){
   return null;
 }
 
+/* Hover card and focus pane render the same facts; only the surface differs. */
+function nodeContent(u, clamp){
+  if (u.type === 'item'){
+    const w = u.w;
+    const segs = SEGS.map((x,i)=>(i<w.stage?'●':'○')+' '+x).join('<br>');
+    const acts = Object.entries(w.turns||{}).map(([h,st])=>
+      (st==='run'?'▶ ':'⏸ ')+(byId[h]?byId[h].name:h)).join('<br>') || 'no turns active';
+    const merged = w.merged === true ? 'in the branch'
+                 : w.merged === false ? 'NOT in the branch'
+                 : (w.code ? 'branch state unknown' : 'nothing to merge');
+    return '<span class="t">' + w.id + '</span>'
+      + '<div' + (clamp ? ' class="clamp5"' : '') + '>' + w.title + '</div>'
+      + '<span class="k">state</span>' + STAGE_NAMES[w.stage] + ' · ' + merged
+      + ((w.holders||[]).length ? '' : ' · ORPHANED')
+      + '<span class="k">evidence</span><span class="seg">' + segs + '</span>'
+      + '<span class="k">turns</span><span class="seg">' + acts + '</span>';
+  }
+  const a = u.a;
+  const held = ((DATA&&DATA.items)||[]).filter(w=>(w.holders||[]).includes(a.id) && w.stage<6).length;
+  const idle = a.idleFor == null ? 'never acted'
+    : a.idleFor < 90 ? 'acting now'
+    : a.idleFor < 3600 ? Math.round(a.idleFor/60) + ' min idle'
+    : Math.round(a.idleFor/3600) + ' h idle';
+  return '<span class="t">' + a.name + '</span>'
+    + '<span class="k">state</span>' + (a.retired?'retired (holds open cards)':'active') + ' · ' + idle
+    + (a.turn==='run'?' · turn running':a.turn==='wait'?' · turn queued':'')
+    + '<span class="k">workload</span>' + held + ' open item' + (held===1?'':'s')
+    + '<span class="k">id</span><span class="seg">' + a.id + '</span>';
+}
+const detailEl = document.getElementById('detail');
+function renderDetail(){
+  const m = view.focus.stage === 1 ? focusMesh() : null;
+  if (!m){ detailEl.style.display = 'none'; return; }
+  detailEl.innerHTML = nodeContent(m.userData, false);
+  detailEl.style.display = 'block';
+}
+
 /* ---------- tooltip ---------- */
 const ray = new THREE.Raycaster(), mouse = new THREE.Vector2(), tip = document.getElementById('tip');
 addEventListener('pointermove', e=>{
@@ -1156,26 +1217,7 @@ addEventListener('pointermove', e=>{
     if (!inside){ tip.style.display='none'; return; }
   }
   tip.style.display='block'; tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY+10)+'px';
-  if (u.type==='item'){
-    const w=u.w;
-    const segs = SEGS.map((s,i)=>(i<w.stage?'●':'○')+' '+s).join('<br>');
-    const acts = Object.entries(w.turns||{}).map(([h,st])=>
-      (st==='run'?'▶ ':'⏸ ')+(byId[h]?byId[h].name:h)
-    ).join('<br>') || 'no turns active';
-    tip.innerHTML = '<div class="t">'+w.id+' — '+w.title+'</div>'
-      +'<div>'+STAGE_NAMES[w.stage]+(!(w.holders||[]).length?' · ORPHANED':'')+'</div>'
-      +(w.stage>=5&&w.stage<6&&w.merged===true?'<div>in the branch · awaiting closure</div>':'')
-      +(w.stage>=5&&w.stage<6&&w.code===false?'<div>no code to merge · awaiting closure</div>':'')
-      +(w.stage>=5&&w.code!==false&&w.merged===false?'<div>NOT in the branch · merge pending</div>':'')
-      +(w.stage>=5&&w.stage<6&&w.code&&w.merged==null?'<div>no commit that resolves in the repo · cannot verify</div>':'')
-      +'<div class="seg">'+segs+'</div><div style="margin-top:4px" class="seg">'+acts+'</div>';
-  } else {
-    const a=u.a;
-    const held = ((DATA&&DATA.items)||[]).filter(w=>(w.holders||[]).includes(a.id) && w.stage<6).length;
-    tip.innerHTML = '<div class="t">'+a.name+'</div><div>'+(a.retired?'retired (holds open cards)':'active')
-      +(a.turn==='run'?' · turn running':a.turn==='wait'?' · turn queued':'')
-      +' · on '+held+' open item'+(held===1?'':'s')+'</div>';
-  }
+  tip.innerHTML = nodeContent(u, true);
 });
 
 /* ---------- select mode ----------
@@ -1249,6 +1291,7 @@ function buildTags(){
 
 function applyView(){
   computeHighlight();
+  if (typeof renderDetail === 'function') renderDetail();
   selectables().forEach(m => {
     const k = selKey(m);
     if (k) shadeSelected(m, view.selection.has(k));
@@ -1304,6 +1347,7 @@ function setInputMode(mode){
 function clearFocus(){
   view.focus.key = null; view.focus.stage = 0;
   if (typeof hideTagBox === 'function') hideTagBox();
+  if (typeof detailEl !== 'undefined') detailEl.style.display = 'none';
   view.framing = 'none';                 /* releases the camera to ambient orbit */
   applyView();                           /* focus drives dimming: re-derive now */
 }
@@ -1357,8 +1401,21 @@ function flyToNode(o){
     const dir = camera.position.clone().sub(pt); dir.y = 0;
     if (dir.lengthSq() < .01) dir.set(1,0,1);
     const fov = camera.fov * Math.PI / 180;
-    dir.normalize().multiplyScalar(Math.max(9, (r / Math.tan(fov / 2)) / Math.min(1, camera.aspect) + 4));
+    const dist = Math.max(9, (r / Math.tan(fov / 2)) / Math.min(1, camera.aspect) + 4);
+    dir.normalize().multiplyScalar(dist);
     const camPos = pt.clone().add(dir); camPos.y = pt.y + Math.max(4.5, r * .8);
+    /* The pane covers part of the viewport, so bias the framing away from it:
+       the node lands in the space that stays visible rather than behind the
+       card describing it. Left in landscape, high in portrait. */
+    const portrait = innerHeight > innerWidth;
+    const paneFrac = portrait ? .40 : Math.min(380, innerWidth * .34) / innerWidth;
+    const shift = Math.tan(fov / 2) * dist * camera.aspect * paneFrac;
+    if (portrait){
+      camPos.y += shift * .5; pt.y += shift * .5;
+    } else {
+      const right = new THREE.Vector3().subVectors(camPos, pt).cross(camera.up).normalize();
+      camPos.addScaledVector(right, -shift); pt.addScaledVector(right, -shift);
+    }
     flyTo(camPos, pt);
   }
   showTagBox();

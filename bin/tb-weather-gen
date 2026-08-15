@@ -146,7 +146,7 @@ for k, r in sess.items():
         kind = "po"
     agents.append({
         "id": ids[k],
-        "name": (r["displayName"] or k)[:48],
+        "name": (r["displayName"] or k)[:120],
         "kind": kind,
         "parent": ids.get(r["spawnedBy"]),
         "retired": r["state"] != "active",
@@ -255,7 +255,9 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
     flow = {aid: ("in" if (tgt is None or sk == tgt) else "out")
             for aid, sk in turn_sk.items()}
     is_code = True if code_items is None else (wid in code_items or bool(prod_refs))
-    items.append({"id": wid[:11], "title": (r["title"] or "")[:60],
+    # the page decides how much of a title to show; truncating here threw the
+    # rest away before anything could ask for it
+    items.append({"id": wid[:11], "title": (r["title"] or "")[:2000],
                   "stage": stage, "holders": holders, "turns": turns, "flow": flow,
                   # nothing to merge means no merge state, not a green ring
                   "closedAt": closed_at,
