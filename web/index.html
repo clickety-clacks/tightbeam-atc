@@ -555,7 +555,11 @@ function frameDistance(pts, center, e, {margin = 1.10, usableH = 1, usableV = 1}
 function clearRect(){
   const vw = innerWidth, vh = innerHeight;
   const r = {left: 0, right: vw, top: 0, bottom: vh};
-  document.querySelectorAll('#topbar, #legend, #detail, #tagbox').forEach(el => {
+  /* Only chrome pinned to an edge belongs here. The tag composer follows the
+     focused node's SCREEN position, so measuring it closed a loop: the offset
+     moved the node, the node moved the box, the box changed the offset. In
+     single focus that walked the camera hundreds of pixels across the view. */
+  document.querySelectorAll('#topbar, #legend, #detail').forEach(el => {
     const cs = getComputedStyle(el);
     if (cs.display === 'none' || cs.visibility === 'hidden') return;
     const b = el.getBoundingClientRect();
