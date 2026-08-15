@@ -328,32 +328,73 @@ function drawTagIcon(ctx, kind, cx, cy, r, color){
   ctx.restore();
 }
 
+/* Canvas pixels per world unit. Raising it shrinks every card on screen
+   without touching its resolution — the text is still drawn at 34px and stays
+   crisp, it simply occupies less of the world. */
+const TAG_PX_PER_UNIT = 80;
+const TAG_LINE_PX = 44;              /* baseline-to-baseline inside the card */
+const TAG_WRAP_PX = 680;             /* wrap past this: a long single line drew
+                                        a card wider than the org it sits over.
+                                        Roughly forty characters, so the 80 a
+                                        tag may hold becomes two lines, not four */
+
+function wrapTag(ctx, text, first, rest){
+  const words = String(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  const room = () => (lines.length ? rest : first);
+  for (const word of words){
+    const trial = line ? line + ' ' + word : word;
+    if (ctx.measureText(trial).width <= room() || !line){ line = trial; continue; }
+    lines.push(line); line = word;
+  }
+  if (line) lines.push(line);
+  /* a single unbroken run longer than the card can be split anywhere or not
+     at all, so split it rather than letting one word set the width */
+  const out = [];
+  for (const l of lines){
+    if (ctx.measureText(l).width <= (out.length ? rest : first)){ out.push(l); continue; }
+    let cur = '';
+    for (const ch of l){
+      if (ctx.measureText(cur + ch).width > (out.length ? rest : first) && cur){ out.push(cur); cur = ch; }
+      else cur += ch;
+    }
+    if (cur) out.push(cur);
+  }
+  return out;
+}
+
 function tagSprite(text, source, color){
   const c = document.createElement('canvas'), ctx = c.getContext('2d');
   const font = '600 34px ui-sans-serif, -apple-system, "Helvetica Neue", Arial, sans-serif';
   ctx.font = font;
   const ICON = 34;                                     /* space reserved for the mark */
-  const w = Math.ceil(ctx.measureText(text).width) + 26 + ICON;
-  c.width = w; c.height = 52;
-  const ctx2 = c.getContext('2d');
+  /* the mark sits on the first line, so that line has less room than the rest */
+  const lines = wrapTag(ctx, text, TAG_WRAP_PX - ICON, TAG_WRAP_PX);
+  const textW = Math.max(...lines.map((l, i) => ctx.measureText(l).width + (i ? 0 : ICON)));
+  const w = Math.ceil(textW) + 26;
+  const h = lines.length * TAG_LINE_PX + 14;
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
   const hot = (T.tag && T.tag[color]) || T.tag.neutral;
-  ctx2.fillStyle = T.tagBg;
-  ctx2.strokeStyle = hot; ctx2.lineWidth = 2;
+  g.fillStyle = T.tagBg;
+  g.strokeStyle = hot; g.lineWidth = 2;
   const r = 9;
-  ctx2.beginPath();
-  ctx2.moveTo(r,1); ctx2.lineTo(w-r,1); ctx2.quadraticCurveTo(w-1,1,w-1,r);
-  ctx2.lineTo(w-1,51-r); ctx2.quadraticCurveTo(w-1,51,w-r,51);
-  ctx2.lineTo(r,51); ctx2.quadraticCurveTo(1,51,1,51-r);
-  ctx2.lineTo(1,r); ctx2.quadraticCurveTo(1,1,r,1); ctx2.closePath();
-  ctx2.fill(); ctx2.stroke();
-  drawTagIcon(ctx2, source, 13 + ICON/2 - 4, 26, 11, hot);
-  ctx2.font = font; ctx2.textBaseline = 'middle'; ctx2.fillStyle = hot;
-  ctx2.fillText(text, 13 + ICON, 27);
+  g.beginPath();
+  g.moveTo(r,1); g.lineTo(w-r,1); g.quadraticCurveTo(w-1,1,w-1,r);
+  g.lineTo(w-1,h-1-r); g.quadraticCurveTo(w-1,h-1,w-r,h-1);
+  g.lineTo(r,h-1); g.quadraticCurveTo(1,h-1,1,h-1-r);
+  g.lineTo(1,r); g.quadraticCurveTo(1,1,r,1); g.closePath();
+  g.fill(); g.stroke();
+  const firstY = 7 + TAG_LINE_PX / 2;
+  drawTagIcon(g, source, 13 + ICON/2 - 4, firstY, 11, hot);
+  g.font = font; g.textBaseline = 'middle'; g.fillStyle = hot;
+  lines.forEach((l, i) => g.fillText(l, 13 + (i ? 0 : ICON), firstY + i * TAG_LINE_PX));
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({
     map: new THREE.CanvasTexture(c), transparent:true, depthTest:false }));
   sp.renderOrder = 12;
   sp.userData.isTag = true;
-  const h = 1.1; sp.scale.set(h * w / 52, h, 1);
+  sp.scale.set(w / TAG_PX_PER_UNIT, h / TAG_PX_PER_UNIT, 1);
   return sp;
 }
 
@@ -1453,9 +1494,14 @@ function buildTags(){
   tags.forEach(t => (byKey[selKeyFor(t.target)] ??= []).push(t));
   selectables().forEach(m => {
     const list = byKey[selKey(m)]; if (!list) return;
-    list.slice(0, 4).forEach((t, i) => {
+    let y = 1.5;
+    list.slice(0, 4).forEach(t => {
       const sp = tagSprite(t.text, t.source, t.color || 'neutral');
-      sp.position.set(0, 1.5 + i * 1.25, 0);
+      /* stack by actual height: a wrapped tag is two or three lines tall, and a
+         fixed step drew the next one straight through it */
+      y += sp.scale.y / 2;
+      sp.position.set(0, y, 0);
+      y += sp.scale.y / 2 + .16;
       m.add(sp); m.userData.tagSprites.push(sp);
     });
   });
@@ -1571,7 +1617,7 @@ function buildArrows(){
 
     if (ar.text){
       const glyphs = [...ar.text];
-      const H = .95;                                    /* glyph height, world */
+      const H = .68;                                    /* glyph height, world */
       const advances = glyphs.map(ch => glyphTexture(ch, hex).userData.advance * H + .06);
       const need = advances.reduce((x, y) => x + y, 0);
       if (need <= curve.getLength() * .74 && glyphs.length <= 42){
