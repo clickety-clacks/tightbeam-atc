@@ -21,7 +21,7 @@ Every signal is derived from durable rows: stages from attest kinds and
 verdicts, running turns from open rows in `turns`, queued turns from pending
 `wakes`, pulses from recently fired wakes. Nothing is estimated.
 """
-import json, os, re, sqlite3, subprocess, time
+import hashlib, json, os, re, sqlite3, subprocess, time
 from pathlib import Path
 
 BASE = Path(os.environ.get("TB_BASE_DIR", str(Path.home() / ".tightbeam")))
@@ -134,8 +134,13 @@ sess = {r["sessionKey"]: r for r in rows
 # so positional ids could not be used by anything outside this process; the
 # session's own suffix is stable and matches what the CLI shows.
 def _agent_id(session_key):
+    # hash() is salted per process, so a fallback id built from it changed on
+    # every run: that agent could never be selected, tagged or addressed, and
+    # its links churned with it. A digest is stable across processes.
     tail = session_key.rsplit(" ", 1)[-1]
-    return tail if tail.startswith("s_") else "a" + str(abs(hash(session_key)) % 10**8)
+    if tail.startswith("s_"):
+        return tail
+    return "a" + hashlib.blake2b(session_key.encode(), digest_size=4).hexdigest()
 ids = {k: _agent_id(k) for k in sess}
 agents = []
 for k, r in sess.items():
@@ -187,17 +192,46 @@ items = []
 # definition — a resolved item holds no open assignments, so keying landed
 # visibility off holders would hide every merge)
 LANDED_WINDOW = 72 * 3600 * 1000
-for r in q("""SELECT w.id, w.title, w.state FROM work_items w
-              WHERE w.state='open'
-                 OR (w.state='closed' AND (SELECT max(a.closedAt)
-                     FROM assignments a WHERE a.workItemId=w.id) > ?)
-              ORDER BY w.createdAt DESC LIMIT 400""", NOW - LANDED_WINDOW):
+rows = q("""SELECT w.id, w.title, w.state FROM work_items w
+            WHERE w.state='open'
+               OR (w.state='closed' AND (SELECT max(a.closedAt)
+                   FROM assignments a WHERE a.workItemId=w.id) > ?)
+            ORDER BY w.createdAt DESC LIMIT 400""", NOW - LANDED_WINDOW)
+
+# Everything the per-item loop needs, fetched in four set-based queries rather
+# than four per item. At ~230 items that was ~700 round trips and 2.5s; the
+# same facts cost a few dozen ms in bulk, which is what lets the snapshot be
+# regenerated on a pulse instead of on a five-minute timer.
+wids = [r["id"] for r in rows]
+holes = ",".join("?" * len(wids))
+
+def by_item(sql, *pre):
+    out = {}
+    if not wids:
+        return out
+    for row in q(sql.replace("{IN}", holes), *pre, *wids):
+        out.setdefault(row[0], []).append(row)
+    return out
+
+holders_by = by_item("""SELECT workItemId, holderKey FROM assignments
+                        WHERE state='open' AND workItemId IN ({IN})""")
+ev_by = by_item("""SELECT a.workItemId, t.kind, t.verdictKind, t.commitRefs, t.ts,
+                          a.reviewsAssignmentId AS reviews FROM attests t
+                   JOIN assignments a ON a.id=t.assignmentId
+                   WHERE a.workItemId IN ({IN})""")
+closed_by = by_item("""SELECT workItemId, max(closedAt) AS m FROM assignments
+                       WHERE workItemId IN ({IN}) GROUP BY workItemId""")
+# ordered by dueAt so the first row per item is the imminent one
+wake_by = by_item("""SELECT work_item_id, sessionKey FROM wakes
+                     WHERE state='pending' AND work_item_id IN ({IN})
+                     ORDER BY dueAt""")
+
+for r in rows:
     wid = r["id"]
-    hs = q("SELECT DISTINCT holderKey FROM assignments WHERE workItemId=? AND state='open'", wid)
-    holders = [ids[h["holderKey"]] for h in hs if h["holderKey"] in ids]
-    ev = q("""SELECT t.kind, t.verdictKind, t.commitRefs, t.ts,
-                     a.reviewsAssignmentId AS reviews FROM attests t
-              JOIN assignments a ON a.id=t.assignmentId WHERE a.workItemId=?""", wid)
+    holders = [ids[h["holderKey"]] for h in holders_by.get(wid, ())
+               if h["holderKey"] in ids]
+    holders = list(dict.fromkeys(holders))          # the DISTINCT the query used to do
+    ev = ev_by.get(wid, ())
     # A code review's reviewed-clean legitimately carries the commit under
     # review, so review refs count. What must not count is an item that never
     # produced code: a read-only DESIGN review cites the repository base it
@@ -216,7 +250,7 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
     closed_at = None
     if r["state"] == "closed":
         stage = 6
-        lc = q("SELECT max(closedAt) m FROM assignments WHERE workItemId=?", wid)
+        lc = closed_by.get(wid)
         closed_at = lc[0]["m"] if lc else None
     else:
         stage = 0
@@ -249,8 +283,7 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
     # which way the waiting prompt flows. "in" = toward this agent (it owes the
     # turn); "out" = the item is waiting on someone else. When prompts are
     # pending in both directions the earliest dueAt wins.
-    imminent = q("""SELECT sessionKey FROM wakes WHERE state='pending'
-                    AND work_item_id=? ORDER BY dueAt LIMIT 1""", wid)
+    imminent = wake_by.get(wid, ())
     tgt = imminent[0]["sessionKey"] if imminent else None
     flow = {aid: ("in" if (tgt is None or sk == tgt) else "out")
             for aid, sk in turn_sk.items()}
