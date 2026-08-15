@@ -846,6 +846,11 @@ function setFilter(kind, {query = '', ids = null} = {}){
    back in the box where they can be edited, and the × forgets it for good.
    That is what makes a background click cheap enough to also clear a search. */
 let searches = [], searchesRev = -1, activeSearchId = null;
+/* The card the box is currently writing to. Typing keeps editing it, so one
+   query does not leave a trail of its own prefixes; emptying the box ends that
+   and the next thing typed starts a new card. Re-opening a card points this at
+   it, which is what makes its terms editable in place. */
+let typingCardId = null;
 
 function renderCards(){
   const el = document.getElementById('cards');
@@ -868,6 +873,10 @@ document.getElementById('cards').addEventListener('click', ev => {
   if (kill){
     ev.stopPropagation();
     const id = kill.getAttribute('data-x');
+    /* a debounced file from recent typing would otherwise land after the
+       delete and put the card straight back */
+    clearTimeout(fileTimer);
+    if (id === typingCardId) typingCardId = null;
     if (id === activeSearchId) releaseFilter();
     searches = searches.filter(q => q.searchId !== id);
     renderCards();
@@ -883,15 +892,16 @@ document.getElementById('cards').addEventListener('click', ev => {
 /* Re-open a filed search: run it, and put its terms back in the box so they
    can be edited rather than retyped. */
 function openSearch(q){
-  activeSearchId = q.searchId;
-  if ((q.ids || []).length){
-    searchEl.value = '';
-    setFilter('agent', {ids: q.ids});
-  } else {
-    searchEl.value = q.query || '';
-    setFilter('user', {query: q.query || ''});
-  }
+  activeSearchId = typingCardId = q.searchId;   /* edits land on this card */
+  /* The terms go back in the box whenever the card has any, whoever filed it.
+     An agent's card carries both a picked set and the words describing it, and
+     showing an empty box there left no way to adjust the search — which is the
+     whole point of being able to re-open one. Editing the words then turns it
+     into a text search, which is what typing in that box has always meant. */
+  searchEl.value = q.query || '';
   searchClearBtn.style.display = searchEl.value ? 'block' : 'none';
+  if ((q.ids || []).length) setFilter('agent', {ids: q.ids});
+  else setFilter('user', {query: q.query || ''});
   renderCards();
 }
 
@@ -904,11 +914,11 @@ function fileSearch(query){
     if (!query) return;
     try {
       const body = {searches: [{query, source: 'user',
-                                searchId: activeSearchId || undefined}]};
+                                searchId: typingCardId || undefined}]};
       const r = await apiFetch('/searches', {method:'POST',
         headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
       const rec = r?.searches?.[0];
-      if (rec){ activeSearchId = rec.searchId; searchesRev = -1; }
+      if (rec){ activeSearchId = typingCardId = rec.searchId; searchesRev = -1; }
     } catch(e){ /* the pile is a convenience; never fail a search on it */ }
   }, 700);
 }
@@ -956,7 +966,14 @@ function renderSearchChrome(){
   const f = view.filter;
   document.getElementById('searchpill').style.display = f.kind === 'agent' ? 'inline-block' : 'none';
   const box = document.getElementById('search');
-  if (f.kind === 'agent') box.value = '';
+  /* The box carries the current search's terms whoever set them — blanking it
+     for an agent's filter meant re-opening a card put its words in and this
+     wiped them a frame later, leaving nothing to edit. The pill still says who
+     supplied it. Never stomp what someone is typing. */
+  if (f.kind === 'agent' && document.activeElement !== box){
+    const q = searches.find(x => x.searchId === activeSearchId);
+    box.value = q?.query || '';
+  }
   box.placeholder = f.kind === 'agent' ? 'agent-supplied selection'
                                        : 'filter — press / to search';
   /* The count belongs to the search layer, not to whatever is stacked above
@@ -1344,7 +1361,7 @@ const searchEl = document.getElementById('search');
 const searchClearBtn = document.getElementById('searchclear');
 function releaseFilter(){
   searchEl.value = '';
-  activeSearchId = null;                 /* the card stays; it is just not running */
+  activeSearchId = typingCardId = null;  /* the card stays; it is just not running */
   if (typeof renderCards === 'function') renderCards();
   setFilter('none');
   searchEl.blur();
@@ -1358,7 +1375,7 @@ searchEl.addEventListener('input', () => {
   clearTimeout(searchTimer);
   const raw = searchEl.value.trim();
   searchTimer = setTimeout(() => {
-    if (!raw) setFilter('none');
+    if (!raw){ setFilter('none'); typingCardId = null; activeSearchId = null; renderCards(); }
     else { setFilter('user', {query: raw}); fileSearch(raw); }
   }, 220);                                   /* settle before re-framing */
 });
