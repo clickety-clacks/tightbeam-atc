@@ -761,6 +761,9 @@ function releaseFilter(){
   searchEl.value = '';
   setFilter('none');
   searchEl.blur();
+  /* an agent's filter lives on the server too; clearing it only locally would
+     leave every other page — and the next page to load — still filtered */
+  if (typeof apiClearFilter === 'function') apiClearFilter();
 }
 searchClearBtn.addEventListener('click', releaseFilter);
 searchEl.addEventListener('input', () => {
@@ -787,7 +790,7 @@ searchEl.addEventListener('keydown', e => {
    page behaves exactly as before. */
 const API = './api';
 const CLIENT_ID = Math.random().toString(36).slice(2, 10);
-let apiSeq = 0, apiTagsRev = -1, apiGen = null, apiUp = false;
+let apiSeq = 0, apiTagsRev = -1, apiGen = null, apiUp = false, apiJoined = false;
 let tags = [];                                   /* [{tagId,target,text,source}] */
 
 /* every request is bounded and checked: a hung fetch must not stall the loop,
@@ -815,7 +818,11 @@ async function apiPull(){
     apiGen = d.generation ?? apiGen;
     /* fell further behind than the server's history: it told us, so do not
        pretend the missing commands were applied */
-    if (d.gap) apiSeq = d.seq;
+    /* Commands are a broadcast log. A page that loads later must not replay
+       history — a filter or focus somebody issued an hour ago would land on a
+       view that never asked for it. Join at the current head instead. */
+    if (!apiJoined){ apiJoined = true; apiSeq = d.seq; }
+    else if (d.gap) apiSeq = d.seq;
     else for (const c of (d.commands || [])){
       try { applyCommand(c); } catch(e){ /* one bad command must not wedge the loop */ }
     }
@@ -859,6 +866,11 @@ async function apiPostTags(list){
   try { await apiFetch('/tags', {method:'POST', headers:{'content-type':'application/json'},
                                  body: JSON.stringify({tags:list})}); await apiPull(); }
   catch(e){ apiUp = false; }
+}
+async function apiClearFilter(){
+  try { await apiFetch('/filter', {method:'POST', headers:{'content-type':'application/json'},
+                                   body: JSON.stringify({clear:true})}); }
+  catch(e){ /* local clear already happened; the server will catch up */ }
 }
 async function apiClearTags(){
   /* never clear locally on failure: the page would show an empty board while
