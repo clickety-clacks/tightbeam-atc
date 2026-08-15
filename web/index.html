@@ -443,6 +443,43 @@ function fitPoints(m, out){
   });
 }
 
+/* Exact framing. Given the points that must end up visible, the point being
+   looked at, and a unit direction from it toward the camera, solve the distance
+   along that direction at which every point falls inside the frustum — the
+   vertical field of view and the horizontal one the aspect implies.
+
+   The three framings used to derive a distance from a bounding-sphere radius
+   and then set the camera's height separately, so the distance actually flown
+   was longer than the one solved for and the tilt changed what was in frame.
+   Each carried a constant (+8, +6, +4) to cover the difference, and on a small
+   result set that constant was most of the distance: a three-unit cluster
+   framed from fifteen units out, which is the camera reading as too wide. */
+const _fdv = new THREE.Vector3(), _fdr = new THREE.Vector3(), _fdu = new THREE.Vector3();
+function frameDistance(pts, center, e, {margin = 1.10, usableH = 1, usableV = 1} = {}){
+  const half = Math.tan(camera.fov * Math.PI / 360);
+  const tanV = half * usableV, tanH = half * camera.aspect * usableH;
+  _fdr.crossVectors(e, camera.up);
+  if (_fdr.lengthSq() < 1e-6) _fdr.set(1, 0, 0);      /* looking straight down */
+  _fdr.normalize();
+  _fdu.crossVectors(_fdr, e).normalize();
+  let d = 0;
+  for (const p of pts){
+    _fdv.subVectors(p, center);
+    d = Math.max(d, _fdv.dot(e) + margin * Math.max(
+      Math.abs(_fdv.dot(_fdr)) / tanH, Math.abs(_fdv.dot(_fdu)) / tanV));
+  }
+  return d;
+}
+
+/* Where a framing approaches from: the camera's current bearing, lifted to a
+   fixed pitch. Deciding the pitch up front is what lets the fit above be exact
+   — it solves for the direction actually flown, not a horizontal stand-in. */
+function approachDir(center, pitch = .42){
+  const e = camera.position.clone().sub(center); e.y = 0;
+  if (e.lengthSq() < .01) e.set(1, 0, 1);
+  return e.normalize().multiplyScalar(Math.cos(pitch)).setY(Math.sin(pitch)).normalize();
+}
+
 function filterMatches(kind, node){
   const f = view.filter;
   if (f.kind === 'agent') return f.ids.has(kind === 'i' ? node.id : node.id);
@@ -463,8 +500,7 @@ function filteredView(){
   if (!pts.length) return null;
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
-  let r = 3; pts.forEach(v => r = Math.max(r, v.distanceTo(c)));
-  return { center: c, radius: r, count: pts.length };
+  return { center: c, pts, count: pts.length };
 }
 
 /* apply a filter and frame what it found */
@@ -476,12 +512,9 @@ function setFilter(kind, {query = '', ids = null} = {}){
   renderSearchChrome();
   const nb = kind === 'none' ? null : filteredView();
   if (nb){
-    const dir = camera.position.clone().sub(nb.center); dir.y = 0;
-    if (dir.lengthSq() < .01) dir.set(1, 0, 1);
-    const fov = camera.fov * Math.PI / 180;
-    dir.normalize().multiplyScalar((nb.radius / Math.tan(fov / 2)) / Math.min(1, camera.aspect) + 8);
-    const camPos = nb.center.clone().add(dir);
-    camPos.y = nb.center.y + nb.radius * .8 + 5;
+    const e = approachDir(nb.center);
+    const camPos = nb.center.clone().addScaledVector(
+      e, Math.max(6, frameDistance(nb.pts, nb.center, e)));
     view.framing = 'filter'; userMoved = true;
     flyTo(camPos, nb.center.clone(), () => {
       const d = camPos.clone().sub(nb.center);
@@ -512,8 +545,7 @@ function neighbourhoodView(){
   if (!pts.length) return null;
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1/pts.length);
-  let r = 4; pts.forEach(v => r = Math.max(r, v.distanceTo(c)));
-  return {center:c, radius:r};
+  return {center:c, pts};
 }
 
 function renderLegend(){
@@ -1428,31 +1460,33 @@ function flyToNode(o){
   view.framing = 'focus'; userMoved = true;
   const nb = view.focus.stage === 2 ? neighbourhoodView() : null;
   if (nb){
-    const dir = camera.position.clone().sub(nb.center); dir.y = 0;
-    if (dir.lengthSq() < .01) dir.set(1,0,1);
-    dir.normalize().multiplyScalar(nb.radius * 2.1 + 8);
-    const camPos = nb.center.clone().add(dir);
-    camPos.y = nb.center.y + nb.radius * 1.1 + 6;
+    const e = approachDir(nb.center);
+    const camPos = nb.center.clone().addScaledVector(
+      e, Math.max(7, frameDistance(nb.pts, nb.center, e)));
     flyTo(camPos, nb.center);
   } else {
     const pts = []; fitPoints(o, pts);
     const pt = new THREE.Vector3();
     pts.forEach(v => pt.add(v)); pt.multiplyScalar(1 / pts.length);
-    let r = 1.2; pts.forEach(v => r = Math.max(r, v.distanceTo(pt)));
-    const dir = camera.position.clone().sub(pt); dir.y = 0;
-    if (dir.lengthSq() < .01) dir.set(1,0,1);
-    const fov = camera.fov * Math.PI / 180;
-    const dist = Math.max(9, (r / Math.tan(fov / 2)) / Math.min(1, camera.aspect) + 4);
-    dir.normalize().multiplyScalar(dist);
-    const camPos = pt.clone().add(dir); camPos.y = pt.y + Math.max(4.5, r * .8);
-    /* The pane covers part of the viewport, so bias the framing away from it:
-       the node lands in the space that stays visible rather than behind the
-       card describing it. Left in landscape, high in portrait. */
+    /* The pane covers part of the viewport, so fit inside what it leaves and
+       bias the framing away from it: the node lands in the space that stays
+       visible rather than behind the card describing it. Left in landscape,
+       high in portrait. Taking the pane out of the usable frustum is what
+       keeps the node clear of it — shifting alone could push it back under. */
     const portrait = innerHeight > innerWidth;
     const paneFrac = portrait ? .40 : Math.min(380, innerWidth * .34) / innerWidth;
-    const shift = Math.tan(fov / 2) * dist * camera.aspect * paneFrac;
+    const e = approachDir(pt, .30);
+    /* a lone node wants breathing room, not to fill the frame */
+    const dist = Math.max(7, frameDistance(pts, pt, e, {margin: 2.0,
+      usableH: portrait ? 1 : 1 - paneFrac, usableV: portrait ? 1 - paneFrac : 1}));
+    const camPos = pt.clone().addScaledVector(e, dist);
+    const half = Math.tan(camera.fov * Math.PI / 360);
+    const shift = (portrait ? half : half * camera.aspect) * dist * paneFrac;
     if (portrait){
-      camPos.y += shift * .5; pt.y += shift * .5;
+      /* The pane runs along the bottom, so the node belongs in the space above
+         it: look BELOW the node and it rides high in the frame. Looking above
+         it — which is what this did — slid the node down behind the card. */
+      camPos.y -= shift; pt.y -= shift;
     } else {
       const right = new THREE.Vector3().subVectors(camPos, pt).cross(camera.up).normalize();
       camPos.addScaledVector(right, -shift); pt.addScaledVector(right, -shift);
@@ -1506,15 +1540,8 @@ function fitSelection(){
   if (!pts.length) return false;
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
-  let r = 2.5; pts.forEach(v => r = Math.max(r, v.distanceTo(c)));
-  /* pull back far enough that the spread fits the narrower field of view */
-  const fov = camera.fov * Math.PI / 180;
-  const dist = (r / Math.tan(fov / 2)) / Math.min(1, camera.aspect) + 6;
-  const dir = camera.position.clone().sub(c);
-  if (dir.lengthSq() < .01) dir.set(1, .55, 1);
-  dir.normalize();
-  const camPos = c.clone().add(dir.multiplyScalar(dist));
-  camPos.y = Math.max(camPos.y, c.y + r * .5 + 3);
+  const e = approachDir(c);
+  const camPos = c.clone().addScaledVector(e, Math.max(6, frameDistance(pts, c, e)));
   /* hand the ambient orbit a new centre so it carousels around the selection
      once the flight lands, instead of resuming around the org's root */
   markCamera();                                /* first press: remember here */
