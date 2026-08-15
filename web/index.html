@@ -543,13 +543,22 @@ function frameTo(pts, center, e, {margin = 1.15, floor = 6} = {}){
    the camera keeps looking straight at its subject — so OrbitControls and the
    ambient spin both turn around that subject — while the image lands in the
    space the bar, the legend and the detail pane leave free. */
-function applyChromeOffset(){
-  const b = clearRect();
-  const dx = (b.left + b.right) / 2 - b.vw / 2;
-  const dy = (b.top + b.bottom) / 2 - b.vh / 2;
-  if (Math.abs(dx) < .5 && Math.abs(dy) < .5) camera.clearViewOffset();
-  else camera.setViewOffset(b.vw, b.vh, -dx, -dy, b.vw, b.vh);
+const chromeOff = {x: 0, y: 0}, chromeAim = {x: 0, y: 0};
+function commitChromeOffset(){
+  const vw = innerWidth, vh = innerHeight;
+  if (Math.abs(chromeOff.x) < .5 && Math.abs(chromeOff.y) < .5) camera.clearViewOffset();
+  else camera.setViewOffset(vw, vh, -chromeOff.x, -chromeOff.y, vw, vh);
   camera.updateProjectionMatrix();
+}
+/* A projection change lands in a single frame, so opening the detail pane —
+   which happens before the flight starts — snapped the whole image sideways
+   and the zoom then appeared to begin somewhere else. Only the destination is
+   set here; tickFrame eases toward it, so the pane opening reads as a pan. */
+function applyChromeOffset(immediate){
+  const b = clearRect();
+  chromeAim.x = (b.left + b.right) / 2 - b.vw / 2;
+  chromeAim.y = (b.top + b.bottom) / 2 - b.vh / 2;
+  if (immediate){ chromeOff.x = chromeAim.x; chromeOff.y = chromeAim.y; commitChromeOffset(); }
 }
 
 /* Where a framing approaches from: the camera's current bearing, lifted to a
@@ -1638,6 +1647,14 @@ const clock = new THREE.Clock();
 function tickFrame(){
   requestAnimationFrame(tickFrame);
   const t = clock.getElapsedTime();
+  if (Math.abs(chromeOff.x - chromeAim.x) > .25 || Math.abs(chromeOff.y - chromeAim.y) > .25){
+    /* .09 settles to within a few pixels across the flight's ~33 frames while
+       keeping the first step small — the pane opening should read as the view
+       easing over, not as a shove */
+    chromeOff.x += (chromeAim.x - chromeOff.x) * .09;
+    chromeOff.y += (chromeAim.y - chromeOff.y) * .09;
+    commitChromeOffset();
+  }
   if (flight){
     flight.k = Math.min(1, flight.k + .03);
     const e = flight.k*flight.k*(3-2*flight.k);   /* smoothstep */
@@ -1787,7 +1804,7 @@ function fitViewport(){
   renderer.setSize(w, h, false);
   edgeMats.forEach(m => m.resolution.set(w, h));
   autoCollapseLegend();
-  applyChromeOffset();          /* the legend just collapsed or grew */
+  applyChromeOffset(true);      /* a resize is already a jump; do not ease it */
 }
 let fitQueued = false;
 function queueFit(){
