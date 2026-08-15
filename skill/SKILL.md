@@ -21,13 +21,23 @@ anything on it you would not say out loud.
 
 ## Node ids
 
-Use the ids the feed publishes, exactly as they appear:
+- **Work items:** the substrate's full work item id,
+  `wi_70349b0d-f7ad-41aa-a0cb-a50084a2b776`. This is the one `tightbeam
+  work-item-get` accepts; a shortened id gets you `unknown_work_item`.
+- **Agents:** `s_...`, the session suffix, the same one `tightbeam list` shows.
 
-- **Work items:** `wi_...` (the substrate's work item id)
-- **Agents:** `s_...` (the session suffix, the same one `tightbeam list` shows)
+The feed carries both forms: `id` is the full one and is what every API call
+and every id in an API response uses, while `short` is a display form the
+cards and tag composer show so the labels stay readable. **Act on `id`, quote
+`short`.**
+
+The API will also accept a short work-item id and resolve it — so an id read
+off someone's screen or out of an old tag still works — but do not rely on
+that when talking to the substrate.
 
 `curl -s localhost:8787/data.json` gives you the current population if you need
-to resolve a name to an id.
+to resolve a name to an id. In the page, single-object focus shows the full id
+at the bottom of the detail pane.
 
 ## What the human is looking at
 

@@ -197,14 +197,17 @@ The page fetches `data.json` every five seconds:
     {
       "generatedAt": 1780000000000,
       "agents":   [{ "id", "name", "kind", "parent", "retired", "turn", "idleFor" }],
-      "items":    [{ "id", "title", "stage", "holders", "turns", "flow",
-                     "merged", "code", "closedAt" }],
+      "items":    [{ "id", "short", "title", "stage", "holders", "turns",
+                     "flow", "merged", "code", "closedAt" }],
       "links":    [{ "id", "from", "to", "state" }],
       "wakes":    [{ "id", "from", "to" }],
       "messages": [{ "id", "from", "to", "kind" }]
     }
 
 `stage` runs 0–6 over the evidence ladder. `merged` is `true`, `false`, or
-`null` for unknown. Anything emitting this shape can drive the page.
+`null` for unknown. `id` is the full work item id — the one the substrate's CLI
+will accept — and `short` is a display form the cards use; the control API
+takes either and resolves short ids against the feed. Anything emitting this
+shape can drive the page.
 
 MIT licensed.

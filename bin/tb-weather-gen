@@ -257,7 +257,10 @@ for r in q("""SELECT w.id, w.title, w.state FROM work_items w
     is_code = True if code_items is None else (wid in code_items or bool(prod_refs))
     # the page decides how much of a title to show; truncating here threw the
     # rest away before anything could ask for it
-    items.append({"id": wid[:11], "title": (r["title"] or "")[:2000],
+    # The FULL id, because anything reading this view has to be able to act on
+    # it: `tightbeam work-item-get` refuses a short id with unknown_work_item.
+    # `short` is for display only.
+    items.append({"id": wid, "short": wid[:11], "title": (r["title"] or "")[:2000],
                   "stage": stage, "holders": holders, "turns": turns, "flow": flow,
                   # nothing to merge means no merge state, not a green ring
                   "closedAt": closed_at,

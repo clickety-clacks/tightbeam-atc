@@ -469,7 +469,8 @@ function filteredView(){
 
 /* apply a filter and frame what it found */
 function setFilter(kind, {query = '', ids = null} = {}){
-  view.filter = { kind, query: (query || '').toLowerCase().trim(), ids: ids ? new Set(ids) : null };
+  view.filter = { kind, query: (query || '').toLowerCase().trim(),
+                  ids: ids ? new Set(ids.map(fullId)) : null };
   if (kind === 'none'){ view.filter.query = ''; view.filter.ids = null; }
   applyView();
   renderSearchChrome();
@@ -649,7 +650,7 @@ function buildItems(items){
        actually reached the branch */
     const landed = w.stage >= 5;
     const j = (idx%5)-2;
-    const sc = scatter(w.id);
+    const sc = scatter(w.short || w.id);
     const pos = landed
       ? new THREE.Vector3(anchor.x + sc.x, 1.05, anchor.z + 3.2 + sc.z)
       : new THREE.Vector3(anchor.x + sc.x,
@@ -832,7 +833,8 @@ function renderSwatches(){
 function showTagBox(){
   if (view.focus.stage !== 1 || !view.focus.key){ hideTagBox(); return; }
   const m = focusMesh();
-  const label = m?.userData.w ? m.userData.w.id : (m?.userData.a ? m.userData.a.name : '');
+  const label = m?.userData.w ? (m.userData.w.short || m.userData.w.id)
+                              : (m?.userData.a ? m.userData.a.name : '');
   tagBox.querySelector('.who').textContent = label ? '· ' + String(label).slice(0, 26) : '';
   tagBox.style.display = 'block';
   tagInput.value = '';
@@ -1034,10 +1036,21 @@ function applyCommand(c){
    is decided by the id's own shape, not by searching the current feed — a
    lookup would mislabel anything that arrives before the first snapshot, or
    any node not currently on screen. */
+/* Callers may hand us a short work-item id — the form the cards display, or
+   one saved in a tag before the feed carried full ids — so resolve it. */
+function fullId(id){
+  const s = String(id);
+  if (!s.startsWith('wi_')) return s;
+  const items = (DATA && DATA.items) || [];
+  if (items.some(w => w.id === s)) return s;
+  const hit = items.find(w => w.id.startsWith(s + '-'));
+  return hit ? hit.id : s;
+}
+
 function selKeyFor(id){
   const s = String(id);
   if (s.startsWith('i:') || s.startsWith('a:')) return s;
-  return s.startsWith('wi_') ? 'i:' + s : 'a:' + s;
+  return s.startsWith('wi_') ? 'i:' + fullId(s) : 'a:' + s;
 }
 
 /* ---------- live feed ---------- */
@@ -1192,12 +1205,14 @@ function nodeContent(u, clamp){
     const merged = w.merged === true ? 'in the branch'
                  : w.merged === false ? 'NOT in the branch'
                  : (w.code ? 'branch state unknown' : 'nothing to merge');
-    return '<span class="t">' + w.id + '</span>'
+    return '<span class="t">' + (w.short || w.id) + '</span>'
       + '<div' + (clamp ? ' class="clamp5"' : '') + '>' + w.title + '</div>'
       + '<span class="k">state</span>' + STAGE_NAMES[w.stage] + ' · ' + merged
       + ((w.holders||[]).length ? '' : ' · ORPHANED')
       + '<span class="k">evidence</span><span class="seg">' + segs + '</span>'
-      + '<span class="k">turns</span><span class="seg">' + acts + '</span>';
+      + '<span class="k">turns</span><span class="seg">' + acts + '</span>'
+      /* the pane has room, and this is the id the CLI will accept */
+      + (clamp ? '' : '<span class="k">id</span><span class="seg">' + w.id + '</span>');
   }
   const a = u.a;
   const held = ((DATA&&DATA.items)||[]).filter(w=>(w.holders||[]).includes(a.id) && w.stage<6).length;
