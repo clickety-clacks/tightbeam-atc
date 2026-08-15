@@ -1466,8 +1466,15 @@ function tickFrame(){
         if (u.lineMat){ u.lineMat.color.copy(u.baseStroke); u.lineMat.opacity = .6 * f; } }
       u.dim = f;
     }
-    if (u.baseY){ m.position.y = u.baseY + Math.sin(t*1.2+u.phase)*.5; m.rotation.y += .004; }
-    if (u.landed){ m.rotation.y += .0015; }
+    /* A focused or selected item holds still. Bobbing is ambient texture for
+       the field at rest; under inspection it makes the tag and the composer
+       anchored to it jitter, which is hard to read and hard to click. */
+    const heldStill = u.w && (view.focus.key === 'i:' + u.w.id || view.selection.has('i:' + u.w.id));
+    if (u.baseY){
+      m.position.y = heldStill ? u.baseY : u.baseY + Math.sin(t*1.2+u.phase)*.5;
+      if (!heldStill) m.rotation.y += .004;
+    }
+    if (u.landed && !heldStill){ m.rotation.y += .0015; }
     if (u.w && (u.baseY || u.landed)) spin.set(u.w.id, m.rotation.y);
     if (u.waitFlash && u.lineMat){ u.lineMat.opacity = (.15 + (0.5+0.5*Math.sin(t*2.6+u.phase))*.6) * (u.dim ?? 1); }
     m.children.forEach(ch=>{
