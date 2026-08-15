@@ -269,10 +269,9 @@ const view = {
      seconds, so an object reference goes stale and takes hover, dimming and
      framing with it. focusMesh() resolves the key against the current scene. */
   focus: { key: null, stage: 0 },
-  /* While f/space owns the view the selection is the lens: only what was
-     brushed stays lit, and the second press restores the scope underneath
-     along with the camera. 'none' the rest of the time. */
-  lens: 'none',
+  /* f/space: the camera is framing the selection and re-frames as it changes.
+     Nothing is ghosted by it — that is what a search or a focus does. */
+  fit: false,
   input: 'navigate',
   /* a filter narrows the whole view: everything unmatched ghosts exactly as it
      does under focus. A human types a query; an agent supplies an id list. The
@@ -548,9 +547,17 @@ function selectionScope(){
 
    The same stack decides what the brush can reach, so while a focus is up you
    can only add to or remove from the selection within it. */
+/* Two different things, deliberately not the same thing:
+
+     ISOLATE  decides what is lit — a search does it, a focus does it.
+     FIT      decides only where the camera is — f does it, and it ghosts
+              nothing at all.
+
+   So f is absent from this function. It moves the camera to the selection and
+   keeps moving it as the selection changes; the org stays fully lit while it
+   does. Search and focus stack as isolates; the fit rides alongside. */
 function activeScope(){
   if (view.focus.stage >= 1){ const sc = focusScope(); if (sc) return sc; }
-  if (view.lens === 'selection' && view.selection.size) return selectionScope();
   return filterScope();
 }
 
@@ -767,12 +774,18 @@ function popScope(){
     clearFocus();                        /* clearFocus re-derives the lighting */
     return frameCurrentScope();
   }
-  if (view.lens === 'selection'){        /* pops the fit itself */
+  if (view.fit){                         /* then the fit */
     if (camMark) restoreCamera();
-    else { view.lens = 'none'; applyView(); frameCurrentScope(); }
+    else { view.fit = false; applyView(); frameCurrentScope(); }
     return true;
   }
-  return false;                          /* a search is released explicitly, not by a click */
+  if (view.filter.kind !== 'none'){      /* and last the search itself */
+    /* The search is not lost when it is dismissed: it stays in the history as
+       a card, so a third click is cheap to undo by clicking that card. */
+    releaseFilter();
+    return true;
+  }
+  return false;
 }
 
 /* apply a filter and frame what it found */
@@ -791,7 +804,7 @@ function setFilter(kind, {query = '', ids = null} = {}){
   const nb = kind === 'none' ? null : filteredView();
   if (nb){
     camMark = null;                      /* framing the filter moves the camera too */
-    view.lens = 'none';
+    view.fit = false;
     const e = approachDir(nb.center);
     const {camPos, target} = frameTo(nb.pts, nb.center, e);
     view.framing = 'filter'; userMoved = true;
@@ -818,8 +831,10 @@ function renderStack(){
                   count: view.filter.kind === 'none' ? '' : (activeIs('filter') ? n : ''),
                   colour: hot('cyan') });
   }
-  if (view.lens === 'selection'){
-    layers.push({ text: 'fit', count: view.selection.size, colour: hot('amber') });
+  if (view.fit){
+    /* aside: the fit moves the camera, it does not decide what is lit */
+    layers.push({ text: 'fit', count: view.selection.size, colour: hot('amber'),
+                  aside: true });
   }
   if (view.focus.stage === 1) layers.push({ text: 'focus', count: '', colour: hot('violet') });
   if (view.focus.stage === 2){
@@ -841,7 +856,6 @@ function renderStack(){
 /* which layer is currently deciding the view */
 function activeIs(kind){
   if (view.focus.stage >= 1) return kind === 'focus';
-  if (view.lens === 'selection' && view.selection.size) return kind === 'lens';
   return kind === 'filter' && view.filter.kind !== 'none';
 }
 
@@ -1398,7 +1412,7 @@ function applyCommand(c){
     if (c.clear) view.selection.clear();
     (Array.isArray(c.add) ? c.add : []).forEach(id => view.selection.add(selKeyFor(id)));
     (Array.isArray(c.remove) ? c.remove : []).forEach(id => view.selection.delete(selKeyFor(id)));
-    applyView(); apiReportSelection();
+    selectionChanged(); apiReportSelection();
   } else if (c.kind === 'focus'){
     if (c.mode === 'clear'){ clearFocus(); return; }
     view.focus.key = selKeyFor(c.id);
@@ -1965,6 +1979,8 @@ function paintAt(px, py){
   hits.forEach(m => {
     const k = selKey(m); if (!k) return;
     if (selOp === 'select') view.selection.add(k); else view.selection.delete(k);
+    /* the fit follows the stroke: the current set defines the viewport */
+    if (view.fit) selectionChanged();
     shadeSelected(m, selOp === 'select');
   });
   document.getElementById('selcount').textContent = view.selection.size;
@@ -1974,11 +1990,40 @@ function paintAt(px, py){
    while still holding the camera bookmark. */
 function clearSelection(){
   view.selection.clear();
-  if (view.lens === 'selection'){
-    if (camMark) return restoreCamera();
-    view.lens = 'none';
+  if (view.fit){
+    if (camMark) return restoreCamera();   /* nothing left to frame */
+    view.fit = false;
   }
   applyView();
+}
+
+/* While the fit is live the current selection defines the viewport, so every
+   add and remove re-frames it. Debounced: a brush stroke is a burst of
+   changes and each one would otherwise start its own flight. */
+let refitTimer = null;
+function selectionChanged(){
+  applyView();
+  if (!view.fit) return;
+  if (!view.selection.size) return;        /* the last one out is handled above */
+  clearTimeout(refitTimer);
+  refitTimer = setTimeout(() => { if (view.fit && view.selection.size) refitToSelection(); }, 260);
+}
+
+function refitToSelection(){
+  const pts = [];
+  selectables().forEach(m => { const k = selKey(m); if (k && view.selection.has(k)) fitPoints(m, pts); });
+  if (!pts.length) return;
+  const c = new THREE.Vector3();
+  pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
+  const e = approachDir(c);
+  const {camPos, target} = frameTo(pts, c, e);
+  userMoved = true;
+  flyTo(camPos, target.clone(), () => {
+    const d = camPos.clone().sub(target);
+    orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+    orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(target);
+    userMoved = false;
+  });
 }
 
 /* the ONLY place input mode changes; focus and selection are untouched */
@@ -2077,7 +2122,7 @@ function markCamera(){
 }
 function restoreCamera(){
   const m = camMark; camMark = null;
-  view.lens = 'none';                  /* the lens lifts with the camera */
+  view.fit = false;                  /* the lens lifts with the camera */
   applyView();
   view.framing = 'restoring';
   userMoved = true;
@@ -2089,6 +2134,9 @@ function restoreCamera(){
   return true;
 }
 function fitSelection(){
+  /* f frames what you have collected. With nothing collected there is nothing
+     to frame, and framing the whole org instead was never what the key meant. */
+  if (!camMark && !view.selection.size) return false;
   if (camMark){
     /* second press dismisses the whole transaction — the fit and any focus
        opened inside it — and returns the camera where it started */
@@ -2130,14 +2178,7 @@ function fitSelection(){
   const e = approachDir(c);
   /* raise the lens BEFORE framing so the fit is solved against what will
      actually be lit, then re-derive so the rest of the org ghosts */
-  if (view.fitTarget === 'selection'){
-    /* focus outranks the lens, so a focus left standing would keep rendering
-       and the lens we just entered would show nothing of its own */
-    if (view.focus.stage >= 1){ view.focus.key = null; view.focus.stage = 0;
-                                if (typeof hideTagBox === 'function') hideTagBox();
-                                if (typeof detailEl !== 'undefined') detailEl.style.display = 'none'; }
-    view.lens = 'selection'; applyView();
-  }
+  view.fit = true;
   const {camPos, target} = frameTo(pts, c, e);
   /* hand the ambient orbit a new centre so it carousels around the selection
      once the flight lands, instead of resuming around the org's root */
