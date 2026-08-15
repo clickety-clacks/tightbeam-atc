@@ -1782,7 +1782,7 @@ function paintAt(px, py){
     if (selOp === 'select') view.selection.add(k); else view.selection.delete(k);
     shadeSelected(m, selOp === 'select');
   });
-  document.getElementById('selcount').textContent = selected.size;
+  document.getElementById('selcount').textContent = view.selection.size;
 }
 /* the ONLY place input mode changes; focus and selection are untouched */
 function setInputMode(mode){
