@@ -2433,8 +2433,11 @@ function updateRings(m, t){
        GPU the contents moved — this runs every frame for every working agent. */
     if (seg.userData.wired) seg.geometry.attributes.instanceStart.data.needsUpdate = true;
     else { seg.geometry.setPositions(buf); seg.userData.wired = true; }
-    seg.material.opacity = .8 * dim;       /* ghosts with its agent */
-    seg.visible = dim > .9;
+    /* A ghosted agent is still working, so the ring keeps moving and simply
+       goes translucent with the rest of it. Hiding it outright — the rule tags
+       follow — would have said the opposite: that the work had stopped. */
+    seg.material.opacity = .8 * dim;
+    seg.visible = true;
   });
 }
 
