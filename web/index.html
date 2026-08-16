@@ -2719,7 +2719,7 @@ function tickFrame(){
     controls.target.lerpVectors(flight.t0, flight.t1, e);
     if (flight.k >= 1){ flight.after?.(); flight = null; }
   } else if (!userMoved && view.framing!=='restoring' && view.input!=='brush'){
-    orbitAngle += .00085;
+    orbitAngle += .00057;          /* the ambient turntable, at two thirds */
     camera.position.set(orbitTgt.x + Math.sin(orbitAngle)*orbitR,
                         orbitTgt.y + orbitH,
                         orbitTgt.z + Math.cos(orbitAngle)*orbitR);
