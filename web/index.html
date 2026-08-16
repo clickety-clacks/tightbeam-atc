@@ -325,7 +325,9 @@ let flight = null, orbitAngle = 0, arrowFrame = 0;
    state; everything visual is derived from here by applyView().
 
      view.selection  brushed nodes. Persists across rebuilds and mode changes.
-     view.focus      {obj, stage}. stage 1 = the node, 2 = its neighbourhood.
+     view.focus      {obj, stage}. stage 1 = the node, 2 = its neighbourhood,
+                     3 = an authored arrow (Arrow Focus) — key is null then
+                     and `arrow` carries the arrowId instead.
      view.input      'navigate' | 'brush'. What the pointer does, nothing more.
 
    Selection and focus are ORTHOGONAL: neither clears or constrains the other. */
@@ -334,7 +336,7 @@ const view = {
   /* focus holds a STABLE KEY, never a mesh: meshes are rebuilt every five
      seconds, so an object reference goes stale and takes hover, dimming and
      framing with it. focusMesh() resolves the key against the current scene. */
-  focus: { key: null, stage: 0 },
+  focus: { key: null, stage: 0, arrow: null },
   /* f/space: the camera is framing the selection and re-frames as it changes.
      Nothing is ghosted by it — that is what a search or a focus does. */
   fit: false,
@@ -350,8 +352,11 @@ function focusMesh(){
   if (!view.focus.key) return null;
   return selectables().find(m => selKey(m) === view.focus.key) || null;
 }
-/* derived from view.focus by computeHighlight() — its only writer */
-let hiAgents = null, hiItems = null;
+/* derived from view.focus by computeHighlight() — its only writer.
+   hiRelations is set only by Arrow Focus: which specific rendered
+   relationships (arcs, tethers, links, arrows) are the direct ones off the
+   selected arrow's two roots. Null everywhere else, so nothing else changes. */
+let hiAgents = null, hiItems = null, hiRelations = null;
 const DIM = 0.2;
 const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0);
 /* ambient tabletop orbit — parameterized so it can resume from any framing
@@ -613,7 +618,66 @@ function filterScope(){
   return sc;                                  /* may be empty: that is "no match" */
 }
 
+function arrowById(id){ return arrows.find(a => a.arrowId === id) || null; }
+
+/* Arrow Focus's scope: the selected arrow's two endpoints are the roots.
+   Walk every RENDERED relationship — agent family arcs, item-holder/turn
+   tethers, agent obligation links, authored arrows — and take the ones that
+   touch a root, one hop, stopping there. Each contributes its opposite node
+   to the lit node set AND its own key to hiRelations, so a relationship
+   between two lit-by-other-means nodes that itself touches neither root can
+   stay ghosted even though both its ends are lit (the Arrow Focus spec,
+   "the node set alone must not decide relationship brightness"). */
+function arrowFocusScope(){
+  if (!DATA) return null;
+  const ar = arrowById(view.focus.arrow);
+  if (!ar) return null;
+  const roots = new Set([selKeyFor(ar.from), selKeyFor(ar.to)]);
+  const touches = k => roots.has(k);
+  const litNodes = new Set(roots), litRelations = new Set();
+
+  groundGroup.children.forEach(o => {
+    const u = o.userData;
+    if (!u.arc) return;
+    const a = 'a:' + u.from, b = 'a:' + u.to;
+    if (!touches(a) && !touches(b)) return;
+    litRelations.add('arc:' + u.from + '|' + u.to);
+    litNodes.add(a); litNodes.add(b);
+  });
+  tetherGroup.children.forEach(o => {
+    const u = o.userData;
+    const w = u.itemMesh && u.itemMesh.userData && u.itemMesh.userData.w;
+    if (!w) return;
+    const a = 'i:' + w.id, b = 'a:' + u.hid;
+    if (!touches(a) && !touches(b)) return;
+    litRelations.add('tether:' + w.id + '|' + u.hid);
+    litNodes.add(a); litNodes.add(b);
+  });
+  linkGroup.children.forEach(o => {
+    const u = o.userData;
+    if (!u.from || !u.to) return;
+    const a = 'a:' + u.from, b = 'a:' + u.to;
+    if (!touches(a) && !touches(b)) return;
+    litRelations.add('link:' + u.from + '|' + u.to);
+    litNodes.add(a); litNodes.add(b);
+  });
+  arrows.forEach(other => {
+    const a = selKeyFor(other.from), b = selKeyFor(other.to);
+    if (!touches(a) && !touches(b)) return;
+    litRelations.add('arrow:' + other.arrowId);
+    litNodes.add(a); litNodes.add(b);
+  });
+
+  const sc = {agents: new Set(), items: new Set()};
+  litNodes.forEach(k => {
+    const id = k.slice(2);
+    (k.startsWith('i:') ? sc.items : sc.agents).add(id);
+  });
+  return {agents: sc.agents, items: sc.items, relations: litRelations};
+}
+
 function focusScope(){
+  if (view.focus.stage === 3) return arrowFocusScope();
   const obj = focusMesh();
   if (!obj || view.focus.stage < 1 || !DATA) return null;
   const sc = {agents: new Set(), items: new Set()};
@@ -681,8 +745,8 @@ function activeScope(){
 
 function computeHighlight(){
   const sc = activeScope();
-  if (!sc){ hiAgents = hiItems = null; return; }    /* nothing restricts the view */
-  hiAgents = sc.agents; hiItems = sc.items;
+  if (!sc){ hiAgents = hiItems = hiRelations = null; return; }    /* nothing restricts the view */
+  hiAgents = sc.agents; hiItems = sc.items; hiRelations = sc.relations || null;
 }
 /* frame everything currently highlighted */
 /* one predicate for both provenances: a typed query matches text, an agent's
@@ -1091,6 +1155,15 @@ function renderStack(){
   if (view.focus.stage === 1) layers.push({ text: 'focus', count: '', colour: hot('violet') });
   if (view.focus.stage === 2){
     layers.push({ text: 'neighbourhood',
+                  count: (hiItems?.size || 0) + (hiAgents?.size || 0), colour: hot('violet') });
+  }
+  if (view.focus.stage === 3){
+    /* names the layer AND identifies the selected arrow, so an agent reading
+       the strip cannot mistake this for a node focus (Arrow Focus spec). */
+    const ar = arrowById(view.focus.arrow);
+    const id = (ar && ar.arrowId) || view.focus.arrow || '';
+    const label = ar && ar.text ? ar.text.slice(0, 20) : id.slice(0, 8);
+    layers.push({ text: 'arrow focus' + (label ? ' · ' + label : ''),
                   count: (hiItems?.size || 0) + (hiAgents?.size || 0), colour: hot('violet') });
   }
   if (view.input === 'brush'){
@@ -1594,6 +1667,7 @@ async function apiPull(){
     }
     if (d.arrowsRev !== arrowsRev){
       arrowsRev = d.arrowsRev; arrows = Array.isArray(d.arrows) ? d.arrows : []; buildArrows();
+      checkArrowFocusValidity();   /* the selected arrow may have just been deleted */
     }
     if (d.searchesRev !== searchesRev){
       searchesRev = d.searchesRev;
@@ -1635,9 +1709,25 @@ async function apiReportSelection(){
      question the view is answering. */
   const mode = view.focus.stage === 2 ? 'neighborhood'
              : view.focus.stage === 1 ? 'single'
+             : view.focus.stage === 3 ? 'arrow'
              : view.filter.kind !== 'none' ? 'filter' : 'none';
+  /* An agent reading the report must be able to tell this is Arrow Focus and
+     which arrow, not just that "some focus" is up.
+
+     server/tb-atc-api.py:540 allowlists focusMode to
+     none|single|neighborhood|filter and silently downgrades anything else to
+     "none" — out of reach here (assignment is web/index.html only). The
+     server does NOT filter `focused[].type`, only length-clips it, so the
+     selected arrow's identity still reaches a reader as a synthetic entry
+     there even though the mode field itself round-trips as "none". */
+  const focArrow = view.focus.stage === 3 ? (() => {
+    const ar = arrowById(view.focus.arrow);
+    return {arrowId: view.focus.arrow, from: ar?.from ?? null, to: ar?.to ?? null};
+  })() : null;
+  if (focArrow) foc.push({id: focArrow.arrowId, type: 'arrow',
+    title: (arrowById(focArrow.arrowId)?.text) || (focArrow.from + ' → ' + focArrow.to)});
   const body = JSON.stringify({clientId: CLIENT_ID, selection: sel,
-                               focused: foc, focusMode: mode});
+                               focused: foc, focusMode: mode, focusedArrow: focArrow});
   /* Re-assert periodically even when unchanged. Selection is last-writer-wins
      across pages, so a page that goes quiet can be overwritten by another and
      would otherwise never correct the record. */
@@ -1764,6 +1854,7 @@ async function refresh(){
     buildItems(d.items);
     buildLinks(d.links);
     applyView();
+    checkArrowFocusValidity();   /* the selected arrow or a root may have just gone */
     /* Main only has a position once the ground has been built, so the resting
        centre is adopted on the first snapshot rather than at startup. */
     /* Recompute while resting so the centre follows the org, but never while
@@ -1822,16 +1913,45 @@ window.__atc = {
   /* framing internals, so a fit that looks wrong can be interrogated rather
      than guessed at: which constraint bound, and how much room it asked for */
   clearRect, frameDistance, frameTo, filteredView, neighbourhoodView, pickNode, pickAllHover,
+  pickArrow, pickClick, arrowInScope, enterArrowFocus,
+  /* CSS-pixel screen position of a node or an arrow's curve/label, so a test
+     can dispatch a REAL pointer event at that pixel rather than calling the
+     pick functions directly — proof the click path itself works, camera and
+     all, not just the scope math underneath it. */
+  screenOfNode(id){
+    const m = meshForKey(selKeyFor(id));
+    if (!m) return null;
+    const p = m.getWorldPosition(new THREE.Vector3()).project(camera);
+    return {x: (p.x*.5+.5)*innerWidth, y: (-p.y*.5+.5)*innerHeight};
+  },
+  screenOfArrow(arrowId, at = .5){
+    const g = arrowGroup.children.find(c => c.userData.ar && c.userData.ar.arrowId === arrowId);
+    if (!g) return null;
+    const ends = arrowEndpoints(g.userData.ar);
+    if (!ends) return null;
+    const curve = arrowCurve(ends.a, ends.b, g.userData.rank);
+    const p = curve.getPointAt(at).project(camera);
+    return {x: (p.x*.5+.5)*innerWidth, y: (-p.y*.5+.5)*innerHeight};
+  },
+  screenOfArrowHint(arrowId){
+    const g = arrowGroup.children.find(c => c.userData.ar && c.userData.ar.arrowId === arrowId);
+    if (!g || !g.userData.hint) return null;
+    const p = g.userData.hint.getWorldPosition(new THREE.Vector3()).project(camera);
+    return {x: (p.x*.5+.5)*innerWidth, y: (-p.y*.5+.5)*innerHeight};
+  },
   get hoverKeys(){ return hoverKeys; }, selectables, selKey,
   get controls(){ return controls; },
   get view(){ return view; },
+  get flying(){ return !!flight; },
   get tags(){ return tags; },
+  get arrows(){ return arrows; },
   get data(){ return DATA; },
   get apiUp(){ return apiUp; },
   get scene(){ return scene; },
   get camera(){ return camera; },
   get THREE(){ return THREE; },
   get scope(){ return {items: hiItems && [...hiItems], agents: hiAgents && [...hiAgents]}; },
+  get relations(){ return hiRelations && [...hiRelations]; },
   inScope,
   pull: apiPull,
 };
@@ -1850,14 +1970,18 @@ addEventListener('pointerup', e=>{
   if (!downXY) return;
   const moved = Math.hypot(e.clientX-downXY[0], e.clientY-downXY[1]); downXY=null;
   if (moved > 6) return;                       /* it was a drag, not a click */
-  const o = pickNode(e);
-  if (o){
+  const hit = pickClick(e);
+  if (hit && hit.kind === 'arrow'){
+    enterArrowFocus(hit.obj);
+  } else if (hit && hit.kind === 'node'){
+    const o = hit.obj;
     /* A click pushes a focus layer on top of whatever is showing. The fit's
        bookmark survives deliberately: clicking the background must be able to
        put the camera back on the fit it came from. */
     const k = selKey(o);
     if (view.focus.key && view.focus.key === k) view.focus.stage = view.focus.stage === 1 ? 2 : 1;
     else { view.focus.key = k; view.focus.stage = 1; }
+    view.focus.arrow = null;                /* a node click always replaces Arrow Focus */
     applyView();
     view.framing = 'focus'; userMoved = true;
     flyToNode(o);
@@ -1893,7 +2017,7 @@ function ownerOf(obj){
   while (o && !o.userData?.type) o = o.parent;
   return (o && o.userData.type) ? o : null;
 }
-function pickNode(ev){
+function pickTagOwner(ev){
   mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(mouse, camera);
   /* Tags draw with depth testing off, so they appear above everything. Picking
@@ -1904,10 +2028,13 @@ function pickNode(ev){
   itemMeshes.forEach(collect);
   Object.values(agentMeshes).forEach(collect);
   const tagHit = ray.intersectObjects(sprites, false)[0];
-  if (tagHit){
-    const owner = ownerOf(tagHit.object);
-    if (owner && inScope(owner)) return owner;
-  }
+  if (!tagHit) return null;
+  const owner = ownerOf(tagHit.object);
+  return (owner && inScope(owner)) ? owner : null;
+}
+function pickPlainNode(ev){
+  mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
   /* A ghosted node is out of play: it must not be clickable, and it must not
      block a lit node behind it either. Walking every hit and taking the first
      one that is in scope does both — rejecting only the nearest ghost would
@@ -1918,6 +2045,51 @@ function pickNode(ev){
     if (owner && inScope(owner)) return owner;
   }
   return null;
+}
+function pickNode(ev){
+  return pickTagOwner(ev) || pickPlainNode(ev);
+}
+/* Same fallback as inScope(), but for a raw id rather than a mesh — arrow
+   endpoints are ids, not meshes, until they resolve to one. */
+function idInScope(id){
+  if (!hiAgents) return true;
+  return String(id).startsWith('wi_') ? hiItems.has(id) : hiAgents.has(id);
+}
+/* An arrow is only clickable when both its endpoints are lit in the scope
+   that is actually rendering right now — the same rule a ghosted node
+   already follows for clicking and brushing. */
+function arrowInScope(g){
+  const u = g.userData;
+  return !!(u.fromId && u.toId && idInScope(u.fromId) && idInScope(u.toId));
+}
+/* The arrow's clickable surface: the curve, its head, and whatever labels
+   ride it — the short glyphs or, past the fallback threshold, the long-label
+   card. All draw with depth testing off, same as tags, so they win a click
+   over a lit node they visually overlap. */
+function pickArrow(ev){
+  mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  const objs = [];
+  arrowGroup.children.forEach(g => {
+    if (!arrowInScope(g)) return;
+    if (g.userData.line) objs.push(g.userData.line);
+    if (g.userData.head) objs.push(g.userData.head);
+    (g.userData.sprites || []).forEach(sp => { if (sp.visible) objs.push(sp); });
+  });
+  if (!objs.length) return null;
+  const hit = ray.intersectObjects(objs, false)[0];
+  return hit ? hit.object.parent : null;
+}
+/* One entry point for a click: tags first (existing precedence), then an
+   eligible arrow, then a plain node — "hit testing follows what the person
+   sees," and an arrow drawn on top of a node it crosses wins the click. */
+function pickClick(ev){
+  const tag = pickTagOwner(ev);
+  if (tag) return {kind:'node', obj:tag};
+  const ar = pickArrow(ev);
+  if (ar) return {kind:'arrow', obj:ar};
+  const node = pickPlainNode(ev);
+  return node ? {kind:'node', obj:node} : null;
 }
 
 /* Hover card and focus pane render the same facts; only the surface differs. */
@@ -2330,7 +2502,7 @@ function buildArrows(){
     g.add(line); g.userData.mats.push(lm); g.userData.line = line;
 
     /* head: a cone sitting on the last tangent */
-    const head = new THREE.Mesh(new THREE.ConeGeometry(.42, 1.25, 14),
+    const head = new THREE.Mesh(new THREE.ConeGeometry(.28, .83, 14),
       new THREE.MeshBasicMaterial({color: hex, transparent: true, opacity: .95, depthTest: false}));
     head.material.userData.base = .95;
     head.renderOrder = 9;
@@ -2537,7 +2709,7 @@ function setInputMode(mode){
 }
 /* the ONLY place focus is dropped */
 function clearFocus(){
-  view.focus.key = null; view.focus.stage = 0;
+  view.focus.key = null; view.focus.stage = 0; view.focus.arrow = null;
   if (typeof hideTagBox === 'function') hideTagBox();
   if (typeof detailEl !== 'undefined') detailEl.style.display = 'none';
   view.framing = 'none';                 /* releases the camera to ambient orbit */
@@ -2611,6 +2783,97 @@ function flyToNode(o){
   });
   showTagBox();
 }
+
+/* Fit points for Arrow Focus: the lit nodes (as any multi-node framing would
+   use), plus the geometry that makes the relationship set visible — the
+   curve of every lit relationship that bows away from the chord between its
+   nodes, and the long-label card when one is showing. Centres alone would
+   crop the bow and the card at the edge of the viewport. */
+const _afWorld = new THREE.Vector3();
+function arrowFocusFitPoints(){
+  const pts = [];
+  selectables().forEach(m => {
+    const u = m.userData;
+    const on = u.w ? hiItems?.has(u.w.id) : (u.a && hiAgents?.has(u.a.id));
+    if (on) fitPoints(m, pts);
+  });
+  if (!hiRelations) return pts;
+  arrowGroup.children.forEach(g => {
+    if (!hiRelations.has('arrow:' + g.userData.ar.arrowId)) return;
+    const ends = arrowEndpoints(g.userData.ar);
+    if (!ends) return;
+    const curve = arrowCurve(ends.a, ends.b, g.userData.rank);
+    const {u0, u1} = arrowSpan(curve);
+    for (let i = 0; i <= 6; i++) pts.push(curve.getPointAt(u0 + (u1 - u0) * i / 6));
+    if (g.userData.hint){
+      const sp = g.userData.hint;
+      sp.getWorldPosition(_afWorld);
+      const rx = sp.scale.x * .5, ry = sp.scale.y * .5;
+      pts.push(_afWorld.clone().add(new THREE.Vector3( rx,  ry, 0)));
+      pts.push(_afWorld.clone().add(new THREE.Vector3(-rx, -ry, 0)));
+    }
+  });
+  /* agent-family arcs bow upward toward the surface; tethers and links are
+     straight segments between points already in `pts`, so only arcs need
+     their own samples */
+  groundGroup.children.forEach(o => {
+    const u = o.userData;
+    if (!u.arc || !hiRelations.has('arc:' + u.from + '|' + u.to)) return;
+    const pos = o.geometry.attributes.position;
+    if (!pos || !pos.count) return;
+    [0, (pos.count / 2) | 0, pos.count - 1].forEach(i =>
+      pts.push(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i))));
+  });
+  return pts;
+}
+
+/* Enter Arrow Focus on `g` (an arrowGroup child). Occupies the same focus
+   layer a node click does: it replaces whatever was showing, node or arrow,
+   and leaves filter/fit beneath it untouched — the popScope() stack does not
+   know or care which kind of focus it is popping. */
+function enterArrowFocus(g){
+  const ar = g && g.userData && g.userData.ar;
+  if (!ar || !ar.arrowId) return;
+  /* the selected arrow again is a no-op: only the background pops it */
+  if (view.focus.stage === 3 && view.focus.arrow === ar.arrowId) return;
+  view.focus.key = null;
+  view.focus.arrow = ar.arrowId;
+  view.focus.stage = 3;
+  applyView();
+  view.framing = 'focus'; userMoved = true;
+  flyToArrowFocus();
+}
+function flyToArrowFocus(){
+  const pts = arrowFocusFitPoints();
+  if (pts.length){
+    const c = new THREE.Vector3();
+    pts.forEach(v => c.add(v)); c.multiplyScalar(1 / pts.length);
+    const e = approachDir(c);
+    const {camPos, target} = frameTo(pts, c, e, {floor: 7});
+    flyTo(camPos, target.clone(), () => {
+      const d = camPos.clone().sub(target);
+      orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+      orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(target);
+      userMoved = false;
+    });
+  }
+  showTagBox();               /* stage is 3, not 1: this hides it, same as flyToNode's call does for stage 2 */
+}
+
+/* Whether an arrow's root — a raw id off the wire, item or agent — still
+   names something in the current snapshot. Used to pop Arrow Focus when a
+   refresh removes the selected arrow or either endpoint out from under it. */
+function arrowRootExists(rawId){
+  const s = String(rawId);
+  if (s.startsWith('wi_')) return (DATA?.items || []).some(w => w.id === fullId(s));
+  return !!(DATA && (DATA.agents || []).some(a => a.id === s));
+}
+function checkArrowFocusValidity(){
+  if (view.focus.stage !== 3) return;
+  const ar = arrowById(view.focus.arrow);
+  if (!ar || !arrowRootExists(ar.from) || !arrowRootExists(ar.to)) popScope();
+}
+
 function markCamera(){
   camMark = {
     pos: camera.position.clone(), tgt: controls.target.clone(),
@@ -2856,10 +3119,13 @@ function tickFrame(){
   arrowGroup.children.forEach(g => {
     /* An arrow reads as a claim about both ends, so it is only at full strength
        when both ends are: ghosting one end and leaving the arrow bright would
-       point at something the view has already dismissed. */
+       point at something the view has already dismissed. Under Arrow Focus,
+       brightness is membership in the one-hop relationship set instead —
+       endpoints lit for another reason do not relight an unrelated arrow. */
     const u = g.userData;
-    const f = Math.min(u.fromId ? (u.fromId.startsWith('wi_') ? fi(u.fromId) : fa(u.fromId)) : 1,
-                       u.toId   ? (u.toId.startsWith('wi_')   ? fi(u.toId)   : fa(u.toId))   : 1);
+    const f = hiRelations ? (hiRelations.has('arrow:' + u.ar.arrowId) ? 1 : DIM)
+      : Math.min(u.fromId ? (u.fromId.startsWith('wi_') ? fi(u.fromId) : fa(u.fromId)) : 1,
+                 u.toId   ? (u.toId.startsWith('wi_')   ? fi(u.toId)   : fa(u.toId))   : 1);
     u.mats.forEach(m => { m.opacity = (m.userData.base ?? 1) * f; });
     u.sprites.forEach(sp => { sp.visible = f > .9; });   /* labels drop out when ghosted, as tags do */
   });
@@ -2878,7 +3144,12 @@ function tickFrame(){
   };
   groundGroup.children.forEach(m=>{
     const u=m.userData;
-    if (u.arc){ m.material.opacity = (!dimming || (hiAgents.has(u.from) && hiAgents.has(u.to))) ? .9 : .12; return; }
+    if (u.arc){
+      const lit = hiRelations ? hiRelations.has('arc:' + u.from + '|' + u.to)
+        : (!dimming || (hiAgents.has(u.from) && hiAgents.has(u.to)));
+      m.material.opacity = lit ? .9 : .12;
+      return;
+    }
     if (u.a){
       const f = fa(u.a.id);
       /* Selection is an overlay, not an exemption: a brushed node still ghosts
@@ -2956,7 +3227,10 @@ function tickFrame(){
     const a = APOS[u.hid]; if (!a) return;
     const p = u.itemMesh.position;
     _end.copy(a).add(new THREE.Vector3(0,.25,0));
-    u.mat.opacity = (u.state==='hold' ? .22 : .4) * Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
+    const tetherLit = hiRelations
+      ? hiRelations.has('tether:' + u.itemMesh.userData.w.id + '|' + u.hid) ? 1 : DIM
+      : Math.min(fa(u.hid), fi(u.itemMesh.userData.w.id));
+    u.mat.opacity = (u.state==='hold' ? .22 : .4) * tetherLit;
     u.geo.setPositions([p.x,p.y,p.z, _end.x,_end.y,_end.z]);
   });
   /* agent-to-agent links carry the travelling pulse: white crest running from
@@ -2967,7 +3241,10 @@ function tickFrame(){
     if (!A || !B){ o.visible = false; return; }
     o.visible = true;
     const fast = u.state === 'run';
-    u.mat.opacity = .5 * Math.min(fa(u.from), fa(u.to));
+    const linkLit = hiRelations
+      ? hiRelations.has('link:' + u.from + '|' + u.to) ? 1 : DIM
+      : Math.min(fa(u.from), fa(u.to));
+    u.mat.opacity = .5 * linkLit;
     u.head = (u.head + (fast ? .011 : .006)) % 1;
     const pos = u.pos, rgb = u.rgb;
     for (let i = 0; i < TETHER_SEGS; i++){
