@@ -20,6 +20,7 @@ what it currently has selected. External callers use the verbs below.
     DELETE /api/arrows?author=<who>      clear that author's
     DELETE /api/arrows?all=true          clear every author's
     DELETE /api/arrows/<arrowId>         clear one
+    GET    /api/help                     this service, documented for operators
     GET    /api/searches                 [{searchId, query, ids, label, source, author, at}]
     POST   /api/searches                 {searches:[{query|ids, label, author, searchId?}]}
     DELETE /api/searches/<searchId>      forget one
@@ -110,6 +111,139 @@ state = {
     "searchSeq": 0,
     "searchesRev": 0,
 }
+
+
+HELP = """# Tightbeam Air Traffic Control — operating the view
+
+A live 3D display of this org. You are reading its own documentation; this
+endpoint is the authority, and any skill or note that disagrees with it is
+stale. `GET /api/help` returns this text; add `?format=json` for the endpoint
+list as data.
+
+There is no authentication. It drives a display and nothing else. Several
+agents and at least one human share it at the same time, so everything below
+about provenance and cleanup is about not trampling each other.
+
+## What you can do
+
+  read what a human is looking at     GET  /api/selection
+  read everything at once             GET  /api/state
+  read the population                 GET  /data.json
+  narrow the view to a set            POST /api/filter   {ids:[...]}
+  narrow the view by words            POST /api/filter   {query:"..."}
+  point at one node                   POST /api/focus    {id, mode}
+  add to what is selected             POST /api/select   {add:[...]}
+  fly to the selection                POST /api/fit      {on:true}
+  pin a note to a node                POST /api/tags
+  draw a relation between two         POST /api/arrows
+  file/rename a search                POST /api/searches
+
+## Ids
+
+Work items are the substrate's full id, `wi_` and a UUID — the same string
+`tightbeam work-item-get` accepts. Agents are their session suffix, `s_...`.
+The feed's `short` field is for display only; act on `id`.
+
+## Reading before writing
+
+`/api/selection` returns two different things and they do not imply each other:
+
+  selected   what a human brushed
+  focused    what a focus or filter is lighting, with `mode`
+
+A human's bare "these" or "this one" almost always means `selected`. Answering
+about the wrong one is the most common way to be confidently useless here.
+
+## Searching, and naming what you searched for
+
+`POST /api/filter` with `ids` narrows to a set; with `query` it runs the same
+text match a human types. Every search is FILED as a card the human can click
+to run again, so a filter is not a fleeting command — it leaves something
+behind.
+
+**Name it.** Pass `query` (and for an id list, a `label` via /api/searches) that
+summarises WHAT WAS ASKED, not what matched:
+
+  good   "everything blocking the 0.1.8 cut"
+  good   "cards the reviewer has not seen"
+  bad    "17 picked"
+  bad    "filter"
+
+The terms say what matched. The name says what the question was, and it is the
+only thing a human reads when deciding whether to re-open your search an hour
+later. A card without one is nearly useless to them.
+
+  POST /api/searches {"searches":[{"searchId":"q7","label":"blocking the cut"}]}
+
+edits a card in place — revise yours rather than filing near-duplicates.
+Identical searches are refreshed, not stacked, so re-running one on a cadence
+leaves a single card.
+
+## Annotating
+
+A **tag** is a short label pinned above one node. An **arrow** is a labelled
+curve between two, for a relation: blocks, owns, caused. Colour is yours from
+`neutral red amber green cyan blue violet`, and means whatever you decide —
+group a batch by colour rather than decorating each one differently.
+
+**Always pass `author`** — a name a reader would recognise, like `watchdog:018`.
+It renders under the note, and it is how you clean up your own work without
+taking anyone else's: `DELETE /api/tags?author=watchdog:018`. An unqualified
+clear-all is refused for that reason; `?all=true` exists for a human resetting
+the board, not for you.
+
+Short arrow labels ride the curve; long ones fall back to a card. Keep them to
+two or three words and put the explanation in a tag.
+
+## Not fighting the human
+
+The display changes under their hands. Prefer tagging, which is passive, over
+focusing, which moves their camera. Say what you did and why. Clean up when the
+question is closed. If they are mid-drag your commands are held until they lift
+the pointer — that is deliberate, not lag.
+
+## What the picture means
+
+Agents hang below the grid as discs, laid out as the spawner tree; work items
+float above it and descend a band per satisfied requirement. A ring on the
+floor says whether the work reached the branch. An agent taking a turn wears a
+rippling ring. Ghosted means faint and still there — nothing is ever hidden.
+
+Layers stack: a search, then a fit (`f`), then a focus. The innermost renders.
+A background click pops one layer; the mode strip at the bottom left names what
+is in force.
+"""
+
+
+def help_json():
+    return {
+        "service": "tightbeam-atc",
+        "text": "GET /api/help",
+        "conventions": {
+            "ids": "work items are full wi_<uuid>; agents are s_<suffix>",
+            "author": "always send it; it renders, and it scopes your cleanup",
+            "searchNames": "name a search for what was ASKED, not what matched",
+        },
+        "endpoints": [
+            {"method": "GET", "path": "/api/help", "does": "this document"},
+            {"method": "GET", "path": "/api/state", "does": "selection, focus, tags, arrows, searches"},
+            {"method": "GET", "path": "/api/selection", "does": "{selected, focused:{mode,nodes}}"},
+            {"method": "GET", "path": "/data.json", "does": "the population and its derived state"},
+            {"method": "POST", "path": "/api/select", "body": "{add:[id], remove:[id], clear:bool}"},
+            {"method": "POST", "path": "/api/focus", "body": '{id, mode:"single"|"neighborhood"|"clear"}'},
+            {"method": "POST", "path": "/api/fit", "body": "{on:bool}"},
+            {"method": "POST", "path": "/api/filter", "body": '{ids:[id]} | {query:"text"} | {clear:true}'},
+            {"method": "GET", "path": "/api/searches", "does": "the filed search cards"},
+            {"method": "POST", "path": "/api/searches", "body": "{searches:[{query|ids, label, author, searchId?}]}"},
+            {"method": "DELETE", "path": "/api/searches/<id>", "does": "forget one"},
+            {"method": "GET", "path": "/api/tags", "does": "every tag"},
+            {"method": "POST", "path": "/api/tags", "body": "{tags:[{target, text, color, source, author}]}"},
+            {"method": "DELETE", "path": "/api/tags?author=<who>", "does": "remove yours"},
+            {"method": "GET", "path": "/api/arrows", "does": "every arrow"},
+            {"method": "POST", "path": "/api/arrows", "body": "{arrows:[{from, to, text, color, author}]}"},
+            {"method": "DELETE", "path": "/api/arrows?author=<who>", "does": "remove yours"},
+        ],
+    }
 
 
 def push(kind, **payload):
@@ -259,6 +393,18 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/searches":
             with lock:
                 snap = list(state["searches"].values())
+        elif u.path == "/api/help":
+            if (parse_qs(u.query).get("format") or [""])[0] == "json":
+                snap = help_json()
+            else:
+                body = HELP.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return self.wfile.write(body)
         elif u.path == "/api/pull":
             try:
                 since = int((parse_qs(u.query).get("since") or ["0"])[0])
