@@ -108,7 +108,10 @@
   #hovercards .hc .k { color:#7c8188; text-transform:uppercase; letter-spacing:.12em;
     font-size:9.5px; display:block; margin:6px 0 2px; }
   #hovercards .hc .seg { color:#9a9ea6; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
-  #leaders { position:fixed; inset:0; pointer-events:none; z-index:7; }
+  /* an svg is a replaced element: inset:0 alone leaves it at its intrinsic
+     300x150 in the corner, silently clipping every leader that goes further */
+  #leaders { position:fixed; left:0; top:0; width:100%; height:100%;
+    pointer-events:none; z-index:7; overflow:visible; }
   #leaders line { stroke:#b08d57; stroke-width:1.2; stroke-dasharray:3 4; opacity:.85; }
   #leaders circle { fill:#b08d57; }
   body.light #hovercards .hc { background:#faf7eef5; color:#26323c;
@@ -1944,31 +1947,72 @@ function showHover(nodes, ev){
   hoverKeys.clear();
   nodes.forEach(n => { const k = selKey(n); if (k) hoverKeys.add(k); });
   if (!nodes.length) return;
-  const W = innerWidth, H = innerHeight;
-  const CARD = Math.min(300, W - 24), GAP = 8;
-  /* stack the cards on whichever side has room, so they never cover the thing
-     they describe */
-  const left = ev.clientX > W * .55;
-  let y = Math.max(12, ev.clientY - 40);
-  nodes.forEach(node => {
+
+  const W = innerWidth, H = innerHeight, PAD = 10;
+  const CARD = Math.min(290, W - 2 * PAD);
+  /* Where each node actually is on screen. Nodes found together are stacked
+     along one line of sight, so these are close and often identical — the
+     cards cannot be placed AT them, they have to be placed AROUND them. */
+  const pts = nodes.map(n => screenOf(n));
+  const cx = pts.reduce((a, p) => a + p.x, 0) / pts.length;
+  const cy = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+
+  const cards = nodes.map((node, i) => {
     const el = document.createElement('div');
     el.className = 'hc';
     el.innerHTML = nodeContent(node.userData, true);
     hoverLayer.appendChild(el);
-    const h = el.getBoundingClientRect().height;
-    if (y + h > H - 12) y = Math.max(12, H - 12 - h);
-    const x = left ? Math.max(12, ev.clientX - 26 - CARD) : Math.min(W - 12 - CARD, ev.clientX + 26);
-    el.style.left = x + 'px'; el.style.top = y + 'px';
-    /* the leader runs from the card's inner edge to the node itself */
-    const p = screenOf(node);
+    return {el, pt: pts[i], h: el.getBoundingClientRect().height};
+  });
+
+  /* Fan them around the cluster, starting up-right and going clockwise, far
+     enough out that no card sits over the things it is describing. One card
+     still gets an angle rather than a fixed corner, so a second node appearing
+     does not make the first jump somewhere else. */
+  const n = cards.length;
+  const spread = n === 1 ? [-0.6] : cards.map((_, i) => -Math.PI * 0.75 + i * (Math.PI * 1.5) / (n - 1));
+  const reach = 120 + Math.max(...cards.map(c => c.h)) * 0.35;
+
+  cards.forEach((c, i) => {
+    const a = spread[i];
+    let x = cx + Math.cos(a) * (reach + CARD * 0.5) - CARD / 2;
+    let y = cy + Math.sin(a) * (reach + c.h * 0.5) - c.h / 2;
+    x = Math.max(PAD, Math.min(W - PAD - CARD, x));
+    y = Math.max(PAD, Math.min(H - PAD - c.h, y));
+    c.x = x; c.y = y;
+  });
+
+  /* Nudge apart anything that still overlaps after clamping — the viewport
+     edges push cards back toward each other. */
+  for (let pass = 0; pass < 3; pass++){
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++){
+      const a = cards[i], b = cards[j];
+      const overlapY = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+      const overlapX = Math.min(a.x + CARD, b.x + CARD) - Math.max(a.x, b.x);
+      if (overlapX <= 0 || overlapY <= 0) continue;
+      const push = (overlapY + 8) / 2;
+      if (a.y < b.y){ a.y -= push; b.y += push; } else { a.y += push; b.y -= push; }
+      a.y = Math.max(PAD, Math.min(H - PAD - a.h, a.y));
+      b.y = Math.max(PAD, Math.min(H - PAD - b.h, b.y));
+    }
+  }
+
+  cards.forEach(c => {
+    c.el.style.left = c.x + 'px'; c.el.style.top = c.y + 'px';
+    /* the leader leaves the card at the point on its border facing the node,
+       so the line always reads as coming OUT of that card */
+    const mx = c.x + CARD / 2, my = c.y + c.h / 2;
+    const dx = c.pt.x - mx, dy = c.pt.y - my;
+    const t = Math.min(Math.abs(dx) > 1e-3 ? (CARD / 2) / Math.abs(dx) : Infinity,
+                       Math.abs(dy) > 1e-3 ? (c.h / 2) / Math.abs(dy) : Infinity);
+    const ex = mx + dx * t, ey = my + dy * t;
     const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    ln.setAttribute('x1', left ? x + CARD : x); ln.setAttribute('y1', y + Math.min(h, 22));
-    ln.setAttribute('x2', p.x); ln.setAttribute('y2', p.y);
+    ln.setAttribute('x1', ex); ln.setAttribute('y1', ey);
+    ln.setAttribute('x2', c.pt.x); ln.setAttribute('y2', c.pt.y);
     leaderSvg.appendChild(ln);
     const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    dot.setAttribute('cx', p.x); dot.setAttribute('cy', p.y); dot.setAttribute('r', 2.4);
+    dot.setAttribute('cx', c.pt.x); dot.setAttribute('cy', c.pt.y); dot.setAttribute('r', 3);
     leaderSvg.appendChild(dot);
-    y += h + GAP;
   });
 }
 
