@@ -358,11 +358,22 @@ const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0
    the user has dragged the camera into, not just the canonical home view */
 let orbitR = 66, orbitH = 36;
 const orbitTgt = HOME_TGT.clone();
+/* The resting turntable turns about MAIN, not about the middle of the crowd.
+   Main is the org's root — the one node whose position means something on its
+   own — and a centroid drifts as agents come and go, so the scene appeared to
+   wander when nothing had moved. Every other framing (a selection, a focus, a
+   search) still turns about the centre of what it framed, because there the
+   subject IS the group. */
+function homeTarget(){
+  const main = (DATA?.agents || []).find(a => a.kind === 'main');
+  const p = main && APOS[main.id];
+  return p ? p.clone() : HOME_TGT.clone();
+}
 function flyTo(pos, target, after){
   flight = {p0:camera.position.clone(), p1:pos.clone(),
             t0:controls.target.clone(), t1:target.clone(), k:0, after};
 }
-let lastGen = 0, agentsHash = '';
+let lastGen = 0, agentsHash = '', _rested = false;
 
 function disposeGroup(g){
   g.traverse(o=>{ if(o.geometry) o.geometry.dispose();
@@ -1703,11 +1714,19 @@ async function refresh(){
     if (d.generatedAt === lastGen) return;
     lastGen = d.generatedAt; DATA = d;
     migrateViewKeys();
+    const firstSnapshot = !_rested;
     const h = d.agents.map(a=>a.id+(a.retired?1:0)+(a.turn||'')).join('|');
     if (h !== agentsHash){ agentsHash = h; buildGround(d.agents); }
     buildItems(d.items);
     buildLinks(d.links);
     applyView();
+    /* Main only has a position once the ground has been built, so the resting
+       centre is adopted on the first snapshot rather than at startup. */
+    if (firstSnapshot && view.framing === 'none' && !userMoved){
+      _rested = true;
+      orbitTgt.copy(homeTarget());
+      controls.target.copy(orbitTgt);
+    }
     spawnWakes(); spawnMessages();
     const age = Math.round((Date.now()-d.generatedAt)/1000);
     const el = document.getElementById('mode');
@@ -1800,8 +1819,9 @@ addEventListener('pointerup', e=>{
     clearFocus();
     const ang = Math.atan2(camera.position.x, camera.position.z);
     const home = new THREE.Vector3(Math.sin(ang)*66, 34, Math.cos(ang)*66);
-    flyTo(home, HOME_TGT, ()=>{
-      orbitAngle = ang; orbitR = 66; orbitH = 36; orbitTgt.copy(HOME_TGT);
+    const rest = homeTarget();
+    flyTo(home, rest, ()=>{
+      orbitAngle = ang; orbitR = 66; orbitH = 36; orbitTgt.copy(rest);
       userMoved = false;
     });
   } else {
