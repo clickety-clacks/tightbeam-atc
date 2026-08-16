@@ -2342,15 +2342,28 @@ function fitSelection(){
 /* ---------- the working ring ----------
    Same frequency, same amplitude, the period offset between the three. */
 const RING_SEGS = 90;          /* points around the loop */
-const RING_LOBES = 5;          /* waves around the circumference */
-const RING_AMP = .075;         /* how far the edge travels, as a fraction of R */
+/* The Siri look: several sines superimposed along a line, each its own colour
+   and translucent, crossing one another as they go. Wrapped round a circle
+   here. Each ring carries its OWN set of modes rather than the same shape at a
+   different radius — that is what makes them cross and interleave instead of
+   nesting like contour lines. The rates do not divide into each other, so the
+   composite never repeats. */
+const RING_WAVES = [
+  { rot: 0,   modes: [{k:5, a:1.00, r:1.00}, {k:3, a:.60, r:.71}, {k:8, a:.30, r:1.33}] },
+  { rot: .70, modes: [{k:4, a:.95, r:.83}, {k:7, a:.50, r:1.19}, {k:2, a:.45, r:.61}] },
+  { rot: 1.4, modes: [{k:6, a:.90, r:1.11}, {k:3, a:.55, r:.67}, {k:9, a:.28, r:1.53}] },
+];
+const RING_NORM = 1 / 1.55;    /* keep the summed swing near RING_AMP */
+
+const RING_AMP = .17;         /* how far the edge travels, as a fraction of R */
 const RING_SPEED = 3.4;        /* how fast it oscillates, in place */
 /* The aberration is radial as well as temporal. A phase offset alone moves a
    point by a fraction of the amplitude, which is sub-pixel on a small disc, so
    the three drew on top of each other and summed to plain white everywhere. A
    lens splits its components across the radius; so does this. */
 const RING_SPLIT = [0, .045, .09];    /* period offset, in turns */
-const RING_SPREAD = [1, 1.028, 1.056]; /* and radius, so the fringes are visible */
+/* nearly the same radius: they should overlap and cross, not sit in rings */
+const RING_SPREAD = [1, 1.012, 1.024];
 
 function ringColours(){
   /* pure-ish components so they recombine toward the theme's own ink */
@@ -2361,7 +2374,7 @@ function ringColours(){
 function ensureRings(m){
   if (m.userData.rings) return m.userData.rings;
   m.userData.rings = ringColours().map(c => {
-    const mat = new LineMaterial({ color: c, linewidth: 2.4, transparent: true,
+    const mat = new LineMaterial({ color: c, linewidth: 2.6, transparent: true,
       opacity: .8, depthTest: false,
       /* additive sums the three back to white on a dark ground; on paper the
          same trick has to subtract instead or it bleaches into the page */
@@ -2384,7 +2397,7 @@ function ensureRings(m){
    invisible and the result was a solid white line. */
 function updateRings(m, t){
   const R = m.userData.ringR ??
-    (m.userData.ringR = (m.geometry?.parameters?.radius || .8) * 1.16);
+    (m.userData.ringR = (m.geometry?.parameters?.radius || .8) * 1.5);
   const rings = ensureRings(m);
   const dim = m.userData.dim ?? 1;
   rings.forEach((seg, i) => {
@@ -2395,13 +2408,22 @@ function updateRings(m, t){
        are, sin(ωt) drives them. Twice a cycle the amplitude passes through zero
        and the ring is briefly a perfect circle, which is what makes it read as
        something vibrating rather than something spinning. */
-    const swing = Math.sin(t * RING_SPEED + RING_SPLIT[i] * Math.PI * 2);
-    const anchor = m.userData.phase || 0;   /* each agent's nodes sit differently */
+    const wave = RING_WAVES[i];
+    const anchor = (m.userData.phase || 0) + wave.rot;
+    const tOff = RING_SPLIT[i] * Math.PI * 2;
+    /* how hard each mode is driven right now — where its nodes sit does not move */
+    const drive = wave.modes.map((md, q) => Math.sin(t * RING_SPEED * md.r + tOff + q * 1.9) * md.a);
+    const wob = a => {
+      let v = 0;
+      for (let q = 0; q < wave.modes.length; q++)
+        v += Math.sin(wave.modes[q].k * a + anchor + q * 1.3) * drive[q];
+      return v * RING_NORM;
+    };
     const Ri = R * RING_SPREAD[i];
     for (let j = 0; j < RING_SEGS; j++){
       const a0 = (j / RING_SEGS) * Math.PI * 2, a1 = ((j + 1) / RING_SEGS) * Math.PI * 2;
-      const r0 = Ri * (1 + RING_AMP * Math.sin(RING_LOBES * a0 + anchor) * swing);
-      const r1 = Ri * (1 + RING_AMP * Math.sin(RING_LOBES * a1 + anchor) * swing);
+      const r0 = Ri * (1 + RING_AMP * wob(a0));
+      const r1 = Ri * (1 + RING_AMP * wob(a1));
       const o = j * 6;
       buf[o]   = Math.cos(a0) * r0; buf[o+1] = 0; buf[o+2] = Math.sin(a0) * r0;
       buf[o+3] = Math.cos(a1) * r1; buf[o+4] = 0; buf[o+5] = Math.sin(a1) * r1;
