@@ -2375,7 +2375,7 @@ function ensureRings(m){
   if (m.userData.rings) return m.userData.rings;
   m.userData.rings = ringColours().map(c => {
     const mat = new LineMaterial({ color: c, linewidth: 2.6, transparent: true,
-      opacity: .8, depthTest: false,
+      opacity: .3, depthTest: false,
       /* additive sums the three back to white on a dark ground; on paper the
          same trick has to subtract instead or it bleaches into the page */
       blending: T.name === 'light' ? THREE.MultiplyBlending : THREE.AdditiveBlending });
@@ -2436,7 +2436,10 @@ function updateRings(m, t){
     /* A ghosted agent is still working, so the ring keeps moving and simply
        goes translucent with the rest of it. Hiding it outright — the rule tags
        follow — would have said the opposite: that the work had stopped. */
-    seg.material.opacity = .8 * dim;
+    /* 30% at full strength. Ghosting halves it rather than applying the scene's
+       0.2 — at 30% of 30% the ring would have vanished, and an agent that is
+       out of scope is still working. */
+    seg.material.opacity = .3 * (dim < .999 ? .5 : 1);
     seg.visible = true;
   });
 }
