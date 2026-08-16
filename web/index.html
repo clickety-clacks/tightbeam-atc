@@ -1629,9 +1629,13 @@ async function apiReportSelection(){
     ...[...(hiItems || [])].map(id => describe('item', id)),
     ...[...(hiAgents || [])].map(id => describe('agent', id)),
   ];
-  const mode = view.filter.kind !== 'none' ? 'filter'
-             : view.focus.stage === 2 ? 'neighborhood'
-             : view.focus.stage === 1 ? 'single' : 'none';
+  /* Name the layer that is actually rendering, innermost first — the same
+     order the scene uses. Reporting the filter while a focus was lit told an
+     agent "filter" and handed it the focus's nodes, which is a lie about which
+     question the view is answering. */
+  const mode = view.focus.stage === 2 ? 'neighborhood'
+             : view.focus.stage === 1 ? 'single'
+             : view.filter.kind !== 'none' ? 'filter' : 'none';
   const body = JSON.stringify({clientId: CLIENT_ID, selection: sel,
                                focused: foc, focusMode: mode});
   /* Re-assert periodically even when unchanged. Selection is last-writer-wins
