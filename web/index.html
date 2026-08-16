@@ -1928,6 +1928,7 @@ const hoverKeys = new Set();
    re-aimed every frame at the node's current position. The cards stay put:
    text that jitters is unreadable, and only the line has to track. */
 const hoverLeaders = [];
+const HOVER_HOLD = 34;   /* px: how far a hovered node may drift and keep its card */
 const HOVER_WHITE = new THREE.Color(0xffffff);
 
 const hoverLayer = document.getElementById('hovercards');
@@ -2029,10 +2030,32 @@ function aimLeaders(){
   }
 }
 
+let hoverGrace = null;
 addEventListener('pointermove', e => {
-  if (!onCanvas(e)) return clearHover();
+  if (!onCanvas(e)){ clearTimeout(hoverGrace); hoverGrace = null; return clearHover(); }
   const nodes = pickAllHover(e);
-  if (!nodes.length) return clearHover();
+  if (!nodes.length){
+    /* Nodes drift under a stationary pointer, so an empty pick usually means
+       the thing bobbed off the cursor rather than that the pointer left it.
+       Keep whatever is already hovered while it stays near — a card set that
+       tears down and rebuilds every time an item breathes is unusable — and
+       only give up once the pointer is genuinely somewhere else. */
+    const held = hoverLeaders.filter(L => {
+      const q = screenOf(L.node);
+      return Math.hypot(q.x - e.clientX, q.y - e.clientY) < HOVER_HOLD;
+    });
+    if (held.length){ clearTimeout(hoverGrace); hoverGrace = null; return; }
+    if (hoverKeys.size && hoverGrace == null)
+      hoverGrace = setTimeout(() => { hoverGrace = null; clearHover(); }, 160);
+    return;
+  }
+  clearTimeout(hoverGrace); hoverGrace = null;
+  /* Lay the cards out only when the SET under the pointer changes. Rebuilding
+     on every pointer event re-anchored them to the cluster's centre, which
+     bobs with the nodes — so the smallest hand movement shuffled the cards
+     around. The line tracks the animation; the cards hold still. */
+  const keys = nodes.map(selKey).filter(Boolean);
+  if (keys.length === hoverKeys.size && keys.every(k => hoverKeys.has(k))) return;
   showHover(nodes, e);
 });
 

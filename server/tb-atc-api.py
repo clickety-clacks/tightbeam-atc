@@ -129,7 +129,7 @@ about provenance and cleanup is about not trampling each other.
   read what a human is looking at     GET  /api/selection
   read everything at once             GET  /api/state
   read the population                 GET  /data.json
-  narrow the view to a set            POST /api/filter   {ids:[...]}
+  narrow the view to a set            POST /api/filter   {ids:[...], query|label}
   narrow the view by words            POST /api/filter   {query:"..."}
   point at one node                   POST /api/focus    {id, mode}
   add to what is selected             POST /api/select   {add:[...]}
@@ -161,8 +161,9 @@ text match a human types. Every search is FILED as a card the human can click
 to run again, so a filter is not a fleeting command — it leaves something
 behind.
 
-**Name it.** Pass `query` (and for an id list, a `label` via /api/searches) that
-summarises WHAT WAS ASKED, not what matched:
+**Naming is required, not encouraged.** A filter carrying `ids` is REFUSED
+without a `query` or a `label`, and so is a new card through /api/searches. The
+refusal carries this guidance. Name it for WHAT WAS ASKED, not what matched:
 
   good   "everything blocking the 0.1.8 cut"
   good   "cards the reviewer has not seen"
@@ -245,6 +246,14 @@ def help_json():
         ],
     }
 
+
+NAME_GUIDANCE = (
+    "Name the search after what the user asked for. Pass `query` (the words) "
+    "or `label` (a summary) — for an id list, `label` is what a human will "
+    "read on the card. Say what the QUESTION was, not what matched: "
+    "\"everything blocking the 0.1.8 cut\", not \"17 picked\". A card with no "
+    "name is nearly useless to whoever finds it later."
+)
 
 def push(kind, **payload):
     state["seq"] += 1
@@ -483,7 +492,14 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     ids = id_list(b.get("ids"))
                     query = clip(b.get("query"), MAX_SEARCH_LABEL)
-                    if not ids and query:
+                    label = clip(b.get("label"), MAX_SEARCH_LABEL)
+                    # A filter is filed as a card the human can re-open, so an
+                    # unnamed one is a row of numbers nobody can act on later.
+                    # Refusing is kinder than accepting and being useless.
+                    if ids and not (query or label):
+                        out = ({"error": "name this search",
+                                "guidance": NAME_GUIDANCE}, 400)
+                    elif not ids and query:
                         # a text search, the same thing a human types: the page
                         # matches it against titles and ids. Without this the
                         # only way to express a filter on the wire was a picked
@@ -496,10 +512,12 @@ class Handler(BaseHTTPRequestHandler):
                     elif not ids:
                         out = ({"error": "ids or query required"}, 400)
                     else:
-                        rec = _file_search(clip(b.get("query"), MAX_SEARCH_LABEL),
-                                           ids, b.get("author"), "agent")
+                        rec = _file_search(query, ids, b.get("author"), "agent")
+                        if label:
+                            rec["label"] = label
                         save_tags()
                         out = (push("filter", ids=ids, clear=False,
+                                    query=query or label,
                                     searchId=rec["searchId"]), 200)
 
             if u.path == "/api/fit":
@@ -588,7 +606,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Create or edit. A searchId edits that card in place, so a
                 # human can reopen a search and change its terms, and an agent
                 # can revise one it filed, without piling up near-duplicates.
-                made = []
+                made, unnamed = [], []
                 raw = b.get("searches")
                 for q in (raw[:MAX_SEARCHES] if isinstance(raw, list) else []):
                     if not isinstance(q, dict):
@@ -603,6 +621,10 @@ class Handler(BaseHTTPRequestHandler):
                     query = (q.get("query") or "").strip()[:MAX_SEARCH_LABEL]
                     ids = id_list(q.get("ids"))
                     if not query and not ids and not prev:
+                        continue
+                    # a NEW card must arrive named; editing one by id need not
+                    if not prev and not (query or q.get("label")):
+                        unnamed.append(ids[:3])
                         continue
                     if prev:
                         rec = dict(prev)
@@ -623,7 +645,12 @@ class Handler(BaseHTTPRequestHandler):
                 if made:
                     state["searchesRev"] += 1
                     save_tags()
-                out = ({"searches": made}, 200)
+                if unnamed and not made:
+                    out = ({"error": "name this search", "guidance": NAME_GUIDANCE}, 400)
+                else:
+                    out = ({"searches": made,
+                            **({"refused": len(unnamed), "guidance": NAME_GUIDANCE}
+                               if unnamed else {})}, 200)
 
             if u.path == "/api/tags/clear":
                 state["tags"].clear(); state["tagsRev"] += 1; save_tags()
