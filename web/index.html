@@ -2344,7 +2344,7 @@ function fitSelection(){
 const RING_SEGS = 90;          /* points around the loop */
 const RING_LOBES = 5;          /* waves around the circumference */
 const RING_AMP = .075;         /* how far the edge travels, as a fraction of R */
-const RING_SPEED = 1.15;       /* how fast the wave travels round */
+const RING_SPEED = 3.4;        /* how fast it oscillates, in place */
 /* The aberration is radial as well as temporal. A phase offset alone moves a
    point by a fraction of the amplitude, which is sub-pixel on a small disc, so
    the three drew on top of each other and summed to plain white everywhere. A
@@ -2389,12 +2389,19 @@ function updateRings(m, t){
   const dim = m.userData.dim ?? 1;
   rings.forEach((seg, i) => {
     const buf = seg.userData.buf ??= new Float32Array(RING_SEGS * 6);
-    const phase = t * RING_SPEED + RING_SPLIT[i] * Math.PI * 2;
+    /* A STANDING wave: the lobes stay where they are and swell and invert in
+       place, rather than the pattern rotating round the ring. So the angle term
+       and the time term are separate factors — sin(kθ) fixes where the nodes
+       are, sin(ωt) drives them. Twice a cycle the amplitude passes through zero
+       and the ring is briefly a perfect circle, which is what makes it read as
+       something vibrating rather than something spinning. */
+    const swing = Math.sin(t * RING_SPEED + RING_SPLIT[i] * Math.PI * 2);
+    const anchor = m.userData.phase || 0;   /* each agent's nodes sit differently */
     const Ri = R * RING_SPREAD[i];
     for (let j = 0; j < RING_SEGS; j++){
       const a0 = (j / RING_SEGS) * Math.PI * 2, a1 = ((j + 1) / RING_SEGS) * Math.PI * 2;
-      const r0 = Ri * (1 + RING_AMP * Math.sin(RING_LOBES * a0 + phase));
-      const r1 = Ri * (1 + RING_AMP * Math.sin(RING_LOBES * a1 + phase));
+      const r0 = Ri * (1 + RING_AMP * Math.sin(RING_LOBES * a0 + anchor) * swing);
+      const r1 = Ri * (1 + RING_AMP * Math.sin(RING_LOBES * a1 + anchor) * swing);
       const o = j * 6;
       buf[o]   = Math.cos(a0) * r0; buf[o+1] = 0; buf[o+2] = Math.sin(a0) * r0;
       buf[o+3] = Math.cos(a1) * r1; buf[o+4] = 0; buf[o+5] = Math.sin(a1) * r1;
