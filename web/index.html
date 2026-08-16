@@ -358,16 +358,26 @@ const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0
    the user has dragged the camera into, not just the canonical home view */
 let orbitR = 66, orbitH = 36;
 const orbitTgt = HOME_TGT.clone();
-/* The resting turntable turns about MAIN, not about the middle of the crowd.
-   Main is the org's root — the one node whose position means something on its
-   own — and a centroid drifts as agents come and go, so the scene appeared to
-   wander when nothing had moved. Every other framing (a selection, a focus, a
-   search) still turns about the centre of what it framed, because there the
-   subject IS the group. */
+/* The resting turntable turns about the middle of the LIVE org: every agent
+   still active and every item something still holds. Orphans are excluded on
+   purpose — an item nobody holds is off to one side by definition, and letting
+   the abandoned work drag the centre of the view toward it gives the org a
+   false middle. With nothing to average, the old fixed point stands in. */
+const _ht = new THREE.Vector3();
 function homeTarget(){
-  const main = (DATA?.agents || []).find(a => a.kind === 'main');
-  const p = main && APOS[main.id];
-  return p ? p.clone() : HOME_TGT.clone();
+  const c = new THREE.Vector3();
+  let n = 0;
+  itemMeshes.forEach(m => {
+    const w = m.userData.w;
+    if (!w || !(w.holders || []).length) return;     /* orphaned: no live holder */
+    c.add(m.getWorldPosition(_ht)); n++;
+  });
+  Object.values(agentMeshes).forEach(m => {
+    const a = m.userData.a;
+    if (!a || a.retired) return;                     /* retired agents are not the org either */
+    c.add(m.getWorldPosition(_ht)); n++;
+  });
+  return n ? c.multiplyScalar(1 / n) : HOME_TGT.clone();
 }
 function flyTo(pos, target, after){
   flight = {p0:camera.position.clone(), p1:pos.clone(),
@@ -1722,10 +1732,15 @@ async function refresh(){
     applyView();
     /* Main only has a position once the ground has been built, so the resting
        centre is adopted on the first snapshot rather than at startup. */
-    if (firstSnapshot && view.framing === 'none' && !userMoved){
-      _rested = true;
-      orbitTgt.copy(homeTarget());
-      controls.target.copy(orbitTgt);
+    /* Recompute while resting so the centre follows the org, but never while
+       something is framed or the camera is in someone's hands. */
+    if (view.framing === 'none' && !userMoved && !flight){
+      const rest = homeTarget();
+      if (firstSnapshot || rest.distanceToSquared(orbitTgt) > .25){
+        _rested = true;
+        orbitTgt.copy(rest);
+        controls.target.copy(orbitTgt);
+      }
     }
     spawnWakes(); spawnMessages();
     const age = Math.round((Date.now()-d.generatedAt)/1000);
