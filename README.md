@@ -24,6 +24,9 @@ draw labelled arrows between them.
   over the same stops.
 - **On the floor, a ring says what happened.** Yellow: reviewed but not in the
   branch. Green: in the branch, or closed. Grey: nothing to merge.
+- **An agent taking a turn beats** — its disc contracts twice in quick
+  succession and then rests, the way a heart does. A queued turn keeps a slow
+  flash instead: waiting should not look like effort.
 - **A line from an item to an agent is turn state.** Green while a turn is
   executing, yellow while one is queued and has not started, faint ink for an
   open card with no turn at all.
