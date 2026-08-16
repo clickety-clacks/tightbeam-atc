@@ -1395,6 +1395,7 @@ function autoCollapseLegend(){
   if (legendUserSet) return;
   const el = document.getElementById('legend');
   if (el) el.classList.toggle('collapsed', innerHeight < 620);
+  measureLegend();
 }
 
 /* ---------- tag composer ----------
@@ -1736,6 +1737,7 @@ addEventListener('keydown', e=>{
   else if (e.key==='l' || e.key==='L'){
     legendUserSet = true;
     document.getElementById('legend').classList.toggle('collapsed');
+    measureLegend();          /* the mode strip rides on it; let it drop */
   }
   else if (e.key==='['){ setRadius(selRadius - Math.max(4, selRadius*.15)); }
   else if (e.key===']'){ setRadius(selRadius + Math.max(4, selRadius*.15)); }
