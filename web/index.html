@@ -1924,6 +1924,10 @@ function pickAllHover(ev, max = 4){
    white, so the connection between a card and its node is visible in the scene
    as well as along the leader */
 const hoverKeys = new Set();
+/* Nodes bob, so a leader aimed once is wrong a frame later — it has to be
+   re-aimed every frame at the node's current position. The cards stay put:
+   text that jitters is unreadable, and only the line has to track. */
+const hoverLeaders = [];
 const HOVER_WHITE = new THREE.Color(0xffffff);
 
 const hoverLayer = document.getElementById('hovercards');
@@ -1937,6 +1941,7 @@ function screenOf(mesh){
 
 function clearHover(){
   hoverKeys.clear();
+  hoverLeaders.length = 0;
   if (hoverLayer.childElementCount) hoverLayer.textContent = '';
   if (leaderSvg.childElementCount) leaderSvg.textContent = '';
   tip.style.display = 'none';
@@ -1944,7 +1949,7 @@ function clearHover(){
 
 function showHover(nodes, ev){
   hoverLayer.textContent = ''; leaderSvg.textContent = '';
-  hoverKeys.clear();
+  hoverKeys.clear(); hoverLeaders.length = 0;
   nodes.forEach(n => { const k = selKey(n); if (k) hoverKeys.add(k); });
   if (!nodes.length) return;
 
@@ -1997,23 +2002,31 @@ function showHover(nodes, ev){
     }
   }
 
-  cards.forEach(c => {
+  cards.forEach((c, i) => {
     c.el.style.left = c.x + 'px'; c.el.style.top = c.y + 'px';
-    /* the leader leaves the card at the point on its border facing the node,
-       so the line always reads as coming OUT of that card */
-    const mx = c.x + CARD / 2, my = c.y + c.h / 2;
-    const dx = c.pt.x - mx, dy = c.pt.y - my;
-    const t = Math.min(Math.abs(dx) > 1e-3 ? (CARD / 2) / Math.abs(dx) : Infinity,
-                       Math.abs(dy) > 1e-3 ? (c.h / 2) / Math.abs(dy) : Infinity);
-    const ex = mx + dx * t, ey = my + dy * t;
     const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    ln.setAttribute('x1', ex); ln.setAttribute('y1', ey);
-    ln.setAttribute('x2', c.pt.x); ln.setAttribute('y2', c.pt.y);
-    leaderSvg.appendChild(ln);
     const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    dot.setAttribute('cx', c.pt.x); dot.setAttribute('cy', c.pt.y); dot.setAttribute('r', 3);
-    leaderSvg.appendChild(dot);
+    dot.setAttribute('r', 3);
+    leaderSvg.appendChild(ln); leaderSvg.appendChild(dot);
+    hoverLeaders.push({node: nodes[i], ln, dot, x: c.x, y: c.y, w: CARD, h: c.h});
   });
+  aimLeaders();
+}
+
+/* Point every leader at where its node is NOW. The line leaves the card at the
+   point on its border facing the node, so it always reads as coming out of
+   that card however the node has drifted. */
+function aimLeaders(){
+  for (const L of hoverLeaders){
+    const p = screenOf(L.node);
+    const mx = L.x + L.w / 2, my = L.y + L.h / 2;
+    const dx = p.x - mx, dy = p.y - my;
+    const t = Math.min(Math.abs(dx) > 1e-3 ? (L.w / 2) / Math.abs(dx) : Infinity,
+                       Math.abs(dy) > 1e-3 ? (L.h / 2) / Math.abs(dy) : Infinity);
+    L.ln.setAttribute('x1', mx + dx * t); L.ln.setAttribute('y1', my + dy * t);
+    L.ln.setAttribute('x2', p.x); L.ln.setAttribute('y2', p.y);
+    L.dot.setAttribute('cx', p.x); L.dot.setAttribute('cy', p.y);
+  }
 }
 
 addEventListener('pointermove', e => {
@@ -2775,7 +2788,7 @@ function tickFrame(){
        not inspection — a brushed item keeps whatever motion it had. */
     const heldStill = u.w && view.focus.key === 'i:' + u.w.id;
     if (u.baseY){
-      m.position.y = heldStill ? u.baseY : u.baseY + Math.sin(t*1.2+u.phase)*.5;
+      m.position.y = heldStill ? u.baseY : u.baseY + Math.sin(t*1.2+u.phase)*.25;
       if (!heldStill) m.rotation.y += .004;
     }
     if (u.landed && !heldStill){ m.rotation.y += .0015; }
@@ -2849,6 +2862,7 @@ function tickFrame(){
   }
   positionTagBox();
   controls.update();
+  if (hoverLeaders.length) aimLeaders();   /* the nodes just moved */
   if (strobe){
     selectables().forEach(m => {
       const k = selKey(m);
