@@ -19,17 +19,27 @@
     gap:8px 10px; pointer-events:none; box-sizing:border-box;
     padding:calc(14px + env(safe-area-inset-top)) calc(18px + env(safe-area-inset-right))
             14px calc(18px + env(safe-area-inset-left)); }
+  #topleft { display:flex; flex-direction:column; align-items:flex-start; gap:8px;
+    flex:0 1 auto; min-width:0; max-width:60%; }
   #topright { display:flex; flex-direction:column; align-items:flex-end; gap:8px;
     flex:0 1 auto; min-width:0; max-width:100%; }
   #hud { color:#9a9ea6; font-size:12px; letter-spacing:.22em; text-transform:uppercase;
     background:#101214e6; border:1px solid #2a2d31; border-radius:5px; padding:7px 11px;
-    flex:1 1 auto; min-width:0; max-width:100%; box-sizing:border-box;
-    overflow-wrap:anywhere; }
+    /* only as wide as what it says */
+    flex:0 0 auto; align-self:flex-start; width:max-content; max-width:100%;
+    box-sizing:border-box; overflow-wrap:anywhere; }
   #hud b { color:#b08d57; font-weight:600; }
   /* Which layers are in force, outermost first, so the nesting is readable at
      a glance and the one that decides what you are looking at is obvious. */
-  #stack { display:flex; gap:6px; flex-wrap:wrap; }
+  /* Which layers are in force sits with the legend at the bottom left: it
+     describes what you are looking at, which is the legend's job, and the top
+     left is for what this thing IS. */
+  #stack { position:fixed; z-index:6; display:flex; gap:6px; flex-wrap:wrap;
+    left:calc(18px + env(safe-area-inset-left));
+    bottom:calc(14px + env(safe-area-inset-bottom));
+    max-width:min(70vw, 900px); pointer-events:none; }
   #stack:empty { display:none; }
+  body.has-legend #stack { bottom:calc(14px + env(safe-area-inset-bottom) + var(--legend-h, 0px) + 8px); }
   #stack .chip { font-size:10.5px; letter-spacing:.12em; text-transform:uppercase;
     border-radius:5px; padding:5px 9px; border:1px solid currentColor;
     background:#101214e6; display:inline-flex; align-items:center; gap:6px;
@@ -61,6 +71,8 @@
   #cards .card .x { color:#7c8188; padding:0 2px; border-radius:3px; }
   #cards .card .x:hover { color:#e0685c; }
   #cards .card .term { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:22ch; }
+  #cards .card input.name { font:inherit; letter-spacing:inherit; text-transform:none;
+    color:inherit; background:transparent; border:none; outline:none; width:20ch; }
   body.light #cards .card { color:#5c6b78; background:#f2eee2e8; border-color:#c3cdd8;
     border-left-color:#1f7a7a; }
   body.light #cards .card.on { color:#1f7a7a; border-color:#1f7a7a; }
@@ -82,6 +94,28 @@
     max-width:min(320px, calc(100vw - 24px)); box-sizing:border-box; z-index:8;
     overflow-wrap:anywhere; }
   #tip .t { color:#b08d57; font-weight:600; }
+  /* Hovering can find several nodes stacked along the same line of sight. Each
+     gets its own card, and a dotted leader says which card belongs to which
+     node — without that the cards are just a pile of facts about nothing in
+     particular. */
+  #hovercards { position:fixed; inset:0; pointer-events:none; z-index:8; }
+  #hovercards .hc { position:absolute; background:#1b1e22f2; color:#d8d6d1;
+    border:1px solid #3a3d42; border-left:3px solid #b08d57; border-radius:4px;
+    padding:7px 11px; font-size:12.5px; line-height:1.5;
+    width:min(300px, calc(100vw - 24px)); box-sizing:border-box;
+    overflow-wrap:anywhere; }
+  #hovercards .hc .t { color:#b08d57; font-weight:600; }
+  #hovercards .hc .k { color:#7c8188; text-transform:uppercase; letter-spacing:.12em;
+    font-size:9.5px; display:block; margin:6px 0 2px; }
+  #hovercards .hc .seg { color:#9a9ea6; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
+  #leaders { position:fixed; inset:0; pointer-events:none; z-index:7; }
+  #leaders line { stroke:#b08d57; stroke-width:1.2; stroke-dasharray:3 4; opacity:.85; }
+  #leaders circle { fill:#b08d57; }
+  body.light #hovercards .hc { background:#faf7eef5; color:#26323c;
+    border-color:#b8c7d9; border-left-color:#c23b22; }
+  body.light #hovercards .hc .t { color:#c23b22; }
+  body.light #hovercards .hc .seg { color:#5c6b78; }
+  body.light #leaders line, body.light #leaders circle { stroke:#c23b22; fill:#c23b22; }
   #tip .seg { color:#9a9ea6; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
   #themehint { color:#7c8188; font-size:10.5px; letter-spacing:.12em;
     text-transform:uppercase; background:#101214e6; border:1px solid #2a2d31;
@@ -184,22 +218,26 @@
 </head>
 <body>
 <div id="topbar">
-  <div id="hud"><span class="title"><b>Tightbeam</b> · air traffic control · </span><span id="mode" class="sample">connecting…</span></div>
-  <div id="searchwrap">
-    <span id="searchpill">agent search</span>
-    <input id="search" type="text" placeholder="filter — press / to search" autocomplete="off">
-    <span id="searchcount"></span>
-    <button id="searchclear" title="clear" aria-label="clear search">×</button>
+  <div id="topleft">
+    <div id="hud"><span class="title"><b>Tightbeam</b> · air traffic control · </span><span id="mode" class="sample">connecting…</span></div>
+    <div id="themehint">/ search · S select · T theme · L legend · C clear notes</div>
   </div>
   <div id="topright">
-    <div id="stack"></div>
-    <div id="themehint">/ search · S select · T theme · L legend · C clear notes</div>
+    <div id="searchwrap">
+      <span id="searchpill">agent search</span>
+      <input id="search" type="text" placeholder="filter — press / to search" autocomplete="off">
+      <span id="searchcount"></span>
+      <button id="searchclear" title="clear" aria-label="clear search">×</button>
+    </div>
     <div id="cards"></div>
     <div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> · <span id="selcount">0</span> sel · [ ] size · f fit · d clear</div>
   </div>
 </div>
+<div id="stack"></div>
 <div id="legend"></div>
 <div id="tip"></div>
+<svg id="leaders"></svg>
+<div id="hovercards"></div>
 <div id="detail"></div>
 <div id="tagbox">tag <span class="who"></span><input id="taginput" type="text"
   placeholder="type a note, enter to attach" maxlength="80"><div id="tagswatches"></div></div>
@@ -498,6 +536,7 @@ function applyTheme(){
   grid.material.transparent = true; grid.material.opacity = .35;
   grid.position.y = 0; scene.add(grid);
   renderLegend();
+  measureLegend();
   if (typeof renderSwatches === 'function' && tagBox.style.display === 'block') renderSwatches();
   if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); buildLinks(DATA.links);
              applyView(); }
@@ -870,7 +909,9 @@ function renderCards(){
     const term = q.label || q.query || ((q.ids || []).length + ' picked');
     const who = q.author ? '<span class="who">' + esc(q.author) + '</span>' : '';
     return '<span class="card' + (q.searchId === activeSearchId ? ' on' : '') + '"'
-         + ' data-id="' + q.searchId + '" title="' + esc(term) + '">'
+         + ' data-id="' + q.searchId + '"'
+         + ' title="' + esc(q.label ? q.label + ' — ' + (q.query || (q.ids||[]).length + ' picked') : term)
+         + '\ndouble-click to name it">'
          + '<span class="term">' + esc(term) + '</span>' + who
          + '<span class="x" data-x="' + q.searchId + '">×</span></span>';
   }).join('');
@@ -897,6 +938,43 @@ document.getElementById('cards').addEventListener('click', ev => {
   if (!card) return;
   const q = searches.find(x => x.searchId === card.getAttribute('data-id'));
   if (q) openSearch(q);
+});
+
+/* Naming a card. A search reads as its terms — "e2e", or "5 picked" — which
+   says what was matched and not what it was FOR. A name carries the question:
+   "everything blocking the 0.1.8 cut". Double-click to write one. */
+document.getElementById('cards').addEventListener('dblclick', ev => {
+  const card = ev.target.closest('[data-id]');
+  if (!card) return;
+  ev.preventDefault(); ev.stopPropagation();
+  const id = card.getAttribute('data-id');
+  const q = searches.find(x => x.searchId === id);
+  if (!q) return;
+  const field = document.createElement('input');
+  field.className = 'name';
+  field.value = q.label || '';
+  field.placeholder = 'name this search';
+  field.maxLength = 80;
+  card.querySelector('.term').replaceWith(field);
+  field.focus(); field.select();
+  const done = async (save) => {
+    field.onblur = null;
+    const label = field.value.trim();
+    if (save && label !== (q.label || '')){
+      q.label = label || null;                       /* show it at once */
+      renderCards();
+      try {
+        await apiFetch('/searches', {method:'POST', headers:{'content-type':'application/json'},
+          body: JSON.stringify({searches:[{searchId: id, label}]})});
+        searchesRev = -1;
+      } catch(e){ /* the pile is a convenience; never fail on it */ }
+    } else renderCards();
+  };
+  field.addEventListener('keydown', e => {
+    e.stopPropagation();                             /* canvas hotkeys are not for typing */
+    if (e.key === 'Enter') done(true);
+  });
+  field.addEventListener('blur', () => done(true));
 });
 
 /* Re-open a filed search: run it, and put its terms back in the box so they
@@ -1012,6 +1090,15 @@ function neighbourhoodView(){
   const c = new THREE.Vector3();
   pts.forEach(v => c.add(v)); c.multiplyScalar(1/pts.length);
   return {center:c, pts};
+}
+
+/* The legend's height changes with the viewport and with being collapsed, so
+   the strip above it cannot use a constant. Measure and publish it. */
+function measureLegend(){
+  const el = document.getElementById('legend');
+  const on = el && !el.classList.contains('collapsed') && getComputedStyle(el).display !== 'none';
+  document.body.classList.toggle('has-legend', !!on);
+  document.body.style.setProperty('--legend-h', on ? el.getBoundingClientRect().height + 'px' : '0px');
 }
 
 function renderLegend(){
@@ -1661,7 +1748,8 @@ refresh(); setInterval(refresh, 5000);
 window.__atc = {
   /* framing internals, so a fit that looks wrong can be interrogated rather
      than guessed at: which constraint bound, and how much room it asked for */
-  clearRect, frameDistance, frameTo, filteredView, neighbourhoodView, pickNode,
+  clearRect, frameDistance, frameTo, filteredView, neighbourhoodView, pickNode, pickAllHover,
+  get hoverKeys(){ return hoverKeys; }, selectables, selKey,
   get controls(){ return controls; },
   get view(){ return view; },
   get tags(){ return tags; },
@@ -1783,7 +1871,13 @@ function nodeContent(u, clamp){
     : a.idleFor < 90 ? 'acting now'
     : a.idleFor < 3600 ? Math.round(a.idleFor/60) + ' min idle'
     : Math.round(a.idleFor/3600) + ' h idle';
+  /* archetype answers "what is this agent for", model answers "what is
+     thinking for it" — the two questions asked of a node most often, and both
+     were a CLI round trip away before the feed carried them */
+  const kit = [a.archetype, a.model && (a.harness ? a.harness + ' · ' + a.model : a.model)]
+    .filter(Boolean).join('  ·  ');
   return '<span class="t">' + a.name + '</span>'
+    + (kit ? '<span class="k">is</span>' + kit : '')
     + '<span class="k">state</span>' + (a.retired?'retired (holds open cards)':'active') + ' · ' + idle
     + (a.turn==='run'?' · turn running':a.turn==='wait'?' · turn queued':'')
     + '<span class="k">workload</span>' + held + ' open item' + (held===1?'':'s')
@@ -1799,17 +1893,90 @@ function renderDetail(){
 
 /* ---------- tooltip ---------- */
 const ray = new THREE.Raycaster(), mouse = new THREE.Vector2(), tip = document.getElementById('tip');
-addEventListener('pointermove', e=>{
-  const node = pickNode(e);
-  if (!node){ tip.style.display='none'; return; }
-  const u = node.userData;
-  if (!u.type){ tip.style.display='none'; return; }
-  if (view.input !== 'brush' && hiAgents){   /* outside the neighbourhood: dead to hover */
-    const inside = u.type === 'item' ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
-    if (!inside){ tip.style.display='none'; return; }
-  }
-  tip.style.display='block'; tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY+10)+'px';
-  tip.innerHTML = nodeContent(u, true);
+/* Everything under the pointer, nearest first, whatever the current scope
+   lights. Hovering is inspection, not selection: a ghosted node is out of play
+   for clicking and brushing, but asking what it IS must always be answerable —
+   a focused view that goes silent when you point at its surroundings tells you
+   nothing about why they were excluded. */
+function pickAllHover(ev, max = 4){
+  mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  const out = [], seen = new Set();
+  const sprites = [];
+  selectables().forEach(m => (m.userData.tagSprites || []).forEach(sp => { if (sp.visible) sprites.push(sp); }));
+  const consider = o => {
+    const owner = ownerOf(o);
+    if (!owner || !owner.userData.type) return;
+    const k = selKey(owner);
+    if (!k || seen.has(k)) return;
+    seen.add(k); out.push(owner);
+  };
+  ray.intersectObjects(sprites, false).forEach(h => consider(h.object));
+  ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], true)
+     .forEach(h => { if (out.length < max) consider(h.object); });
+  return out.slice(0, max);
+}
+
+/* what the pointer is over right now — the frame loop strobes these toward
+   white, so the connection between a card and its node is visible in the scene
+   as well as along the leader */
+const hoverKeys = new Set();
+const HOVER_WHITE = new THREE.Color(0xffffff);
+
+const hoverLayer = document.getElementById('hovercards');
+const leaderSvg = document.getElementById('leaders');
+const _hv = new THREE.Vector3();
+
+function screenOf(mesh){
+  mesh.getWorldPosition(_hv).project(camera);
+  return {x: (_hv.x + 1) / 2 * innerWidth, y: (1 - _hv.y) / 2 * innerHeight};
+}
+
+function clearHover(){
+  hoverKeys.clear();
+  if (hoverLayer.childElementCount) hoverLayer.textContent = '';
+  if (leaderSvg.childElementCount) leaderSvg.textContent = '';
+  tip.style.display = 'none';
+}
+
+function showHover(nodes, ev){
+  hoverLayer.textContent = ''; leaderSvg.textContent = '';
+  hoverKeys.clear();
+  nodes.forEach(n => { const k = selKey(n); if (k) hoverKeys.add(k); });
+  if (!nodes.length) return;
+  const W = innerWidth, H = innerHeight;
+  const CARD = Math.min(300, W - 24), GAP = 8;
+  /* stack the cards on whichever side has room, so they never cover the thing
+     they describe */
+  const left = ev.clientX > W * .55;
+  let y = Math.max(12, ev.clientY - 40);
+  nodes.forEach(node => {
+    const el = document.createElement('div');
+    el.className = 'hc';
+    el.innerHTML = nodeContent(node.userData, true);
+    hoverLayer.appendChild(el);
+    const h = el.getBoundingClientRect().height;
+    if (y + h > H - 12) y = Math.max(12, H - 12 - h);
+    const x = left ? Math.max(12, ev.clientX - 26 - CARD) : Math.min(W - 12 - CARD, ev.clientX + 26);
+    el.style.left = x + 'px'; el.style.top = y + 'px';
+    /* the leader runs from the card's inner edge to the node itself */
+    const p = screenOf(node);
+    const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    ln.setAttribute('x1', left ? x + CARD : x); ln.setAttribute('y1', y + Math.min(h, 22));
+    ln.setAttribute('x2', p.x); ln.setAttribute('y2', p.y);
+    leaderSvg.appendChild(ln);
+    const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('cx', p.x); dot.setAttribute('cy', p.y); dot.setAttribute('r', 2.4);
+    leaderSvg.appendChild(dot);
+    y += h + GAP;
+  });
+}
+
+addEventListener('pointermove', e => {
+  if (!onCanvas(e)) return clearHover();
+  const nodes = pickAllHover(e);
+  if (!nodes.length) return clearHover();
+  showHover(nodes, e);
 });
 
 /* ---------- select mode ----------
@@ -2478,6 +2645,11 @@ function tickFrame(){
                         orbitTgt.z + Math.cos(orbitAngle)*orbitR);
     controls.target.copy(orbitTgt); camera.lookAt(orbitTgt);
   }
+  /* Strobe whatever the pointer is over. This runs after shading has set each
+     material from its base colour, so it is a pure overlay: nothing else has
+     to know about hover, and letting go restores the real colour on the next
+     frame without bookkeeping. */
+  const strobe = hoverKeys.size ? .35 + .35 * Math.sin(t * 9) : 0;
   const dimming = !!hiAgents;
   const fa = id => (!dimming || hiAgents.has(id)) ? 1 : DIM;
   const fi = id => (!dimming || hiItems.has(id)) ? 1 : DIM;
@@ -2633,6 +2805,14 @@ function tickFrame(){
   }
   positionTagBox();
   controls.update();
+  if (strobe){
+    selectables().forEach(m => {
+      const k = selKey(m);
+      if (!k || !hoverKeys.has(k)) return;
+      m.material.color.lerp(HOVER_WHITE, strobe);
+      if (m.userData.lineMat) m.userData.lineMat.color.lerp(HOVER_WHITE, strobe);
+    });
+  }
   renderer.render(scene, camera);
 }
 tickFrame();
@@ -2647,6 +2827,7 @@ function fitViewport(){
   renderer.setSize(w, h, false);
   edgeMats.forEach(m => m.resolution.set(w, h));
   autoCollapseLegend();
+  measureLegend();
   applyChromeOffset(true);      /* a resize is already a jump; do not ease it */
 }
 let fitQueued = false;

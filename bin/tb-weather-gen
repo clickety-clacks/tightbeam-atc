@@ -125,7 +125,11 @@ for r in q("SELECT bySession, max(ts) AS t FROM attests GROUP BY bySession"):
     _mark(r["bySession"], r["t"])
 
 # ---- agents: active sessions, plus retired ones still holding open cards
-rows = q("SELECT sessionKey, displayName, state, spawnedBy FROM sessions")
+# archetype and model come from the same row: what an agent IS and what is
+# thinking for it are the two questions asked most often about a node, and
+# both were a CLI round trip away until now.
+rows = q("""SELECT sessionKey, displayName, state, spawnedBy,
+                   archetype, harness, model FROM sessions""")
 holders_open = {r["holderKey"] for r in q(
     "SELECT DISTINCT holderKey FROM assignments WHERE state='open'")}
 sess = {r["sessionKey"]: r for r in rows
@@ -153,6 +157,9 @@ for k, r in sess.items():
         "id": ids[k],
         "name": (r["displayName"] or k)[:120],
         "kind": kind,
+        "archetype": (r["archetype"] or None),
+        "harness": (r["harness"] or None),
+        "model": (r["model"] or None),
         "parent": ids.get(r["spawnedBy"]),
         "retired": r["state"] != "active",
         "turn": None,
