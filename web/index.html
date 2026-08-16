@@ -1022,7 +1022,7 @@ function renderLegend(){
     `<br><span style="color:${hx(T.tetherRun)}">━ green: turn executing now</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherSched)}">━ faint: holds an open card, no turn</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow: turn queued, not started</span>` +
-    `<span style="margin-left:12px">hedron flashing = turn waiting · strobing shell = turn running · agents beat while taking one</span>` +
+    `<span style="margin-left:12px">hedron flashing = turn waiting · strobing shell = turn running · agents ripple while taking one</span>` +
     `<br><span style="color:${hx(T.liveHot)}">● blue agent = acted just now</span>` +
     `<span style="margin-left:8px;color:${hx(T.liveCold)}">● grey = idle an hour or more</span>` +
     `<span style="margin-left:10px">discs hang below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
@@ -2339,6 +2339,76 @@ function fitSelection(){
 }
 
 /* ---------- animate ---------- */
+/* ---------- the working ring ----------
+   Same frequency, same amplitude, the period offset between the three. */
+const RING_SEGS = 90;          /* points around the loop */
+const RING_LOBES = 5;          /* waves around the circumference */
+const RING_AMP = .075;         /* how far the edge travels, as a fraction of R */
+const RING_SPEED = 1.15;       /* how fast the wave travels round */
+/* The aberration is radial as well as temporal. A phase offset alone moves a
+   point by a fraction of the amplitude, which is sub-pixel on a small disc, so
+   the three drew on top of each other and summed to plain white everywhere. A
+   lens splits its components across the radius; so does this. */
+const RING_SPLIT = [0, .045, .09];    /* period offset, in turns */
+const RING_SPREAD = [1, 1.028, 1.056]; /* and radius, so the fringes are visible */
+
+function ringColours(){
+  /* pure-ish components so they recombine toward the theme's own ink */
+  return T.name === 'light' ? [0xc8322a, 0x2b8f4e, 0x2f63c4]
+                            : [0xff5a5a, 0x54ff9a, 0x5aa8ff];
+}
+
+function ensureRings(m){
+  if (m.userData.rings) return m.userData.rings;
+  m.userData.rings = ringColours().map(c => {
+    const mat = new LineMaterial({ color: c, linewidth: 2.4, transparent: true,
+      opacity: .8, depthTest: false,
+      /* additive sums the three back to white on a dark ground; on paper the
+         same trick has to subtract instead or it bleaches into the page */
+      blending: T.name === 'light' ? THREE.MultiplyBlending : THREE.AdditiveBlending });
+    mat.resolution.set(innerWidth, innerHeight);
+    edgeMats.add(mat);
+    const seg = new LineSegments2(new LineSegmentsGeometry(), mat);
+    seg.renderOrder = 6;
+    seg.position.y = .02;                  /* clear of the disc it sits on */
+    m.add(seg);
+    return seg;
+  });
+  return m.userData.rings;
+}
+
+/* One buffer per ring, never a shared one: LineSegmentsGeometry.setPositions
+   keeps a Float32Array BY REFERENCE rather than copying it, so three rings fed
+   from the same scratch array all drew whichever was computed last — three
+   identical loops stacked on each other, which is exactly why the split was
+   invisible and the result was a solid white line. */
+function updateRings(m, t){
+  const R = m.userData.ringR ??
+    (m.userData.ringR = (m.geometry?.parameters?.radius || .8) * 1.16);
+  const rings = ensureRings(m);
+  const dim = m.userData.dim ?? 1;
+  rings.forEach((seg, i) => {
+    const buf = seg.userData.buf ??= new Float32Array(RING_SEGS * 6);
+    const phase = t * RING_SPEED + RING_SPLIT[i] * Math.PI * 2;
+    const Ri = R * RING_SPREAD[i];
+    for (let j = 0; j < RING_SEGS; j++){
+      const a0 = (j / RING_SEGS) * Math.PI * 2, a1 = ((j + 1) / RING_SEGS) * Math.PI * 2;
+      const r0 = Ri * (1 + RING_AMP * Math.sin(RING_LOBES * a0 + phase));
+      const r1 = Ri * (1 + RING_AMP * Math.sin(RING_LOBES * a1 + phase));
+      const o = j * 6;
+      buf[o]   = Math.cos(a0) * r0; buf[o+1] = 0; buf[o+2] = Math.sin(a0) * r0;
+      buf[o+3] = Math.cos(a1) * r1; buf[o+4] = 0; buf[o+5] = Math.sin(a1) * r1;
+    }
+    /* setPositions builds fresh attributes every call. The buffer is ours and
+       its size never changes, so hand it over once and thereafter just tell the
+       GPU the contents moved — this runs every frame for every working agent. */
+    if (seg.userData.wired) seg.geometry.attributes.instanceStart.data.needsUpdate = true;
+    else { seg.geometry.setPositions(buf); seg.userData.wired = true; }
+    seg.material.opacity = .8 * dim;       /* ghosts with its agent */
+    seg.visible = dim > .9;
+  });
+}
+
 /* lub-dub: a sharp contraction, a softer one just after it, then rest.
    Gaussian rather than sinusoidal so the beats are distinct events with a real
    pause between them — that pause is what makes it read as a pulse. */
@@ -2422,25 +2492,16 @@ function tickFrame(){
         ch.material.opacity = (ch.userData.isTag ? 1 : .85) * f;
       });
     }
-    /* An agent taking a turn beats: the disc contracts twice in quick
-       succession and then rests, the way a heart does, rather than pulsing on
-       a sine. A sine reads as a glow and gets lost among the other motion in
-       the scene; a double thump with a pause after it is recognisable at a
-       glance and across a crowded ground plane, and it says "working" in a way
-       a brightness change does not. A queued turn keeps the old slow flash —
-       waiting should not look like effort. */
+    /* An agent taking a turn wears a rippling ring: one sine travelling round
+       a circle, drawn three times at the same frequency and amplitude with the
+       period offset a little each time, in red, green and blue. Where the three
+       coincide they sum back to white; where the offset pulls them apart you
+       see the colour fringes. It is chromatic aberration on purpose — a white
+       line split into its components — which reads as vibration rather than as
+       three separate rings. */
     if (u && u.flash === 'run' && u.a){
-      const hb = heartbeat(t + u.phase, 1.05);
-      const k = 1 - .17 * hb;                    /* contract the radius */
-      m.scale.set(k, 1, k);
-      /* the label rides on the disc, so undo the squeeze on it or the name
-         stretches with every beat */
-      m.children.forEach(ch => {
-        if (!ch.isSprite) return;
-        ch.userData.baseX ??= ch.scale.x;
-        ch.scale.x = ch.userData.baseX / k;
-      });
-      if (u.lineMat) u.lineMat.opacity = (.24 + hb * .62) * (u.dim ?? 1);
+      updateRings(m, t);
+      if (u.lineMat) u.lineMat.opacity = .5 * (u.dim ?? 1);
     } else if (u && u.flash === 'wait' && u.lineMat){
       u.lineMat.opacity = (.18 + (0.5+0.5*Math.sin(t*2.2+u.phase)) * .55) * (u.dim ?? 1);
     }
