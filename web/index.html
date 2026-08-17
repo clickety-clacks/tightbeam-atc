@@ -50,6 +50,22 @@
   #stack .chip.on .dot { background:currentColor; }
   #stack .chip b { color:inherit; font-weight:700; }
   body.light #stack .chip { background:#f2eee2e8; }
+  #layercards { position:fixed; z-index:9; left:calc(18px + env(safe-area-inset-left));
+    top:50%; transform:translateY(-50%); display:flex; flex-direction:column;
+    align-items:stretch; gap:5px; pointer-events:auto; }
+  #layercards button { min-width:104px; box-sizing:border-box; cursor:pointer;
+    color:#9a9ea6; background:#101214e6; border:1px solid #2a2d31;
+    border-radius:5px; padding:6px 9px; font:600 10px/1.15 ui-sans-serif,-apple-system,"Helvetica Neue",Arial,sans-serif;
+    letter-spacing:.08em; text-align:left; text-transform:uppercase; white-space:nowrap; }
+  #layercards button::before { content:''; display:inline-block; width:6px; height:6px;
+    margin-right:7px; border:1px solid currentColor; border-radius:50%; vertical-align:1px; }
+  #layercards button[aria-pressed="true"] { color:#d8d6d1; }
+  #layercards button[aria-pressed="true"]::before { background:currentColor; }
+  #layercards button[aria-pressed="false"] { opacity:.48; }
+  #layercards button:hover { border-color:#5c626b; }
+  body.light #layercards button { color:#5c6b78; background:#f2eee2e8; border-color:#c3cdd8; }
+  body.light #layercards button[aria-pressed="true"] { color:#26323c; }
+  body.light #layercards button:hover { border-color:#8a97a3; }
   /* The pile of searches that have been run. Newest on top, because that is
      the one most likely to be wanted back. */
   /* The top bar ignores the mouse so the scene can be orbited through it, and
@@ -136,6 +152,8 @@
   @media (max-width: 760px){
     #legend { font-size:10px; line-height:1.7; }
     #hud, #themehint, #selui { letter-spacing:.08em; font-size:10px; }
+    #layercards { left:calc(10px + env(safe-area-inset-left)); gap:3px; }
+    #layercards button { min-width:94px; padding:5px 7px; font-size:9px; }
   }
 
   /* Hovering shows a transient card; focusing one node promotes the same
@@ -237,6 +255,7 @@
   </div>
 </div>
 <div id="stack"></div>
+<div id="layercards" role="group" aria-label="Map layers"></div>
 <div id="legend"></div>
 <div id="tip"></div>
 <svg id="leaders"></svg>
@@ -316,6 +335,35 @@ let grid = null;
 
 const groundGroup = new THREE.Group(), itemGroup = new THREE.Group(), tetherGroup = new THREE.Group(), linkGroup = new THREE.Group();
 scene.add(groundGroup, itemGroup, tetherGroup, linkGroup);
+
+const LAYER_DEFS = [
+  ['workItems', 'Work items'],
+  ['agents', 'Agents'],
+  ['arrows', 'Arrows'],
+  ['agentGraph', 'Agent graph'],
+  ['obligations', 'Obligations'],
+  ['agentLabels', 'Agent labels'],
+  ['annotations', 'Annotations'],
+];
+const layerState = Object.fromEntries(LAYER_DEFS.map(([key]) => [key, true]));
+const layerCards = document.getElementById('layercards');
+function renderLayerCards(){
+  layerCards.innerHTML = LAYER_DEFS.map(([key, label]) =>
+    '<button type="button" data-layer="' + key + '" aria-pressed="' + layerState[key] + '">' + label + '</button>'
+  ).join('');
+}
+layerCards.addEventListener('click', ev => {
+  const button = ev.target.closest('button[data-layer]');
+  if (!button) return;
+  const key = button.dataset.layer;
+  layerState[key] = !layerState[key];
+  renderLayerCards();
+  if (!layerState[key] &&
+      ((key === 'workItems' && [...hoverKeys].some(k => k.startsWith('i:'))) ||
+       (key === 'agents' && [...hoverKeys].some(k => k.startsWith('a:'))))) clearHover();
+  applyLayerVisibility();
+});
+renderLayerCards();
 
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
 let flight = null, orbitAngle = 0, arrowFrame = 0;
@@ -459,6 +507,7 @@ function labelSprite(text){
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({
     map: new THREE.CanvasTexture(c), transparent:true, opacity:.85, depthTest:false }));
   sp.renderOrder = 10;
+  sp.userData.isAgentLabel = true;
   const h = 1.35; sp.scale.set(h*c.width/c.height, h, 1);
   return sp;
 }
@@ -883,7 +932,7 @@ function clearRect(){
      focused node's SCREEN position, so measuring it closed a loop: the offset
      moved the node, the node moved the box, the box changed the offset. In
      single focus that walked the camera hundreds of pixels across the view. */
-  document.querySelectorAll('#topbar, #legend, #detail').forEach(el => {
+  document.querySelectorAll('#topbar, #layercards, #legend, #detail').forEach(el => {
     const cs = getComputedStyle(el);
     if (cs.display === 'none' || cs.visibility === 'hidden') return;
     const b = el.getBoundingClientRect();
@@ -2093,7 +2142,7 @@ function pickTagOwner(ev){
   const tagHit = ray.intersectObjects(sprites, false)[0];
   if (!tagHit) return null;
   const owner = ownerOf(tagHit.object);
-  return (owner && inScope(owner)) ? owner : null;
+  return (owner && nodeLayerOn(owner) && inScope(owner)) ? owner : null;
 }
 function pickPlainNode(ev){
   mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
@@ -2105,7 +2154,7 @@ function pickPlainNode(ev){
   const hits = ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], true);
   for (const h of hits){
     const owner = ownerOf(h.object);
-    if (owner && inScope(owner)) return owner;
+    if (owner && nodeLayerOn(owner) && inScope(owner)) return owner;
   }
   return null;
 }
@@ -2137,6 +2186,7 @@ function arrowInScope(g){
    card. All draw with depth testing off, same as tags, so they win a click
    over a lit node they visually overlap. */
 function pickArrow(ev){
+  if (!layerState.arrows) return null;
   mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(mouse, camera);
   const objs = [];
@@ -2222,7 +2272,7 @@ function pickAllHover(ev, max = 4){
   selectables().forEach(m => (m.userData.tagSprites || []).forEach(sp => { if (sp.visible) sprites.push(sp); }));
   const consider = o => {
     const owner = ownerOf(o);
-    if (!owner || !owner.userData.type) return;
+    if (!owner || !owner.userData.type || !nodeLayerOn(owner)) return;
     const k = selKey(owner);
     if (!k || seen.has(k)) return;
     seen.add(k); out.push(owner);
@@ -2410,7 +2460,7 @@ function shadeSelected(mesh, on){
     if (u.lineMat) u.lineMat.visible = false;
   } else {
     if (u.origMat) mesh.material = u.origMat;
-    if (u.lineMat) u.lineMat.visible = true;
+    if (u.lineMat) u.lineMat.visible = nodeLayerOn(mesh);
   }
 }
 /* Full sync of view state to pixels. Call after any state change and after
@@ -2688,6 +2738,7 @@ function applyView(){
   buildArrows();
   renderSearchChrome();
   renderStack();
+  applyLayerVisibility();
   applyChromeOffset();          /* the detail pane may have just appeared */
 }
 /* Whatever is ghosted is out of play. With no focus or filter the brush can
@@ -2700,11 +2751,45 @@ function inScope(m){
   const u = m.userData;
   return u.w ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
 }
+function nodeLayerOn(m){
+  return m.userData.w ? layerState.workItems : layerState.agents;
+}
+/* Keep node parents mounted: labels and tags are children so they can stay on
+   independently when the body they annotate is off. Visibility and picking
+   therefore share nodeLayerOn() instead of hiding a whole parent group. */
+function applyLayerVisibility(){
+  arrowGroup.visible = layerState.arrows;
+  tetherGroup.visible = layerState.obligations;
+  linkGroup.visible = layerState.agentGraph;
+  groundGroup.children.forEach(o => {
+    const u = o.userData;
+    if (u.arc){ o.visible = layerState.agentGraph; return; }
+    if (!u.a) return;
+    o.material.visible = layerState.agents;
+    if (u.lineMat) u.lineMat.visible = layerState.agents && !u.selected;
+    o.children.forEach(ch => {
+      if (ch.isSprite){
+        if (ch.userData.isTag) ch.visible = layerState.annotations && (u.dim ?? 1) > .9;
+        else if (ch.userData.isAgentLabel) ch.visible = layerState.agentLabels && (u.dim ?? 1) > .9;
+      } else ch.visible = layerState.agents;
+    });
+  });
+  itemGroup.children.forEach(o => {
+    const u = o.userData;
+    if (!u.w) return;
+    o.material.visible = layerState.workItems;
+    if (u.lineMat) u.lineMat.visible = layerState.workItems && !u.selected;
+    o.children.forEach(ch => {
+      if (ch.isSprite) ch.visible = layerState.annotations && (u.dim ?? 1) > .9;
+      else ch.visible = layerState.workItems;
+    });
+  });
+}
 function paintAt(px, py){
   const r2 = selRadius * selRadius;
   const hits = [];
   selectables().forEach(m => {
-    if (!inScope(m)) return;
+    if (!nodeLayerOn(m) || !inScope(m)) return;
     const [x, y, z] = screenXY(m);
     if (z > 1) return;                                  /* behind the camera */
     const dx = x - px, dy = y - py;
@@ -3153,6 +3238,7 @@ function ensureRings(m){
     const seg = new LineSegments2(new LineSegmentsGeometry(), mat);
     seg.renderOrder = 6;
     seg.position.y = .02;                  /* clear of the disc it sits on */
+    seg.userData.ringWave = true;
     m.add(seg);
     return seg;
   });
@@ -3209,7 +3295,7 @@ function updateRings(m, t){
        0.2 — at a tenth of a tenth the ring would have vanished, and an agent
        that is out of scope is still working. */
     seg.material.opacity = .1 * (dim < .999 ? .5 : 1);
-    seg.visible = true;
+    seg.visible = layerState.agents;
   });
 }
 
@@ -3308,12 +3394,16 @@ function tickFrame(){
          left every selected node bright underneath a focus, so "everything
          else ghosted" was false exactly where it mattered. */
       shade(m.material, u.selected ? null : u.baseFill, f);
+      m.material.visible = layerState.agents;
       if (u.lineMat && !u.selected){ u.lineMat.color.copy(u.baseStroke); }
-      if (u.lineMat) u.lineMat.opacity = .6 * f;
+      if (u.lineMat){ u.lineMat.opacity = .6 * f; u.lineMat.visible = layerState.agents && !u.selected; }
       u.dim = f;
       m.children.forEach(ch => {
-        if (!ch.isSprite) return;
-        ch.visible = f > .9;                       /* same rule as items */
+        if (!ch.isSprite){
+          if (!ch.userData.ringWave) ch.visible = layerState.agents;
+          return;
+        }
+        ch.visible = (ch.userData.isTag ? layerState.annotations : layerState.agentLabels) && f > .9;
         ch.material.opacity = (ch.userData.isTag ? 1 : .85) * f;
       });
     }
@@ -3340,8 +3430,9 @@ function tickFrame(){
          left every selected node bright underneath a focus, so "everything
          else ghosted" was false exactly where it mattered. */
       shade(m.material, u.selected ? null : u.baseFill, f);
+      m.material.visible = layerState.workItems;
       if (u.lineMat && !u.selected){ u.lineMat.color.copy(u.baseStroke); }
-      if (u.lineMat) u.lineMat.opacity = .6 * f;
+      if (u.lineMat){ u.lineMat.opacity = .6 * f; u.lineMat.visible = layerState.workItems && !u.selected; }
       u.dim = f;
     }
     /* A FOCUSED item holds still: the tag and composer anchored to it would
@@ -3363,10 +3454,11 @@ function tickFrame(){
          unfaded next to its own node — ghosted tags drop out entirely. */
       if (ch.isSprite){
         const f = u.dim ?? 1;
-        ch.visible = f > .9;
+        ch.visible = layerState.annotations && f > .9;
         ch.material.opacity = f;
         return;
       }
+      ch.visible = layerState.workItems;
       if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=(.4+Math.abs(Math.sin(t*3))*.5)*(u.dim ?? 1); const sc=1+Math.sin(t*3)*.18; ch.scale.set(sc,sc,sc); }
       if (ch.userData.act==='run'){ ch.material.opacity = (.04 + (0.5+0.5*Math.sin(t*2.2))*.18) * (u.dim ?? 1); }
       if (ch.userData.orphanRing){ ch.lookAt(camera.position); ch.material.opacity = .55 * (u.dim ?? 1); }
