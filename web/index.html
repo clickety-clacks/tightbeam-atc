@@ -335,8 +335,17 @@ const view = {
   selection: new Set(),
   /* focus holds a STABLE KEY, never a mesh: meshes are rebuilt every five
      seconds, so an object reference goes stale and takes hover, dimming and
-     framing with it. focusMesh() resolves the key against the current scene. */
-  focus: { key: null, stage: 0, arrow: null },
+     framing with it. focusMesh() resolves the key against the current scene.
+
+     READ-ONLY PROJECTION. `focusLayer` (below) is the one writable focus
+     transaction; projectFocus() is the ONLY writer of these fields. Nothing
+     else assigns view.focus.*: that split ownership — a subject in one place, a
+     camera bookmark in another, each torn down by a different path — is exactly
+     what let a stale Arrow Focus camera survive a null focus in two prior
+     attempts. stage: 0 none, 1 node, 2 node neighbourhood, 3 arrow (arrowDepth
+     'narrow' first click | 'neighborhood' second click). arrow carries the
+     arrowId when stage 3, key is null then. */
+  focus: { key: null, stage: 0, arrow: null, arrowDepth: null },
   /* f/space: the camera is framing the selection and re-frames as it changes.
      Nothing is ghosted by it — that is what a search or a focus does. */
   fit: false,
@@ -348,6 +357,49 @@ const view = {
   framing: 'none',               /* 'none' | 'focus' | 'selection' — camera intent */
   fitTarget: 'selection',        /* which framing f/space lands on next */
 };
+/* THE focus transaction — one owner for subject, depth, the camera pose below
+   the layer, and the return policy. `null` carries NONE of them, so a stale
+   focus-camera bookmark cannot exist outside a live focus (the defect behind
+   both prior reviews, where stage/subject and the arrow-camera mark lived in
+   separate variables torn down by separate paths). Written only by the four
+   transitions below (focusNode / focusArrow / endFocus / clearFocus); read
+   through view.focus via projectFocus(). Shape when non-null:
+     { subject: {kind:'node', key, depth:'single'|'neighborhood'}
+              | {kind:'arrow', arrowId, depth:'narrow'|'neighborhood'},
+       lowerPose,                     // camera captured once, at layer open
+       returnPolicy: 'reframe-parent' // node-only: reframe the parent scope
+                   | 'restore-exact' } // arrow (ever): restore lowerPose exactly */
+let focusLayer = null;
+/* Derive the read-only view.focus projection from the transaction. The ONLY
+   writer of view.focus.*. */
+function projectFocus(){
+  const L = focusLayer;
+  if (!L){ view.focus.key = null; view.focus.stage = 0; view.focus.arrow = null;
+           view.focus.arrowDepth = null; return; }
+  const s = L.subject;
+  if (s.kind === 'node'){
+    view.focus.key = s.key; view.focus.stage = s.depth === 'neighborhood' ? 2 : 1;
+    view.focus.arrow = null; view.focus.arrowDepth = null;
+  } else {
+    view.focus.key = null; view.focus.stage = 3;
+    view.focus.arrow = s.arrowId; view.focus.arrowDepth = s.depth;
+  }
+}
+/* Development assertion: the union has no invalid inhabitants. A null layer has
+   no payload; every subject carries a legal depth and identity; restore-exact
+   always has a pose to restore. Runs after every transition. */
+function assertFocusInvariant(){
+  const L = focusLayer;
+  if (L === null) return;
+  const s = L.subject;
+  console.assert(s && (s.kind === 'node' || s.kind === 'arrow'), 'focus: bad subject kind');
+  if (s.kind === 'node')
+    console.assert((s.depth === 'single' || s.depth === 'neighborhood') && !!s.key, 'focus: bad node subject');
+  else
+    console.assert((s.depth === 'narrow' || s.depth === 'neighborhood') && !!s.arrowId, 'focus: bad arrow subject');
+  console.assert(L.returnPolicy === 'reframe-parent' || L.returnPolicy === 'restore-exact', 'focus: bad return policy');
+  console.assert(L.returnPolicy !== 'restore-exact' || !!L.lowerPose, 'focus: restore-exact without lower pose');
+}
 function focusMesh(){
   if (!view.focus.key) return null;
   return selectables().find(m => selKey(m) === view.focus.key) || null;
@@ -676,8 +728,25 @@ function arrowFocusScope(){
   return {agents: sc.agents, items: sc.items, relations: litRelations};
 }
 
+/* First-click Arrow Focus: exactly the selected arrow and its two endpoint
+   nodes are lit — nothing one-hop, no other relationship. That expansion is the
+   SECOND click (arrowFocusScope). Everything outside this three-object scope
+   ghosts. */
+function arrowNarrowScope(){
+  if (!DATA) return null;
+  const ar = arrowById(view.focus.arrow);
+  if (!ar) return null;
+  const sc = {agents: new Set(), items: new Set()};
+  [ar.from, ar.to].forEach(raw => {
+    const k = selKeyFor(raw);
+    (k.startsWith('i:') ? sc.items : sc.agents).add(k.slice(2));
+  });
+  return {agents: sc.agents, items: sc.items, relations: new Set(['arrow:' + ar.arrowId])};
+}
+
 function focusScope(){
-  if (view.focus.stage === 3) return arrowFocusScope();
+  if (view.focus.stage === 3)
+    return view.focus.arrowDepth === 'neighborhood' ? arrowFocusScope() : arrowNarrowScope();
   const obj = focusMesh();
   if (!obj || view.focus.stage < 1 || !DATA) return null;
   const sc = {agents: new Set(), items: new Set()};
@@ -952,15 +1021,9 @@ function frameCurrentScope(){
    and camera together. Returns false when there is nothing left to pop, and
    the caller falls back to flying home. */
 function popScope(){
-  if (view.focus.stage >= 1){
-    clearFocus();                        /* clearFocus re-derives the lighting */
-    /* The parent of a focus is whatever framed the camera before it. Since a
-       fit no longer isolates, nothing is lit-restricted underneath it, and
-       asking what is lit answered "everything" — so leaving a focus flew the
-       camera out to the whole org while the bar still read FIT. */
-    if (view.fit && view.selection.size){ refitToSelection(); return true; }
-    return frameCurrentScope();
-  }
+  /* focus first: endFocus consumes the whole layer and applies its return
+     policy (restore-exact for arrow, reframe-parent for a node-only focus). */
+  if (focusLayer) return endFocus('background');
   if (view.fit){                         /* then the fit */
     if (camMark) restoreCamera();
     else { view.fit = false; applyView(); frameCurrentScope(); }
@@ -1784,12 +1847,10 @@ function applyCommand(c){
     (Array.isArray(c.remove) ? c.remove : []).forEach(id => view.selection.delete(selKeyFor(id)));
     selectionChanged(); apiReportSelection();
   } else if (c.kind === 'focus'){
-    if (c.mode === 'clear'){ clearFocus(); return; }
-    view.focus.key = selKeyFor(c.id);
-    view.focus.stage = c.mode === 'neighborhood' ? 2 : 1;
-    applyView();
-    const m = focusMesh();
-    if (m) flyToNode(m);
+    if (c.mode === 'clear'){ endFocus('api-clear'); return; }
+    /* API focus shares the same node seam as a pointer click, so it cannot
+       leave a subject or camera the pointer path would not have. */
+    focusNode(selKeyFor(c.id), c.mode === 'neighborhood' ? 'neighborhood' : 'single');
   } else if (c.kind === 'filter'){
     if (c.clear){ setFilter('none'); activeSearchId = typingCardId = null; renderCards(); }
     else if ((c.ids || []).length){
@@ -1835,7 +1896,10 @@ function migrateViewKeys(){
   const remap = k => k.startsWith('i:') ? 'i:' + fullId(k.slice(2)) : k;
   const sel = [...view.selection].map(remap);
   view.selection.clear(); sel.forEach(k => view.selection.add(k));
-  if (view.focus.key) view.focus.key = remap(view.focus.key);
+  if (focusLayer && focusLayer.subject.kind === 'node' && focusLayer.subject.key){
+    focusLayer.subject.key = remap(focusLayer.subject.key);
+    projectFocus();
+  }
   if (view.filter.ids) view.filter.ids = new Set([...view.filter.ids].map(fullId));
 }
 
@@ -1913,7 +1977,7 @@ window.__atc = {
   /* framing internals, so a fit that looks wrong can be interrogated rather
      than guessed at: which constraint bound, and how much room it asked for */
   clearRect, frameDistance, frameTo, filteredView, neighbourhoodView, pickNode, pickAllHover,
-  pickArrow, pickClick, arrowInScope, enterArrowFocus,
+  pickArrow, pickClick, arrowInScope, focusArrow,
   /* CSS-pixel screen position of a node or an arrow's curve/label, so a test
      can dispatch a REAL pointer event at that pixel rather than calling the
      pick functions directly — proof the click path itself works, camera and
@@ -1972,19 +2036,18 @@ addEventListener('pointerup', e=>{
   if (moved > 6) return;                       /* it was a drag, not a click */
   const hit = pickClick(e);
   if (hit && hit.kind === 'arrow'){
-    enterArrowFocus(hit.obj);
+    focusArrow(hit.obj);
   } else if (hit && hit.kind === 'node'){
     const o = hit.obj;
     /* A click pushes a focus layer on top of whatever is showing. The fit's
        bookmark survives deliberately: clicking the background must be able to
-       put the camera back on the fit it came from. */
+       put the camera back on the fit it came from. Re-clicking the same node
+       toggles single<->neighbourhood; any other node (or an arrow subject)
+       replaces it at single. focusNode owns the layer and the camera. */
     const k = selKey(o);
-    if (view.focus.key && view.focus.key === k) view.focus.stage = view.focus.stage === 1 ? 2 : 1;
-    else { view.focus.key = k; view.focus.stage = 1; }
-    view.focus.arrow = null;                /* a node click always replaces Arrow Focus */
-    applyView();
-    view.framing = 'focus'; userMoved = true;
-    flyToNode(o);
+    const sub = focusLayer && focusLayer.subject;
+    const cur = sub && sub.kind === 'node' && sub.key === k ? sub.depth : null;
+    focusNode(k, cur === 'single' ? 'neighborhood' : 'single');
   } else if (popScope()){
     /* one layer came off and its parent is framed again */
   } else if (view.framing !== 'none'){
@@ -2055,12 +2118,19 @@ function idInScope(id){
   if (!hiAgents) return true;
   return String(id).startsWith('wi_') ? hiItems.has(id) : hiAgents.has(id);
 }
-/* An arrow is only clickable when both its endpoints are lit in the scope
-   that is actually rendering right now — the same rule a ghosted node
-   already follows for clicking and brushing. */
+/* An arrow is only clickable when it is actually lit right now — the same rule
+   a ghosted node follows. Outside Arrow Focus (no explicit relationship set)
+   that means both endpoints are lit in the rendered scope. Inside Arrow Focus
+   the explicit relationship set decides brightness, so eligibility follows it:
+   a ghosted arrow never accepts or intercepts a click even when both of its
+   endpoint nodes happen to be lit. This is the same predicate the render uses
+   for arrow opacity (hiRelations membership), so click and paint cannot
+   disagree. */
 function arrowInScope(g){
   const u = g.userData;
-  return !!(u.fromId && u.toId && idInScope(u.fromId) && idInScope(u.toId));
+  if (!(u.fromId && u.toId)) return false;
+  if (hiRelations) return hiRelations.has('arrow:' + u.ar.arrowId);
+  return idInScope(u.fromId) && idInScope(u.toId);
 }
 /* The arrow's clickable surface: the curve, its head, and whatever labels
    ride it — the short glyphs or, past the fallback threshold, the long-label
@@ -2707,9 +2777,15 @@ function setInputMode(mode){
                   flushHeldCommands(); }
   renderStack();                     /* the strip names the input mode too */
 }
-/* the ONLY place focus is dropped */
+/* Unconditional hard reset of the focus transaction: no layer, camera released
+   to ambient orbit. Goes through focusLayer/projectFocus like every other
+   focus write. endFocus() is the transactional exit that also performs a
+   policy camera action; clearFocus() is the plain reset used where there is
+   provably nothing to pop. */
 function clearFocus(){
-  view.focus.key = null; view.focus.stage = 0; view.focus.arrow = null;
+  focusLayer = null;
+  projectFocus();
+  assertFocusInvariant();
   if (typeof hideTagBox === 'function') hideTagBox();
   if (typeof detailEl !== 'undefined') detailEl.style.display = 'none';
   view.framing = 'none';                 /* releases the camera to ambient orbit */
@@ -2827,21 +2903,83 @@ function arrowFocusFitPoints(){
   return pts;
 }
 
-/* Enter Arrow Focus on `g` (an arrowGroup child). Occupies the same focus
-   layer a node click does: it replaces whatever was showing, node or arrow,
-   and leaves filter/fit beneath it untouched — the popScope() stack does not
-   know or care which kind of focus it is popping. */
-function enterArrowFocus(g){
+/* ---- the four focus transitions: the ONLY writers of focusLayer ----
+   Pointer and API entry share these seams; none of them writes focus state
+   directly. Every entry either opens a fresh layer — capturing lowerPose EXACTLY
+   ONCE — or replaces/deepens the subject of the layer already open WITHOUT
+   touching lowerPose. Every exit runs through endFocus(). */
+
+/* Open, deepen, or replace the focus with a NODE subject. The caller decides
+   depth (a pointer re-click toggles single<->neighbourhood; the API states it
+   outright). A fresh layer opens with reframe-parent, preserving the canonical
+   node-pop that C4 pins to clean base. Replacing keeps the original lowerPose,
+   and — once an arrow has upgraded the layer to restore-exact — leaves that
+   policy in force (arrow -> node keeps the exact lower pose). */
+function focusNode(key, depth){
+  if (!focusLayer)
+    focusLayer = { subject: {kind:'node', key, depth},
+                   lowerPose: captureCamera(), returnPolicy: 'reframe-parent' };
+  else
+    focusLayer.subject = {kind:'node', key, depth};
+  projectFocus();
+  assertFocusInvariant();
+  applyView();
+  view.framing = 'focus'; userMoved = true;
+  const m = focusMesh();
+  if (m) flyToNode(m);
+}
+
+/* Enter Arrow Focus on `g` (an arrowGroup child). First click opens NARROW
+   (only the arrow and its two endpoints). A second click on the SAME arrow
+   advances to the one-hop NEIGHBORHOOD. A third same-arrow click is a no-op.
+   Clicking a different arrow, or an arrow while a node is focused, replaces the
+   subject at narrow in the same layer. Any arrow ever upgrades the return
+   policy to restore-exact for the life of the layer, so background restores the
+   exact pose that was true BELOW the layer — never the node/arrow pose. */
+function focusArrow(g){
   const ar = g && g.userData && g.userData.ar;
   if (!ar || !ar.arrowId) return;
-  /* the selected arrow again is a no-op: only the background pops it */
-  if (view.focus.stage === 3 && view.focus.arrow === ar.arrowId) return;
-  view.focus.key = null;
-  view.focus.arrow = ar.arrowId;
-  view.focus.stage = 3;
+  const sub = focusLayer && focusLayer.subject;
+  if (sub && sub.kind === 'arrow' && sub.arrowId === ar.arrowId){
+    if (sub.depth === 'narrow') focusLayer.subject = {kind:'arrow', arrowId: ar.arrowId, depth:'neighborhood'};
+    else return;                                   /* third same-arrow click: no-op */
+  } else if (!focusLayer){
+    focusLayer = { subject: {kind:'arrow', arrowId: ar.arrowId, depth:'narrow'},
+                   lowerPose: captureCamera(), returnPolicy: 'restore-exact' };
+  } else {
+    focusLayer.subject = {kind:'arrow', arrowId: ar.arrowId, depth:'narrow'};
+    focusLayer.returnPolicy = 'restore-exact';     /* keep the original lowerPose */
+  }
+  projectFocus();
+  assertFocusInvariant();
   applyView();
   view.framing = 'focus'; userMoved = true;
   flyToArrowFocus();
+}
+
+/* The ONLY exit. Consumes the whole focus transaction atomically, re-derives
+   the lighting with no focus, then performs the ONE camera action its return
+   policy allows. reason: 'background' | 'refresh' | 'fit-dismiss' | 'api-clear'.
+   Background and refresh use the return policy. Fit dismissal discards the focus
+   return and lets the caller (fitSelection) restore the fit's pre-fit pose. API
+   clear preserves the base clear-command behaviour (no camera flight). */
+function endFocus(reason){
+  const L = focusLayer;
+  if (!L) return false;
+  focusLayer = null;
+  projectFocus();
+  assertFocusInvariant();
+  if (typeof hideTagBox === 'function') hideTagBox();
+  if (typeof detailEl !== 'undefined') detailEl.style.display = 'none';
+  view.framing = 'none';
+  applyView();                                     /* re-derive lighting, no focus */
+  if (reason === 'fit-dismiss' || reason === 'api-clear') return true;
+  if (L.returnPolicy === 'restore-exact' && L.lowerPose){ flyToPose(L.lowerPose); return true; }
+  /* reframe-parent: put back the framing that was true beneath the focus,
+     exactly as clean base 0d65bead did — refit the fit if one sits below,
+     otherwise reframe the parent scope. */
+  if (view.fit && view.selection.size){ refitToSelection(); return true; }
+  return frameCurrentScope();
 }
 function flyToArrowFocus(){
   const pts = arrowFocusFitPoints();
@@ -2869,22 +3007,29 @@ function arrowRootExists(rawId){
   return !!(DATA && (DATA.agents || []).some(a => a.id === s));
 }
 function checkArrowFocusValidity(){
-  if (view.focus.stage !== 3) return;
-  const ar = arrowById(view.focus.arrow);
-  if (!ar || !arrowRootExists(ar.from) || !arrowRootExists(ar.to)) popScope();
+  const sub = focusLayer && focusLayer.subject;
+  if (!sub || sub.kind !== 'arrow') return;
+  const ar = arrowById(sub.arrowId);
+  /* Refresh validity consumes the layer ONCE through endFocus; because the
+     layer is then null, no later node or arrow pop can restore the pose again. */
+  if (!ar || !arrowRootExists(ar.from) || !arrowRootExists(ar.to)) endFocus('refresh');
 }
 
-function markCamera(){
-  camMark = {
+/* One camera pose: everything a flight needs to put the view back exactly —
+   position, target, and the ambient orbit's angle, radius, height and centre,
+   plus the framing bookkeeping. Used by BOTH the fit bookmark (camMark) and the
+   focus transaction's lowerPose, which stay separate transactions. */
+function captureCamera(){
+  return {
     pos: camera.position.clone(), tgt: controls.target.clone(),
     orbitAngle, orbitR, orbitH, orbitTgt: orbitTgt.clone(),
     userMoved, framing: view.framing, fitTarget: view.fitTarget,
   };
 }
-function restoreCamera(){
-  const m = camMark; camMark = null;
-  view.fit = false;                  /* the lens lifts with the camera */
-  applyView();
+/* Fly the camera back to a captured pose exactly. Does NOT touch view.fit: the
+   caller owns whether the fit lens is lifting (fit dismissal) or staying put
+   (a focus popping back onto the fit beneath it). */
+function flyToPose(m){
   view.framing = 'restoring';
   userMoved = true;
   flyTo(m.pos, m.tgt, () => {
@@ -2892,6 +3037,13 @@ function restoreCamera(){
     orbitTgt.copy(m.orbitTgt);
     userMoved = m.userMoved; view.framing = m.framing; view.fitTarget = m.fitTarget;
   });
+}
+function markCamera(){ camMark = captureCamera(); }
+function restoreCamera(){
+  const m = camMark; camMark = null;
+  view.fit = false;                  /* the lens lifts with the camera */
+  applyView();
+  flyToPose(m);
   return true;
 }
 function fitSelection(){
@@ -2900,10 +3052,9 @@ function fitSelection(){
   if (!camMark && !view.selection.size) return false;
   if (camMark){
     /* second press dismisses the whole transaction — the fit and any focus
-       opened inside it — and returns the camera where it started */
-    view.focus.key = null; view.focus.stage = 0;
-    if (typeof hideTagBox === 'function') hideTagBox();
-    if (typeof detailEl !== 'undefined') detailEl.style.display = 'none';
+       opened inside it. Consume the focus layer (discarding its return), then
+       restore the fit's pre-fit pose. */
+    endFocus('fit-dismiss');
     return restoreCamera();
   }
   /* f/space toggles between the two framings: whatever focus mode is showing,
