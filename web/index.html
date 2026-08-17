@@ -359,6 +359,9 @@ const view = {
   /* the agent-name display field, on or off; everything else about an agent
      (role/archetype, id, idle, workload) stays visible either way */
   namesVisible: true,
+  /* Tags and arrows are annotations, not data: hiding them does not stop the
+     poller from receiving or retaining them. Defaults shown after a restart. */
+  annotationsVisible: true,
 };
 /* THE focus transaction — one owner for subject, depth, the camera pose below
    the layer, and the return policy. `null` carries NONE of them, so a stale
@@ -409,6 +412,14 @@ const agentLabel = a => view.namesVisible ? a.name : '';
 function setNamesVisible(on){
   view.namesVisible = on;
   renderDetail();                /* an open detail pane must not show stale text */
+}
+function setAnnotationsVisible(on){
+  view.annotationsVisible = on;
+  /* Keep hidden annotations out of hit-testing immediately, before the next frame. */
+  arrowGroup.visible = on;
+  selectables().forEach(m => (m.userData.tagSprites || []).forEach(sp => {
+    sp.visible = on && (m.userData.dim ?? 1) > .9;
+  }));
 }
 function focusMesh(){
   if (!view.focus.key) return null;
@@ -1754,6 +1765,9 @@ async function apiPull(){
     if (typeof d.namesVisible === 'boolean' && d.namesVisible !== view.namesVisible){
       setNamesVisible(d.namesVisible);
     }
+    if (typeof d.annotationsVisible === 'boolean' && d.annotationsVisible !== view.annotationsVisible){
+      setAnnotationsVisible(d.annotationsVisible);
+    }
     if (typeof d.seq === 'number' && d.seq >= apiSeq) apiSeq = d.seq;
     apiUp = true;
   } catch(e){ apiUp = false; }
@@ -1986,6 +2000,12 @@ addEventListener('keydown', e=>{
     setNamesVisible(on);           /* apply locally now; the pull loop reconciles if it fails */
     apiFetch('/names', {method:'POST', headers:{'content-type':'application/json'},
                         body: JSON.stringify({on})}).catch(()=>{});
+  }
+  else if (e.key==='a' || e.key==='A'){
+    const on = !view.annotationsVisible;
+    setAnnotationsVisible(on);    /* apply locally now; the pull loop reconciles */
+    apiFetch('/annotations', {method:'POST', headers:{'content-type':'application/json'},
+                              body: JSON.stringify({on})}).catch(()=>{});
   }
   else if (e.key==='['){ setRadius(selRadius - Math.max(4, selRadius*.15)); }
   else if (e.key===']'){ setRadius(selRadius + Math.max(4, selRadius*.15)); }
@@ -3338,7 +3358,8 @@ function tickFrame(){
       u.dim = f;
       m.children.forEach(ch => {
         if (!ch.isSprite) return;
-        ch.visible = f > .9 && (!ch.userData.isNameLabel || view.namesVisible);
+        ch.visible = f > .9 && (!ch.userData.isNameLabel || view.namesVisible)
+          && (!ch.userData.isTag || view.annotationsVisible);
         ch.material.opacity = (ch.userData.isTag ? 1 : .85) * f;
       });
     }
@@ -3388,7 +3409,7 @@ function tickFrame(){
          unfaded next to its own node — ghosted tags drop out entirely. */
       if (ch.isSprite){
         const f = u.dim ?? 1;
-        ch.visible = f > .9;
+        ch.visible = f > .9 && (!ch.userData.isTag || view.annotationsVisible);
         ch.material.opacity = f;
         return;
       }

@@ -15,6 +15,7 @@ what it currently has selected. External callers use the verbs below.
     POST   /api/focus                    {id, mode:"single"|"neighborhood"|"clear"}
     POST   /api/fit                      {on:bool}
     POST   /api/names                    {on:bool} — show/hide the agent-name display field
+    POST   /api/annotations              {on:bool} — show/hide tags and arrows
     POST   /api/filter                   {ids:[id]} | {query:"text"} | {clear:true}
     POST   /api/arrows                   {arrows:[{from, to, text, color, source, author}]}
     GET    /api/arrows                   [{arrowId, from, to, text, color, source, author, at}]
@@ -103,6 +104,10 @@ state = {
     # selection — a service restart resets it rather than silently leaving
     # names hidden with no visible reason why.
     "namesVisible": True,
+    # Tags and arrows are presentation-only annotations. Keep accepting and
+    # retaining them while hidden; this changes the view, not the data. Like
+    # names, it is intentionally ephemeral and resets shown on service restart.
+    "annotationsVisible": True,
     "commands": [],         # [{seq, kind, ...}] — a broadcast log, trimmed
     "seq": 0,
     "oldestSeq": 0,
@@ -142,6 +147,7 @@ about provenance and cleanup is about not trampling each other.
   add to what is selected             POST /api/select   {add:[...]}
   fly to the selection                POST /api/fit      {on:true}
   show/hide agent names               POST /api/names    {on:bool}
+  show/hide annotations               POST /api/annotations {on:bool}
   pin a note to a node                POST /api/tags
   draw a relation between two         POST /api/arrows
   file/rename a search                POST /api/searches
@@ -201,6 +207,19 @@ service restart.
 
 ## Annotating
 
+## Showing or hiding annotations
+
+`POST /api/annotations {"on":false}` hides all tag cards and every authored
+arrow, including arrow geometry, heads, and labels. Tags and arrows remain in
+the service, new annotations are still accepted, and the normal read endpoints
+continue to return them. `{"on":true}` restores their rendering. `GET
+/api/state` and `GET /api/pull` carry `annotationsVisible`; the setting resets
+to shown on a service restart.
+
+A hidden arrow is not clickable or focusable, because it is no longer visible.
+This does not clear an existing Arrow Focus; its data still exists and it will
+render again when annotations are restored.
+
 A **tag** is a short label pinned above one node. An **arrow** is a labelled
 curve between two, for a relation: blocks, owns, caused. Colour is yours from
 `neutral red amber green cyan blue violet`, and means whatever you decide —
@@ -253,6 +272,7 @@ def help_json():
             {"method": "POST", "path": "/api/focus", "body": '{id, mode:"single"|"neighborhood"|"clear"}'},
             {"method": "POST", "path": "/api/fit", "body": "{on:bool}"},
             {"method": "POST", "path": "/api/names", "body": "{on:bool} — show/hide the agent-name field"},
+            {"method": "POST", "path": "/api/annotations", "body": "{on:bool} — show/hide tags and arrows"},
             {"method": "POST", "path": "/api/filter", "body": '{ids:[id]} | {query:"text"} | {clear:true}'},
             {"method": "GET", "path": "/api/searches", "does": "the filed search cards"},
             {"method": "POST", "path": "/api/searches", "body": "{searches:[{query|ids, label, author, searchId?}]}"},
@@ -405,7 +425,8 @@ class Handler(BaseHTTPRequestHandler):
                         "tags": list(state["tags"].values()), "seq": state["seq"],
                         "arrows": list(state["arrows"].values()),
                         "searches": list(state["searches"].values()),
-                        "namesVisible": state["namesVisible"]}
+                        "namesVisible": state["namesVisible"],
+                        "annotationsVisible": state["annotationsVisible"]}
         elif u.path == "/api/selection":
             # two distinct things: what a human brushed, and what a focus or
             # filter is currently highlighting. Neither implies the other.
@@ -453,7 +474,8 @@ class Handler(BaseHTTPRequestHandler):
                         "arrowsRev": state["arrowsRev"],
                         "searches": list(state["searches"].values()),
                         "searchesRev": state["searchesRev"],
-                        "namesVisible": state["namesVisible"]}
+                        "namesVisible": state["namesVisible"],
+                        "annotationsVisible": state["annotationsVisible"]}
         if snap is None:
             return self._send({"error": "not found"}, 404)
         self._send(snap)
@@ -548,6 +570,10 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/names":
                 state["namesVisible"] = bool(b.get("on", True))
                 out = (push("names", on=state["namesVisible"]), 200)
+
+            if u.path == "/api/annotations":
+                state["annotationsVisible"] = bool(b.get("on", True))
+                out = (push("annotations", on=state["annotationsVisible"]), 200)
 
             if u.path == "/api/selection":       # a page reporting in
                 raw = b.get("selection")
