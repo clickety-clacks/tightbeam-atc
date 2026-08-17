@@ -964,7 +964,7 @@ function frameCurrentScope(){
    the caller falls back to flying home. */
 function popScope(){
   if (view.focus.stage >= 1){
-    const restoreArrowCamera = !!arrowCamMark;
+    const restoreArrowCamera = arrowCamActive && !!arrowCamMark;
     clearFocus(restoreArrowCamera);      /* clearFocus re-derives the lighting */
     if (restoreArrowCamera) return restoreArrowFocusCamera();
     /* The parent of a focus is whatever framed the camera before it. Since a
@@ -1799,6 +1799,7 @@ function applyCommand(c){
     selectionChanged(); apiReportSelection();
   } else if (c.kind === 'focus'){
     if (c.mode === 'clear'){ clearFocus(); return; }
+    if (view.focus.stage < 1 && !arrowCamMark) markArrowFocusCamera();
     view.focus.key = selKeyFor(c.id);
     view.focus.stage = c.mode === 'neighborhood' ? 2 : 1;
     applyView();
@@ -1993,6 +1994,7 @@ addEventListener('pointerup', e=>{
        bookmark survives deliberately: clicking the background must be able to
        put the camera back on the fit it came from. */
     const k = selKey(o);
+    if (view.focus.stage < 1 && !arrowCamMark) markArrowFocusCamera();
     if (view.focus.key && view.focus.key === k) view.focus.stage = view.focus.stage === 1 ? 2 : 1;
     else { view.focus.key = k; view.focus.stage = 1; }
     view.focus.arrow = null;                /* a node click always replaces Arrow Focus */
@@ -2725,7 +2727,7 @@ function setInputMode(mode){
 /* the ONLY place focus is dropped */
 function clearFocus(keepArrowCamera = false){
   view.focus.key = null; view.focus.stage = 0; view.focus.arrow = null;
-  if (!keepArrowCamera) arrowCamMark = null;
+  if (!keepArrowCamera){ arrowCamMark = null; arrowCamActive = false; }
   if (typeof hideTagBox === 'function') hideTagBox();
   if (typeof detailEl !== 'undefined') detailEl.style.display = 'none';
   view.framing = 'none';                 /* releases the camera to ambient orbit */
@@ -2861,6 +2863,7 @@ function enterArrowFocus(g){
     }
   }
   if (!arrowCamMark) markArrowFocusCamera();
+  arrowCamActive = true;
   view.focus.key = null;
   view.focus.arrow = ar.arrowId;
   view.focus.stage = 3;
@@ -2899,10 +2902,11 @@ function checkArrowFocusValidity(){
   if (!ar || !arrowRootExists(ar.from) || !arrowRootExists(ar.to)) popScope();
 }
 
-/* Arrow Focus occupies one focus layer across its narrow and neighbourhood
-   stages. Remember the exact camera below that layer once, then preserve the
-   mark while the subject or focus kind changes inside it. */
-let arrowCamMark = null;
+/* Arrow Focus occupies the same focus layer as node focus. Remember the exact
+   camera when that layer first opens, even if a node opens it; Arrow Focus
+   claims the mark only when an arrow later replaces the node. A node-only pop
+   discards the unused mark and keeps the existing node-focus camera behavior. */
+let arrowCamMark = null, arrowCamActive = false;
 function markArrowFocusCamera(){
   arrowCamMark = {
     pos: camera.position.clone(), tgt: controls.target.clone(),
@@ -2911,7 +2915,7 @@ function markArrowFocusCamera(){
   };
 }
 function restoreArrowFocusCamera(){
-  const m = arrowCamMark; arrowCamMark = null;
+  const m = arrowCamMark; arrowCamMark = null; arrowCamActive = false;
   if (!m) return false;
   view.framing = 'restoring'; userMoved = true;
   flyTo(m.pos, m.tgt, () => {
