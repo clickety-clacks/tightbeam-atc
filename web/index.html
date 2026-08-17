@@ -356,6 +356,9 @@ const view = {
   filter: { kind: 'none', query: '', ids: null },
   framing: 'none',               /* 'none' | 'focus' | 'selection' — camera intent */
   fitTarget: 'selection',        /* which framing f/space lands on next */
+  /* the agent-name display field, on or off; everything else about an agent
+     (role/archetype, id, idle, workload) stays visible either way */
+  namesVisible: true,
 };
 /* THE focus transaction — one owner for subject, depth, the camera pose below
    the layer, and the return policy. `null` carries NONE of them, so a stale
@@ -399,6 +402,13 @@ function assertFocusInvariant(){
     console.assert((s.depth === 'narrow' || s.depth === 'neighborhood') && !!s.arrowId, 'focus: bad arrow subject');
   console.assert(L.returnPolicy === 'reframe-parent' || L.returnPolicy === 'restore-exact', 'focus: bad return policy');
   console.assert(L.returnPolicy !== 'restore-exact' || !!L.lowerPose, 'focus: restore-exact without lower pose');
+}
+/* the one seam every display of an agent's name goes through, so the toggle
+   cannot miss a spot: hidden means blank, not a placeholder word */
+const agentLabel = a => view.namesVisible ? a.name : '';
+function setNamesVisible(on){
+  view.namesVisible = on;
+  renderDetail();                /* an open detail pane must not show stale text */
 }
 function focusMesh(){
   if (!view.focus.key) return null;
@@ -1356,7 +1366,9 @@ function buildGround(agents){
        the leaf-worker crowd stays tooltip-only */
     if (!a.retired && ['main','po','patrol','orch'].includes(a.kind)){
       const sp = labelSprite(a.name.length>28 ? a.name.slice(0,27)+'…' : a.name);
-      sp.position.set(0, 1.15, 0); m.add(sp);
+      sp.position.set(0, 1.15, 0); sp.visible = view.namesVisible;
+      sp.userData.isNameLabel = true;              /* gated by the names toggle in tickFrame */
+      m.add(sp);
     }
     groundGroup.add(m); agentMeshes[a.id]=m;
   });
@@ -1610,7 +1622,7 @@ function showTagBox(){
   if (view.focus.stage !== 1 || !view.focus.key){ hideTagBox(); return; }
   const m = focusMesh();
   const label = m?.userData.w ? (m.userData.w.short || m.userData.w.id)
-                              : (m?.userData.a ? m.userData.a.name : '');
+                              : (m?.userData.a ? agentLabel(m.userData.a) : '');
   tagBox.querySelector('.who').textContent = label ? '· ' + String(label).slice(0, 26) : '';
   tagBox.style.display = 'block';
   tagInput.value = '';
@@ -1736,6 +1748,11 @@ async function apiPull(){
       searchesRev = d.searchesRev;
       searches = Array.isArray(d.searches) ? d.searches : [];
       renderCards();
+    }
+    /* a page that joins mid-session must not wait for the next toggle to learn
+       the current state — /api/pull always carries it, like tags/arrows do */
+    if (typeof d.namesVisible === 'boolean' && d.namesVisible !== view.namesVisible){
+      setNamesVisible(d.namesVisible);
     }
     if (typeof d.seq === 'number' && d.seq >= apiSeq) apiSeq = d.seq;
     apiUp = true;
@@ -1865,6 +1882,8 @@ function applyCommand(c){
     } else { setFilter('none'); activeSearchId = typingCardId = null; renderCards(); }
   } else if (c.kind === 'fit'){
     if (c.on) fitSelection(); else if (camMark) restoreCamera();
+  } else if (c.kind === 'names'){
+    setNamesVisible(!!c.on);
   }
 }
 
@@ -1961,6 +1980,12 @@ addEventListener('keydown', e=>{
     legendUserSet = true;
     document.getElementById('legend').classList.toggle('collapsed');
     measureLegend();          /* the mode strip rides on it; let it drop */
+  }
+  else if (e.key==='n' || e.key==='N'){
+    const on = !view.namesVisible;
+    setNamesVisible(on);           /* apply locally now; the pull loop reconciles if it fails */
+    apiFetch('/names', {method:'POST', headers:{'content-type':'application/json'},
+                        body: JSON.stringify({on})}).catch(()=>{});
   }
   else if (e.key==='['){ setRadius(selRadius - Math.max(4, selRadius*.15)); }
   else if (e.key===']'){ setRadius(selRadius + Math.max(4, selRadius*.15)); }
@@ -2168,7 +2193,7 @@ function nodeContent(u, clamp){
     const w = u.w;
     const segs = SEGS.map((x,i)=>(i<w.stage?'●':'○')+' '+x).join('<br>');
     const acts = Object.entries(w.turns||{}).map(([h,st])=>
-      (st==='run'?'▶ ':'⏸ ')+(byId[h]?byId[h].name:h)).join('<br>') || 'no turns active';
+      (st==='run'?'▶ ':'⏸ ')+(byId[h]?agentLabel(byId[h]):h)).join('<br>') || 'no turns active';
     const merged = w.merged === true ? 'in the branch'
                  : w.merged === false ? 'NOT in the branch'
                  : (w.code ? 'branch state unknown' : 'nothing to merge');
@@ -2192,7 +2217,7 @@ function nodeContent(u, clamp){
      were a CLI round trip away before the feed carried them */
   const kit = [a.archetype, a.model && (a.harness ? a.harness + ' · ' + a.model : a.model)]
     .filter(Boolean).join('  ·  ');
-  return '<span class="t">' + a.name + '</span>'
+  return '<span class="t">' + agentLabel(a) + '</span>'
     + (kit ? '<span class="k">is</span>' + kit : '')
     + '<span class="k">state</span>' + (a.retired?'retired (holds open cards)':'active') + ' · ' + idle
     + (a.turn==='run'?' · turn running':a.turn==='wait'?' · turn queued':'')
@@ -3313,7 +3338,7 @@ function tickFrame(){
       u.dim = f;
       m.children.forEach(ch => {
         if (!ch.isSprite) return;
-        ch.visible = f > .9;                       /* same rule as items */
+        ch.visible = f > .9 && (!ch.userData.isNameLabel || view.namesVisible);
         ch.material.opacity = (ch.userData.isTag ? 1 : .85) * f;
       });
     }

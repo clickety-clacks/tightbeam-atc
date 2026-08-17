@@ -51,6 +51,14 @@ a relation — blocks, owns, caused by. Both carry your name and a colour.
 harness and model — and every work item, with its evidence stage and whether
 its code actually reached the branch.
 
+**Show or hide agent names.** `POST /api/names {"on":false}` hides the
+agent-name field everywhere it appears on the view (label, hover, focus pane,
+tag/arrow authorship, a work item's turn list); `{"on":true}` shows it again.
+Role/archetype, id and everything else about an agent stay as they are — this
+toggles one display field, not the underlying data. `GET /api/state` carries
+the current `namesVisible` value; check it before flipping if you are not
+sure which way it is set, and say what you changed.
+
 ## The three rules that matter
 
 **Say who you are.** Every tag, arrow and search takes an `author`. It renders

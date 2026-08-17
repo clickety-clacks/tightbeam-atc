@@ -14,6 +14,7 @@ what it currently has selected. External callers use the verbs below.
     POST   /api/select                   {add:[id], remove:[id], clear:bool}
     POST   /api/focus                    {id, mode:"single"|"neighborhood"|"clear"}
     POST   /api/fit                      {on:bool}
+    POST   /api/names                    {on:bool} — show/hide the agent-name display field
     POST   /api/filter                   {ids:[id]} | {query:"text"} | {clear:true}
     POST   /api/arrows                   {arrows:[{from, to, text, color, source, author}]}
     GET    /api/arrows                   [{arrowId, from, to, text, color, source, author, at}]
@@ -96,6 +97,12 @@ state = {
     "focusMode": "none",    # none | single | neighborhood | filter
     "selectionAt": 0,
     "selectionBy": None,
+    # Whether the page shows an agent's name field. Everything else about the
+    # agent (role/archetype, id, idle, workload) is unaffected — this hides
+    # one field, not the agent. Defaults on; ephemeral, like fit/focus/
+    # selection — a service restart resets it rather than silently leaving
+    # names hidden with no visible reason why.
+    "namesVisible": True,
     "commands": [],         # [{seq, kind, ...}] — a broadcast log, trimmed
     "seq": 0,
     "oldestSeq": 0,
@@ -134,6 +141,7 @@ about provenance and cleanup is about not trampling each other.
   point at one node                   POST /api/focus    {id, mode}
   add to what is selected             POST /api/select   {add:[...]}
   fly to the selection                POST /api/fit      {on:true}
+  show/hide agent names               POST /api/names    {on:bool}
   pin a note to a node                POST /api/tags
   draw a relation between two         POST /api/arrows
   file/rename a search                POST /api/searches
@@ -179,6 +187,17 @@ later. A card without one is nearly useless to them.
 edits a card in place — revise yours rather than filing near-duplicates.
 Identical searches are refreshed, not stacked, so re-running one on a cadence
 leaves a single card.
+
+## Showing or hiding agent names
+
+`POST /api/names {"on":false}` hides the agent-name field everywhere it is
+displayed — the floating label, hover, the focus pane, tag/arrow authorship,
+and a work item's own turn list all stop showing it. Role/archetype, id,
+idle/workload and the rest of an agent's data are unaffected; this hides one
+field, not the agent. `{"on":true}` shows it again. `GET /api/state` and
+`GET /api/pull` both carry the current `namesVisible` value, so read before
+you flip it if you are not sure which way it is set. It resets to shown on a
+service restart.
 
 ## Annotating
 
@@ -233,6 +252,7 @@ def help_json():
             {"method": "POST", "path": "/api/select", "body": "{add:[id], remove:[id], clear:bool}"},
             {"method": "POST", "path": "/api/focus", "body": '{id, mode:"single"|"neighborhood"|"clear"}'},
             {"method": "POST", "path": "/api/fit", "body": "{on:bool}"},
+            {"method": "POST", "path": "/api/names", "body": "{on:bool} — show/hide the agent-name field"},
             {"method": "POST", "path": "/api/filter", "body": '{ids:[id]} | {query:"text"} | {clear:true}'},
             {"method": "GET", "path": "/api/searches", "does": "the filed search cards"},
             {"method": "POST", "path": "/api/searches", "body": "{searches:[{query|ids, label, author, searchId?}]}"},
@@ -384,7 +404,8 @@ class Handler(BaseHTTPRequestHandler):
                         "selectionAt": state["selectionAt"], "selectionBy": state["selectionBy"],
                         "tags": list(state["tags"].values()), "seq": state["seq"],
                         "arrows": list(state["arrows"].values()),
-                        "searches": list(state["searches"].values())}
+                        "searches": list(state["searches"].values()),
+                        "namesVisible": state["namesVisible"]}
         elif u.path == "/api/selection":
             # two distinct things: what a human brushed, and what a focus or
             # filter is currently highlighting. Neither implies the other.
@@ -431,7 +452,8 @@ class Handler(BaseHTTPRequestHandler):
                         "arrows": list(state["arrows"].values()),
                         "arrowsRev": state["arrowsRev"],
                         "searches": list(state["searches"].values()),
-                        "searchesRev": state["searchesRev"]}
+                        "searchesRev": state["searchesRev"],
+                        "namesVisible": state["namesVisible"]}
         if snap is None:
             return self._send({"error": "not found"}, 404)
         self._send(snap)
@@ -522,6 +544,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if u.path == "/api/fit":
                 out = (push("fit", on=bool(b.get("on", True))), 200)
+
+            if u.path == "/api/names":
+                state["namesVisible"] = bool(b.get("on", True))
+                out = (push("names", on=state["namesVisible"]), 200)
 
             if u.path == "/api/selection":       # a page reporting in
                 raw = b.get("selection")
