@@ -326,8 +326,9 @@ let flight = null, orbitAngle = 0, arrowFrame = 0;
 
      view.selection  brushed nodes. Persists across rebuilds and mode changes.
      view.focus      {obj, stage}. stage 1 = the node, 2 = its neighbourhood,
-                     3 = an authored arrow (Arrow Focus) — key is null then
-                     and `arrow` carries the arrowId instead.
+                     3 = one authored arrow and its endpoints, 4 = that arrow's
+                     two-endpoint neighbourhood — key is null for both arrow
+                     stages and `arrow` carries the arrowId instead.
      view.input      'navigate' | 'brush'. What the pointer does, nothing more.
 
    Selection and focus are ORTHOGONAL: neither clears or constrains the other. */
@@ -620,21 +621,31 @@ function filterScope(){
 
 function arrowById(id){ return arrows.find(a => a.arrowId === id) || null; }
 
-/* Arrow Focus's scope: the selected arrow's two endpoints are the roots.
-   Walk every RENDERED relationship — agent family arcs, item-holder/turn
-   tethers, agent obligation links, authored arrows — and take the ones that
-   touch a root, one hop, stopping there. Each contributes its opposite node
-   to the lit node set AND its own key to hiRelations, so a relationship
-   between two lit-by-other-means nodes that itself touches neither root can
-   stay ghosted even though both its ends are lit (the Arrow Focus spec,
-   "the node set alone must not decide relationship brightness"). */
+/* Arrow Focus starts with exactly the selected arrow and its two stored
+   endpoints. Its second stage walks every RENDERED relationship — agent
+   family arcs, item-holder/turn tethers, agent obligation links, authored
+   arrows — and takes the ones that touch either endpoint root, one hop,
+   stopping there. Each contributes its opposite node to the lit node set AND
+   its own key to hiRelations, so a relationship between two lit-by-other-means
+   nodes that itself touches neither root can stay ghosted even though both its
+   ends are lit (the Arrow Focus spec, "the node set alone must not decide
+   relationship brightness"). */
 function arrowFocusScope(){
   if (!DATA) return null;
   const ar = arrowById(view.focus.arrow);
   if (!ar) return null;
   const roots = new Set([selKeyFor(ar.from), selKeyFor(ar.to)]);
   const touches = k => roots.has(k);
-  const litNodes = new Set(roots), litRelations = new Set();
+  const litNodes = new Set(roots), litRelations = new Set(['arrow:' + ar.arrowId]);
+
+  if (view.focus.stage === 3){
+    const sc = {agents: new Set(), items: new Set()};
+    litNodes.forEach(k => {
+      const id = k.slice(2);
+      (k.startsWith('i:') ? sc.items : sc.agents).add(id);
+    });
+    return {agents: sc.agents, items: sc.items, relations: litRelations};
+  }
 
   groundGroup.children.forEach(o => {
     const u = o.userData;
@@ -677,7 +688,7 @@ function arrowFocusScope(){
 }
 
 function focusScope(){
-  if (view.focus.stage === 3) return arrowFocusScope();
+  if (view.focus.stage === 3 || view.focus.stage === 4) return arrowFocusScope();
   const obj = focusMesh();
   if (!obj || view.focus.stage < 1 || !DATA) return null;
   const sc = {agents: new Set(), items: new Set()};
@@ -953,7 +964,9 @@ function frameCurrentScope(){
    the caller falls back to flying home. */
 function popScope(){
   if (view.focus.stage >= 1){
-    clearFocus();                        /* clearFocus re-derives the lighting */
+    const restoreArrowCamera = !!arrowCamMark;
+    clearFocus(restoreArrowCamera);      /* clearFocus re-derives the lighting */
+    if (restoreArrowCamera) return restoreArrowFocusCamera();
     /* The parent of a focus is whatever framed the camera before it. Since a
        fit no longer isolates, nothing is lit-restricted underneath it, and
        asking what is lit answered "everything" — so leaving a focus flew the
@@ -1157,13 +1170,14 @@ function renderStack(){
     layers.push({ text: 'neighbourhood',
                   count: (hiItems?.size || 0) + (hiAgents?.size || 0), colour: hot('violet') });
   }
-  if (view.focus.stage === 3){
+  if (view.focus.stage === 3 || view.focus.stage === 4){
     /* names the layer AND identifies the selected arrow, so an agent reading
        the strip cannot mistake this for a node focus (Arrow Focus spec). */
     const ar = arrowById(view.focus.arrow);
     const id = (ar && ar.arrowId) || view.focus.arrow || '';
     const label = ar && ar.text ? ar.text.slice(0, 20) : id.slice(0, 8);
-    layers.push({ text: 'arrow focus' + (label ? ' · ' + label : ''),
+    const mode = view.focus.stage === 3 ? 'arrow focus' : 'arrow neighbourhood';
+    layers.push({ text: mode + (label ? ' · ' + label : ''),
                   count: (hiItems?.size || 0) + (hiAgents?.size || 0), colour: hot('violet') });
   }
   if (view.input === 'brush'){
@@ -1709,7 +1723,7 @@ async function apiReportSelection(){
      question the view is answering. */
   const mode = view.focus.stage === 2 ? 'neighborhood'
              : view.focus.stage === 1 ? 'single'
-             : view.focus.stage === 3 ? 'arrow'
+             : (view.focus.stage === 3 || view.focus.stage === 4) ? 'arrow'
              : view.filter.kind !== 'none' ? 'filter' : 'none';
   /* An agent reading the report must be able to tell this is Arrow Focus and
      which arrow, not just that "some focus" is up.
@@ -1720,7 +1734,7 @@ async function apiReportSelection(){
      server does NOT filter `focused[].type`, only length-clips it, so the
      selected arrow's identity still reaches a reader as a synthetic entry
      there even though the mode field itself round-trips as "none". */
-  const focArrow = view.focus.stage === 3 ? (() => {
+  const focArrow = (view.focus.stage === 3 || view.focus.stage === 4) ? (() => {
     const ar = arrowById(view.focus.arrow);
     return {arrowId: view.focus.arrow, from: ar?.from ?? null, to: ar?.to ?? null};
   })() : null;
@@ -2060,6 +2074,7 @@ function idInScope(id){
    already follows for clicking and brushing. */
 function arrowInScope(g){
   const u = g.userData;
+  if (hiRelations) return hiRelations.has('arrow:' + u.ar.arrowId);
   return !!(u.fromId && u.toId && idInScope(u.fromId) && idInScope(u.toId));
 }
 /* The arrow's clickable surface: the curve, its head, and whatever labels
@@ -2708,8 +2723,9 @@ function setInputMode(mode){
   renderStack();                     /* the strip names the input mode too */
 }
 /* the ONLY place focus is dropped */
-function clearFocus(){
+function clearFocus(keepArrowCamera = false){
   view.focus.key = null; view.focus.stage = 0; view.focus.arrow = null;
+  if (!keepArrowCamera) arrowCamMark = null;
   if (typeof hideTagBox === 'function') hideTagBox();
   if (typeof detailEl !== 'undefined') detailEl.style.display = 'none';
   view.framing = 'none';                 /* releases the camera to ambient orbit */
@@ -2834,8 +2850,17 @@ function arrowFocusFitPoints(){
 function enterArrowFocus(g){
   const ar = g && g.userData && g.userData.ar;
   if (!ar || !ar.arrowId) return;
-  /* the selected arrow again is a no-op: only the background pops it */
-  if (view.focus.stage === 3 && view.focus.arrow === ar.arrowId) return;
+  if (view.focus.arrow === ar.arrowId){
+    if (view.focus.stage === 4) return;       /* no third focus depth */
+    if (view.focus.stage === 3){
+      view.focus.stage = 4;
+      applyView();
+      view.framing = 'focus'; userMoved = true;
+      flyToArrowFocus();
+      return;
+    }
+  }
+  if (!arrowCamMark) markArrowFocusCamera();
   view.focus.key = null;
   view.focus.arrow = ar.arrowId;
   view.focus.stage = 3;
@@ -2869,9 +2894,32 @@ function arrowRootExists(rawId){
   return !!(DATA && (DATA.agents || []).some(a => a.id === s));
 }
 function checkArrowFocusValidity(){
-  if (view.focus.stage !== 3) return;
+  if (view.focus.stage !== 3 && view.focus.stage !== 4) return;
   const ar = arrowById(view.focus.arrow);
   if (!ar || !arrowRootExists(ar.from) || !arrowRootExists(ar.to)) popScope();
+}
+
+/* Arrow Focus occupies one focus layer across its narrow and neighbourhood
+   stages. Remember the exact camera below that layer once, then preserve the
+   mark while the subject or focus kind changes inside it. */
+let arrowCamMark = null;
+function markArrowFocusCamera(){
+  arrowCamMark = {
+    pos: camera.position.clone(), tgt: controls.target.clone(),
+    orbitAngle, orbitR, orbitH, orbitTgt: orbitTgt.clone(),
+    userMoved, framing: view.framing, fitTarget: view.fitTarget,
+  };
+}
+function restoreArrowFocusCamera(){
+  const m = arrowCamMark; arrowCamMark = null;
+  if (!m) return false;
+  view.framing = 'restoring'; userMoved = true;
+  flyTo(m.pos, m.tgt, () => {
+    orbitAngle = m.orbitAngle; orbitR = m.orbitR; orbitH = m.orbitH;
+    orbitTgt.copy(m.orbitTgt);
+    userMoved = m.userMoved; view.framing = m.framing; view.fitTarget = m.fitTarget;
+  });
+  return true;
 }
 
 function markCamera(){
