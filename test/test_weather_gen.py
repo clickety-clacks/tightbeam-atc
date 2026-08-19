@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -102,6 +103,88 @@ class WeatherGeneratorReadinessTest(unittest.TestCase):
                 (code, "session:holder", 301, "completion", None, None),
             ])
         con.executemany("INSERT INTO attests VALUES (?, ?, ?, ?, ?, ?)", attests)
+        con.commit()
+        con.close()
+
+
+class WeatherGeneratorEngagedTest(unittest.TestCase):
+    def test_engaged_flag_matches_open_assignment_or_pending_wake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._make_state_db(base / "state.db")
+            output = base / "weather.json"
+            env = os.environ.copy()
+            env.update({"TB_BASE_DIR": str(base), "TB_WEATHER_OUT": str(output)})
+            env.pop("TB_WEATHER_DEST", None)
+            env.pop("TB_WEATHER_REPO", None)
+
+            subprocess.run(["python3", str(GENERATOR)], env=env, check=True,
+                           capture_output=True, text=True)
+            agents = {a["id"]: a for a in json.loads(output.read_text())["agents"]}
+
+            self.assertTrue(agents["s_holder"]["engaged"])   # open assignment
+            self.assertTrue(agents["s_waiter"]["engaged"])   # pending wake, no card
+            self.assertFalse(agents["s_idle"]["engaged"])    # neither
+            self.assertFalse(agents["s_retired"]["engaged"]) # retired, would
+                                                              # otherwise qualify
+
+    def _make_state_db(self, path):
+        con = sqlite3.connect(path)
+        con.executescript("""
+            CREATE TABLE sessions (
+                sessionKey TEXT PRIMARY KEY, displayName TEXT, state TEXT,
+                spawnedBy TEXT, archetype TEXT, harness TEXT, model TEXT
+            );
+            CREATE TABLE work_items (
+                id TEXT PRIMARY KEY, title TEXT, state TEXT, createdAt INTEGER
+            );
+            CREATE TABLE assignments (
+                id TEXT PRIMARY KEY, workItemId TEXT, holderKey TEXT, state TEXT,
+                closedAt INTEGER, reviewsAssignmentId TEXT
+            );
+            CREATE TABLE assignment_effects (assignmentId TEXT, effectKind TEXT);
+            CREATE TABLE attests (
+                assignmentId TEXT, bySession TEXT, ts INTEGER, kind TEXT,
+                verdictKind TEXT, commitRefs TEXT
+            );
+            CREATE TABLE turns (
+                sessionKey TEXT, assignmentId TEXT, wakeId TEXT, createdAt INTEGER,
+                startedAt INTEGER, endedAt INTEGER
+            );
+            CREATE TABLE wakes (
+                wakeId TEXT, creatorSessionKey TEXT, sessionKey TEXT, state TEXT,
+                dueAt INTEGER, firedAt INTEGER, work_item_id TEXT
+            );
+            CREATE TABLE roles (name TEXT, boundSessionKey TEXT);
+            CREATE TABLE messages (id TEXT, sessionKey TEXT, sender TEXT, timestamp INTEGER);
+        """)
+        con.executemany(
+            "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("s_holder", "Holder", "active", None, "coder", "codex", "test"),
+                ("s_waiter", "Waiter", "active", None, "coder", "codex", "test"),
+                ("s_idle", "Idle", "active", None, "coder", "codex", "test"),
+                ("s_retired", "Retired", "retired", None, "coder", "codex", "test"),
+            ],
+        )
+        con.execute("INSERT INTO work_items VALUES (?, ?, ?, ?)",
+                    ("wi_holds_a_card", "holds a card", "open", 1))
+        con.execute(
+            "INSERT INTO assignments VALUES (?, ?, ?, ?, ?, ?)",
+            ("asg_open", "wi_holds_a_card", "s_holder", "open", None, None),
+        )
+        # s_retired would qualify by open assignment alone; retired must win.
+        con.execute(
+            "INSERT INTO assignments VALUES (?, ?, ?, ?, ?, ?)",
+            ("asg_open_retired", "wi_holds_a_card", "s_retired", "open", None, None),
+        )
+        # dueAt is real wall-clock time: the generator computes NOW from
+        # time.time() itself, not from anything the fixture controls.
+        due = int(time.time() * 1000) + 10_000
+        con.execute(
+            "INSERT INTO wakes VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("wake_1", "s_holder", "s_waiter", "pending", due, None, None),
+        )
         con.commit()
         con.close()
 

@@ -2016,7 +2016,12 @@ async function refresh(){
     spawnWakes(); spawnMessages();
     const age = Math.round((Date.now()-d.generatedAt)/1000);
     const el = document.getElementById('mode');
-    el.textContent = 'live · '+d.agents.length+' agents · '+d.items.length+' items · '+age+'s ago';
+    /* engaged: a non-retired agent holding an open card or targeted by a
+       pending wake — the generator already excludes retired agents from
+       this flag, so counting it here is the whole rule */
+    const engaged = d.agents.filter(a => a.engaged).length;
+    el.textContent = 'live · '+d.agents.length+' agents · '+engaged+' engaged · '
+      +d.items.length+' items · '+age+'s ago';
     el.className = 'live';
   } catch(e){
     if (!DATA){
