@@ -238,6 +238,7 @@ for r in rows:
     holders = [ids[h["holderKey"]] for h in holders_by.get(wid, ())
                if h["holderKey"] in ids]
     holders = list(dict.fromkeys(holders))          # the DISTINCT the query used to do
+    has_open_assignment = bool(holders_by.get(wid))
     ev = ev_by.get(wid, ())
     # A code review's reviewed-clean legitimately carries the commit under
     # review, so review refs count. What must not count is an item that never
@@ -255,7 +256,7 @@ for r in rows:
     kinds = {e["kind"] for e in ev}
     verd = {e["verdictKind"] for e in ev if e["verdictKind"]}
     closed_at = None
-    if r["state"] == "closed":
+    if r["state"] == "closed" and not has_open_assignment:
         stage = 6
         lc = closed_by.get(wid)
         closed_at = lc[0]["m"] if lc else None
@@ -277,7 +278,8 @@ for r in rows:
                            if e["verdictKind"] == "tests-passed"), default=None)
         stale_review = (last_clean is not None and last_tested is not None
                         and last_tested > last_clean + 300_000)
-        if "completion" in kinds and "reviewed-clean" in verd and not stale_review:
+        if ("completion" in kinds and "reviewed-clean" in verd and not stale_review
+                and not has_open_assignment):
             stage = 5
     # green = a turn is executing on this card; yellow = a turn is queued for it
     turns, turn_sk = {}, {}
