@@ -598,14 +598,16 @@ function friendlyAt(ms){
 function tagSprite(text, source, color, author, at){
   const c = document.createElement('canvas'), ctx = c.getContext('2d');
   const font = '600 34px ui-sans-serif, -apple-system, "Helvetica Neue", Arial, sans-serif';
+  author = author || 'author unknown';
   ctx.font = font;
   const ICON = 34;                                     /* space reserved for the mark */
   /* the mark sits on the first line, so that line has less room than the rest */
   const lines = wrapTag(ctx, text, TAG_WRAP_PX - ICON, TAG_WRAP_PX);
   /* The mark says whether a person or an agent wrote this. With several agents
      annotating one board that is no longer enough — which agent matters — so a
-     named author gets a caption under the text. Agents had started writing it
-     into the text themselves, "[watchdog:018] ...", which is the same need. */
+     named author gets a caption under the text, and a missing durable author
+     says so instead of implying one. Agents had started writing provenance into
+     the text themselves, "[watchdog:018] ...", which is the same need. */
   const authorFont = '600 25px ui-sans-serif, -apple-system, "Helvetica Neue", Arial, sans-serif';
   let authorW = 0;
   const stamp = friendlyAt(at);
@@ -1138,7 +1140,7 @@ function renderCards(){
   const list = [...searches].sort((a, b) => (b.at || 0) - (a.at || 0));  /* newest first */
   el.innerHTML = list.map(q => {
     const term = q.label || q.query || ((q.ids || []).length + ' picked');
-    const who = q.author ? '<span class="who">' + esc(q.author) + '</span>' : '';
+    const who = '<span class="who">' + esc(q.author || 'author unknown') + '</span>';
     return '<span class="card' + (q.searchId === activeSearchId ? ' on' : '') + '"'
          + ' data-id="' + q.searchId + '"'
          + ' title="' + esc(q.label ? q.label + ' — ' + (q.query || (q.ids||[]).length + ' picked') : term)
