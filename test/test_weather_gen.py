@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -102,6 +103,113 @@ class WeatherGeneratorReadinessTest(unittest.TestCase):
                 (code, "session:holder", 301, "completion", None, None),
             ])
         con.executemany("INSERT INTO attests VALUES (?, ?, ?, ?, ?, ?)", attests)
+        con.commit()
+        con.close()
+
+
+class WeatherGeneratorDeskTest(unittest.TestCase):
+    def test_decisions_feed_matches_operator_open_rows_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._make_state_db(base / "state.db")
+            output = base / "weather.json"
+            env = os.environ.copy()
+            env.update({"TB_BASE_DIR": str(base), "TB_WEATHER_OUT": str(output)})
+            env.pop("TB_WEATHER_DEST", None)
+            env.pop("TB_WEATHER_REPO", None)
+            env.pop("TB_ATC_API", None)   # no live API in this test: feed-only
+
+            subprocess.run(["python3", str(GENERATOR)], env=env, check=True,
+                           capture_output=True, text=True)
+            decisions = {d["id"]: d for d in json.loads(output.read_text())["decisions"]}
+
+            # effort-kind and ruled rows are not desk items
+            self.assertNotIn("dr_effort", decisions)
+            self.assertNotIn("dr_ruled", decisions)
+            # open, not-yet-expired
+            d = decisions["dr_open"]
+            self.assertEqual("wi_linked", d["workItemId"])
+            self.assertEqual("s_raiser", d["raiserAgentId"])
+            self.assertEqual(["yes", "no"], d["options"])
+            self.assertEqual("a note", d["note"])
+            # a request past its deadline but still status='open' still shows
+            # (the desk strip greys it; only the board arrows/tags drop it)
+            self.assertIn("dr_expired", decisions)
+
+    def test_missing_decision_requests_table_degrades_to_empty_feed(self):
+        # decision_requests is a 0.1.8+ table. An older gateway, or any
+        # fixture that predates it (like the readiness/engaged tests' own),
+        # must not crash generation over a table that simply is not there.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            WeatherGeneratorReadinessTest()._make_state_db(base / "state.db")
+            output = base / "weather.json"
+            env = os.environ.copy()
+            env.update({"TB_BASE_DIR": str(base), "TB_WEATHER_OUT": str(output)})
+            env.pop("TB_WEATHER_DEST", None)
+            env.pop("TB_WEATHER_REPO", None)
+            env.pop("TB_ATC_API", None)
+
+            subprocess.run(["python3", str(GENERATOR)], env=env, check=True,
+                           capture_output=True, text=True)
+            self.assertEqual([], json.loads(output.read_text())["decisions"])
+
+    def _make_state_db(self, path):
+        con = sqlite3.connect(path)
+        con.executescript("""
+            CREATE TABLE sessions (
+                sessionKey TEXT PRIMARY KEY, displayName TEXT, state TEXT,
+                spawnedBy TEXT, archetype TEXT, harness TEXT, model TEXT
+            );
+            CREATE TABLE work_items (
+                id TEXT PRIMARY KEY, title TEXT, state TEXT, createdAt INTEGER
+            );
+            CREATE TABLE assignments (
+                id TEXT PRIMARY KEY, workItemId TEXT, holderKey TEXT, state TEXT,
+                closedAt INTEGER, reviewsAssignmentId TEXT
+            );
+            CREATE TABLE assignment_effects (assignmentId TEXT, effectKind TEXT);
+            CREATE TABLE attests (
+                assignmentId TEXT, bySession TEXT, ts INTEGER, kind TEXT,
+                verdictKind TEXT, commitRefs TEXT
+            );
+            CREATE TABLE turns (
+                sessionKey TEXT, assignmentId TEXT, wakeId TEXT, createdAt INTEGER,
+                startedAt INTEGER, endedAt INTEGER
+            );
+            CREATE TABLE wakes (
+                wakeId TEXT, creatorSessionKey TEXT, sessionKey TEXT, state TEXT,
+                dueAt INTEGER, firedAt INTEGER, work_item_id TEXT
+            );
+            CREATE TABLE roles (name TEXT, boundSessionKey TEXT);
+            CREATE TABLE messages (id TEXT, sessionKey TEXT, sender TEXT, timestamp INTEGER);
+            CREATE TABLE decision_requests (
+                id TEXT PRIMARY KEY, kind TEXT, raiserId TEXT, raiserSessionKey TEXT,
+                ownerUserId TEXT, assignmentId TEXT, raisedAt INTEGER, deadlineAt INTEGER,
+                question TEXT, options TEXT, context TEXT, status TEXT
+            );
+        """)
+        con.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("s_raiser", "Raiser", "active", None, "coder", "codex", "test"))
+        con.execute("INSERT INTO work_items VALUES (?, ?, ?, ?)",
+                    ("wi_linked", "linked item", "open", 1))
+        con.execute("INSERT INTO assignments VALUES (?, ?, ?, ?, ?, ?)",
+                    ("asg_linked", "wi_linked", "s_raiser", "open", None, None))
+        now = int(time.time() * 1000)
+        rows = [
+            ("dr_open", "operator", "agent:tester", "s_raiser", "george", "asg_linked",
+             now, now + 22 * 3600_000, "should we ship it?",
+             '[{"label":"yes"},{"label":"no"}]', '{"note":"a note","supersedes":null}', "open"),
+            ("dr_expired", "operator", "agent:tester", "s_raiser", "george", None,
+             now - 100_000, now - 1_000, "expired but still open",
+             '[{"label":"ok"}]', '{}', "open"),
+            ("dr_ruled", "operator", "agent:tester", "s_raiser", "george", None,
+             now, now + 3600_000, "already ruled",
+             '[{"label":"ok"}]', '{}', "ruled"),
+            ("dr_effort", "effort", "process:tightbeam", None, "george", "asg_linked",
+             now, now + 3600_000, "effort check-in", None, '{}', "open"),
+        ]
+        con.executemany("INSERT INTO decision_requests VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
         con.commit()
         con.close()
 
