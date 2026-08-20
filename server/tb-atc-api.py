@@ -141,6 +141,7 @@ about provenance and cleanup is about not trampling each other.
   read what a human is looking at     GET  /api/selection
   read everything at once             GET  /api/state
   read the population                 GET  /data.json
+  read what is waiting on George      GET  /data.json  (its `decisions` array)
   narrow the view to a set            POST /api/filter   {ids:[...], query|label}
   narrow the view by words            POST /api/filter   {query:"..."}
   point at one node                   POST /api/focus    {id, mode}
@@ -234,6 +235,33 @@ the board, not for you.
 Short arrow labels ride the curve; long ones fall back to a card. Keep them to
 two or three words and put the explanation in a tag.
 
+## The Desk — operator decisions waiting on George
+
+`GET /data.json`'s `decisions` array carries every OPEN `kind='operator'`
+decision request — an agent asked (`operator-ask`), only George can answer
+(`operator-rule`), and it expires on a deadline. Each entry: `id`, `question`,
+`options` (label strings), `note` (the raiser's own PO-note context, if any),
+`raiserId` (a readable identity string) and `raiserAgentId` (the board's own
+short id for that session, if resolvable), `assignmentId`/`workItemId` (if the
+request is tied to one), `ownerUserId`, `raisedAt`, `deadlineAt`. It is
+generated straight from `decision_requests` in `state.db` (read-only) — never
+by polling the `tightbeam` CLI, which is how a prior read loop grew state.db
+to 4.9GB and crashed the VM (clickety-clacks/tightbeam#10).
+
+The generator (not the page, and not you) is the sole author of `atc:desk`:
+while a request is open and short of its deadline, it owns one red arrow
+raiser → work item (`awaiting ruling`) and one red tag on the raiser
+(`needs George · Nh`), both cleared the moment the row is ruled, withdrawn, or
+past its deadline, and re-created if the same situation recurs. It also files
+one search, `where George is needed`, over every open raiser and its work
+item. Because it is the only writer of that author, `DELETE ...?author=atc:desk`
+is always safe to run yourself if you want the board clear regardless — the
+next generator tick simply re-files whatever is still actually open.
+
+ATC never rules. The page shows the exact `operator-rule` command for each
+option so a human can copy it and run it themselves (through Roci Desk, or a
+terminal) — that is by design: this view is unauthenticated, ruling is not.
+
 ## Not fighting the human
 
 The display changes under their hands. Prefer tagging, which is passive, over
@@ -262,12 +290,16 @@ def help_json():
             "ids": "work items are full wi_<uuid>; agents are s_<suffix>",
             "author": "always send it; it renders, and it scopes your cleanup",
             "searchNames": "name a search for what was ASKED, not what matched",
+            "decisions": "/data.json's decisions[] is every open operator "
+                         "decision request, read from state.db (mode=ro), "
+                         "never from CLI polling; ATC displays it and files "
+                         "author=atc:desk arrows/tags but never rules",
         },
         "endpoints": [
             {"method": "GET", "path": "/api/help", "does": "this document"},
             {"method": "GET", "path": "/api/state", "does": "selection, focus, tags, arrows, searches"},
             {"method": "GET", "path": "/api/selection", "does": "{selected, focused:{mode,nodes}}"},
-            {"method": "GET", "path": "/data.json", "does": "the population and its derived state"},
+            {"method": "GET", "path": "/data.json", "does": "the population, decisions[], and derived state"},
             {"method": "POST", "path": "/api/select", "body": "{add:[id], remove:[id], clear:bool}"},
             {"method": "POST", "path": "/api/focus", "body": '{id, mode:"single"|"neighborhood"|"clear"}'},
             {"method": "POST", "path": "/api/fit", "body": "{on:bool}"},

@@ -59,6 +59,22 @@ toggles one display field, not the underlying data. `GET /api/state` carries
 the current `namesVisible` value; check it before flipping if you are not
 sure which way it is set, and say what you changed.
 
+**Show or hide annotations.** `POST /api/annotations {"on":false}` hides every
+tag and arrow (geometry, heads, labels); the data stays, new ones are still
+accepted, `{"on":true}` restores rendering. `GET /api/state` carries
+`annotationsVisible`.
+
+**Read the Desk.** `data.json`'s `decisions[]` is every OPEN operator decision
+request — an agent asked, only George can answer, it expires on a deadline.
+It comes straight from `state.db` (read-only), never from polling the
+`tightbeam` CLI on a cadence (that grew state.db to 4.9GB and crashed a VM —
+clickety-clacks/tightbeam#10 — do not reintroduce that pattern here or
+anywhere else in this repo). The generator, not you, owns `author=atc:desk`
+arrows and tags mirroring each open, not-yet-expired request onto the board;
+you can read them like any other, but don't author your own under that name.
+ATC never rules — it shows the exact `operator-rule` command to copy, ruling
+itself is Roci Desk's job.
+
 ## The three rules that matter
 
 **Say who you are.** Every tag, arrow and search takes an `author`. It renders
