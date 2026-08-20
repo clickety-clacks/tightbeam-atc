@@ -1839,10 +1839,12 @@ async function apiReportSelection(){
   if (focArrow) foc.push({id: focArrow.arrowId, type: 'arrow',
     title: (arrowById(focArrow.arrowId)?.text) || (focArrow.from + ' → ' + focArrow.to)});
   const body = JSON.stringify({clientId: CLIENT_ID, selection: sel,
-                               focused: foc, focusMode: mode, focusedArrow: focArrow});
-  /* Re-assert periodically even when unchanged. Selection is last-writer-wins
-     across pages, so a page that goes quiet can be overwritten by another and
-     would otherwise never correct the record. */
+                               focused: foc, focusMode: mode, focusedArrow: focArrow,
+                               camera: {position: camera.position.toArray(),
+                                        target: controls.target.toArray(),
+                                        framing: view.framing, inFlight: !!flight}});
+  /* Re-assert periodically even when unchanged so the report timestamp says
+     this viewer is still connected. Other viewers have separate records. */
   if (body === lastReport && ++reportSkips < 5) return;
   reportSkips = 0;
   try {

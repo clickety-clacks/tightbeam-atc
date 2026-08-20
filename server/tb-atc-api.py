@@ -10,7 +10,7 @@ The page polls /api/pull, applies any commands it has not seen, and reports
 what it currently has selected. External callers use the verbs below.
 
     GET    /api/state                    everything at once
-    GET    /api/selection                {selected:[...], focused:{mode, nodes:[...]}}
+    GET    /api/selection[?clientId=id]  one viewer's selection, focus, and camera
     POST   /api/select                   {add:[id], remove:[id], clear:bool}
     POST   /api/focus                    {id, mode:"single"|"neighborhood"|"clear"}
     POST   /api/fit                      {on:bool}
@@ -50,7 +50,7 @@ Config:
   TB_ATC_WEB   directory holding index.html etc (default ./web next to this file)
   TB_ATC_STATE file tags are persisted to  (default <web>/../tags.json)
 """
-import json, os, posixpath, threading, time, uuid
+import copy, json, math, os, posixpath, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -80,6 +80,7 @@ MAX_AUTHOR = 48
 # readable pile rather than a log.
 MAX_SEARCHES = 40
 MAX_SEARCH_LABEL = 80
+MAX_VIEWER_REPORTS = 50
 MAX_ID = 128
 MAX_IDS_PER_CALL = 500
 CMD_HISTORY = 200
@@ -91,10 +92,9 @@ GENERATION = uuid.uuid4().hex[:12]
 
 lock = threading.Lock()
 state = {
-    "selection": [],        # brushed by a human — telemetry, not truth
-    "focused": [],          # highlighted by a focus or filter, whoever set it
-    "focusMode": "none",    # none | single | neighborhood | filter
-    "selectionAt": 0,
+    # Page-local telemetry stays keyed by viewer. selectionBy points at the
+    # report projected through the legacy compatibility fields.
+    "viewerReports": {},    # clientId -> {selection, focused, focusMode, camera, at}
     "selectionBy": None,
     "commands": [],         # [{seq, kind, ...}] — a broadcast log, trimmed
     "seq": 0,
@@ -126,7 +126,7 @@ about provenance and cleanup is about not trampling each other.
 
 ## What you can do
 
-  read what a human is looking at     GET  /api/selection
+  read what viewers are looking at    GET  /api/selection
   read everything at once             GET  /api/state
   read the population                 GET  /data.json
   narrow the view to a set            POST /api/filter   {ids:[...], query|label}
@@ -146,7 +146,12 @@ The feed's `short` field is for display only; act on `id`.
 
 ## Reading before writing
 
-`/api/selection` returns two different things and they do not imply each other:
+`/api/selection` returns every current viewer under `viewers`, and projects the
+most recent report through the compatibility fields at the top level. Pass
+`?clientId=<id>` to read only that viewer. Every result says which `clientId` it
+describes and includes that viewer's camera pose.
+
+Each viewer report contains two different things and they do not imply each other:
 
   selected   what a human brushed
   focused    what a focus or filter is lighting, with `mode`
@@ -227,8 +232,8 @@ def help_json():
         },
         "endpoints": [
             {"method": "GET", "path": "/api/help", "does": "this document"},
-            {"method": "GET", "path": "/api/state", "does": "selection, focus, tags, arrows, searches"},
-            {"method": "GET", "path": "/api/selection", "does": "{selected, focused:{mode,nodes}}"},
+            {"method": "GET", "path": "/api/state", "does": "viewer reports, tags, arrows, searches"},
+            {"method": "GET", "path": "/api/selection", "does": "per-client selection, focus, camera"},
             {"method": "GET", "path": "/data.json", "does": "the population and its derived state"},
             {"method": "POST", "path": "/api/select", "body": "{add:[id], remove:[id], clear:bool}"},
             {"method": "POST", "path": "/api/focus", "body": '{id, mode:"single"|"neighborhood"|"clear"}'},
@@ -309,6 +314,45 @@ def id_list(v):
     return [clip(x, MAX_ID) for x in v if isinstance(x, (str, int))][:MAX_IDS_PER_CALL]
 
 
+def vector3(v):
+    if not isinstance(v, list) or len(v) != 3:
+        return None
+    if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x)
+           for x in v):
+        return None
+    return list(v)
+
+
+def camera_report(v):
+    if not isinstance(v, dict):
+        return None
+    position, target = vector3(v.get("position")), vector3(v.get("target"))
+    if position is None or target is None:
+        return None
+    return {"position": position, "target": target,
+            "framing": clip(v.get("framing"), 16),
+            "inFlight": bool(v.get("inFlight"))}
+
+
+def focused_arrow_report(v):
+    if not isinstance(v, dict) or not v.get("arrowId"):
+        return None
+    return {"arrowId": clip(v.get("arrowId"), MAX_ID),
+            "from": clip(v.get("from"), MAX_ID),
+            "to": clip(v.get("to"), MAX_ID)}
+
+
+def compatibility_report(report, client_id=None):
+    """Project one private viewer report through the original read shape."""
+    report = report or {}
+    return {"clientId": report.get("clientId", client_id),
+            "selected": copy.deepcopy(report.get("selection", [])),
+            "focused": {"mode": report.get("focusMode", "none"),
+                        "nodes": copy.deepcopy(report.get("focused", []))},
+            "camera": copy.deepcopy(report.get("camera")),
+            "at": report.get("at", 0)}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -379,9 +423,14 @@ class Handler(BaseHTTPRequestHandler):
         snap = None
         if u.path == "/api/state":
             with lock:
-                snap = {"generation": GENERATION, "selection": list(state["selection"]),
-                        "focused": list(state["focused"]), "focusMode": state["focusMode"],
-                        "selectionAt": state["selectionAt"], "selectionBy": state["selectionBy"],
+                report = state["viewerReports"].get(state["selectionBy"])
+                compat = compatibility_report(report)
+                snap = {"generation": GENERATION, "selection": compat["selected"],
+                        "focused": compat["focused"]["nodes"],
+                        "focusMode": compat["focused"]["mode"],
+                        "selectionAt": compat["at"], "selectionBy": compat["clientId"],
+                        "camera": compat["camera"],
+                        "viewerReports": copy.deepcopy(list(state["viewerReports"].values())),
                         "tags": list(state["tags"].values()), "seq": state["seq"],
                         "arrows": list(state["arrows"].values()),
                         "searches": list(state["searches"].values())}
@@ -389,10 +438,12 @@ class Handler(BaseHTTPRequestHandler):
             # two distinct things: what a human brushed, and what a focus or
             # filter is currently highlighting. Neither implies the other.
             with lock:
-                snap = {"selected": list(state["selection"]),
-                        "focused": {"mode": state["focusMode"],
-                                    "nodes": list(state["focused"])},
-                        "at": state["selectionAt"]}
+                requested = clip((parse_qs(u.query).get("clientId") or [None])[0], 32)
+                client_id = requested if requested is not None else state["selectionBy"]
+                snap = compatibility_report(state["viewerReports"].get(client_id), client_id)
+                if requested is None:
+                    snap["viewers"] = [compatibility_report(r)
+                                       for r in state["viewerReports"].values()]
         elif u.path == "/api/tags":
             with lock:
                 snap = list(state["tags"].values())
@@ -524,23 +575,33 @@ class Handler(BaseHTTPRequestHandler):
                 out = (push("fit", on=bool(b.get("on", True))), 200)
 
             if u.path == "/api/selection":       # a page reporting in
+                client_id = clip(b.get("clientId"), 32)
                 raw = b.get("selection")
                 sel = raw[:MAX_IDS_PER_CALL] if isinstance(raw, list) else []
-                state["selection"] = [
+                selection = [
                     {"id": clip(x.get("id"), MAX_ID), "type": clip(x.get("type"), 8),
                      "title": clip(x.get("title"), 120)}
                     for x in sel if isinstance(x, dict)]
                 foc = b.get("focused")
-                state["focused"] = [
+                focused = [
                     {"id": clip(x.get("id"), MAX_ID), "type": clip(x.get("type"), 8),
                      "title": clip(x.get("title"), 120)}
                     for x in (foc[:MAX_IDS_PER_CALL] if isinstance(foc, list) else [])
                     if isinstance(x, dict)]
                 mode = b.get("focusMode")
-                state["focusMode"] = mode if mode in ("none","single","neighborhood","filter") else "none"
-                state["selectionAt"] = int(time.time() * 1000)
-                state["selectionBy"] = clip(b.get("clientId"), 32)
-                out = ({"ok": True, "count": len(state["selection"])}, 200)
+                mode = mode if mode in ("none","single","neighborhood","filter") else "none"
+                if client_id not in state["viewerReports"] and len(state["viewerReports"]) >= MAX_VIEWER_REPORTS:
+                    out = ({"error": "viewer report capacity reached"}, 503)
+                else:
+                    state["viewerReports"][client_id] = {
+                        "clientId": client_id, "selection": selection, "focused": focused,
+                        "focusMode": mode, "focusedArrow": focused_arrow_report(b.get("focusedArrow")),
+                        "camera": camera_report(b.get("camera")),
+                        "at": int(time.time() * 1000),
+                    }
+                    state["selectionBy"] = client_id
+                    out = ({"ok": True, "clientId": client_id,
+                            "count": len(selection)}, 200)
 
             if u.path == "/api/tags":
                 made = []
