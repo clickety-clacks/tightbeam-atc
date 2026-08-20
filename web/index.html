@@ -462,7 +462,7 @@ const ITEM_DIM = 0.1;
 const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0);
 /* ambient tabletop orbit — parameterized so it can resume from any framing
    the user has dragged the camera into, not just the canonical home view */
-let orbitR = 66, orbitH = 36;
+let orbitR = 66, orbitH = 36, orbitUserOwned = false;
 const orbitTgt = HOME_TGT.clone();
 /* The resting turntable turns about the middle of the LIVE org: every agent
    still active and every item something still holds. Orphans are excluded on
@@ -1062,7 +1062,7 @@ function frameCurrentScope(){
     const d = camPos.clone().sub(target);
     orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
     orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(target);
-    userMoved = false;
+    orbitUserOwned = false; userMoved = false;
   });
   return true;
 }
@@ -1972,7 +1972,7 @@ async function refresh(){
        centre is adopted on the first snapshot rather than at startup. */
     /* Recompute while resting so the centre follows the org, but never while
        something is framed or the camera is in someone's hands. */
-    if (view.framing === 'none' && !userMoved && !flight){
+    if (view.framing === 'none' && !userMoved && !flight && !orbitUserOwned){
       const rest = homeTarget();
       if (firstSnapshot || rest.distanceToSquared(orbitTgt) > .25){
         _rested = true;
@@ -2107,7 +2107,7 @@ addEventListener('pointerup', e=>{
     const rest = homeTarget();
     flyTo(home, rest, ()=>{
       orbitAngle = ang; orbitR = 66; orbitH = 36; orbitTgt.copy(rest);
-      userMoved = false;
+      orbitUserOwned = false; userMoved = false;
     });
   } else {
     camMark = null;
@@ -2117,7 +2117,7 @@ addEventListener('pointerup', e=>{
     orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
     orbitAngle = Math.atan2(d.x, d.z);
     orbitTgt.copy(controls.target);
-    userMoved = false;
+    orbitUserOwned = true; userMoved = false;
   }
 });
 
