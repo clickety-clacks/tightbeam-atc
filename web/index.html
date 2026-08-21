@@ -2660,12 +2660,62 @@ function openDeskDetail(key){
   if (entry.shown.raiserAgentId) focusNode(selKeyFor(entry.shown.raiserAgentId), 'neighborhood');
   else renderDetail();
 }
+/* The desk pane is rebuilt from scratch by every renderDetail() — and that
+   runs on each data poll and view change — so without this the human's
+   picked option, half-typed rationale and open follow-up box vanished every
+   few seconds. Capture the live form before the rebuild, restore it after,
+   but only while the pane still shows the SAME decision: a different entry
+   starts clean. */
+const DESK_FIELDS = ['deskresponse', 'deskrationale', 'deskaskq'];
+function deskFormState(){
+  const key = detailEl.dataset.deskKey;
+  if (!key) return null;
+  const on = detailEl.querySelector('.deskopt.on');
+  const ae = document.activeElement;
+  const vals = {};
+  DESK_FIELDS.forEach(id => { const el = document.getElementById(id); if (el) vals[id] = el.value; });
+  return {
+    key,
+    opt: on ? on.dataset.label : null,
+    vals,
+    askOpen: document.getElementById('deskaskbox')?.style.display === 'flex',
+    focus: ae && DESK_FIELDS.includes(ae.id) ? {id: ae.id, s: ae.selectionStart, e: ae.selectionEnd} : null,
+    ruling: document.getElementById('deskrulebtn')?.textContent === 'ruling…',
+    err: document.getElementById('deskerr')?.textContent || ''
+  };
+}
+function deskRestoreForm(st){
+  if (st.opt) detailEl.querySelectorAll('.deskopt').forEach(b => b.classList.toggle('on', b.dataset.label === st.opt));
+  Object.entries(st.vals).forEach(([id, v]) => { const el = document.getElementById(id); if (el) el.value = v; });
+  if (st.askOpen){
+    const box = document.getElementById('deskaskbox'), tog = document.getElementById('deskasktoggle');
+    if (box) box.style.display = 'flex';
+    if (tog) tog.style.display = 'none';
+  }
+  const err = document.getElementById('deskerr');
+  if (err && st.err) err.textContent = st.err;
+  deskSyncRuleButton();
+  const btn = document.getElementById('deskrulebtn');
+  if (btn && st.ruling){ btn.disabled = true; btn.textContent = 'ruling…'; }
+  if (st.focus){
+    const el = document.getElementById(st.focus.id);
+    if (el){ el.focus(); try { el.setSelectionRange(st.focus.s, st.focus.e); } catch(_){} }
+  }
+}
 function renderDetail(){
   if (deskFocus){
     const entry = deskFocusEntry();
-    if (entry){ detailEl.innerHTML = deskContent(entry); detailEl.style.display = 'block'; return; }
+    if (entry){
+      const st = deskFormState();
+      detailEl.innerHTML = deskContent(entry);
+      detailEl.dataset.deskKey = entry.key;
+      detailEl.style.display = 'block';
+      if (st && st.key === entry.key) deskRestoreForm(st);
+      return;
+    }
     deskFocus = null;   /* vanished — ruled/withdrawn elsewhere; fall through below */
   }
+  delete detailEl.dataset.deskKey;
   const m = view.focus.stage === 1 ? focusMesh() : null;
   if (!m){ detailEl.style.display = 'none'; return; }
   detailEl.innerHTML = nodeContent(m.userData, false);
