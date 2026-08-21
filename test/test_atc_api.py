@@ -32,6 +32,7 @@ class AtcApiDecisionsTest(unittest.TestCase):
         self.base = Path(self.tmp.name)
         self.web = self.base / "web"
         self.web.mkdir()
+        (self.web / "index.html").write_text("<html><body>test page</body></html>")
         self.bin = self.base / "bin"
         self.bin.mkdir()
         self.state_db_dir = self.base / "tbstate"
@@ -122,17 +123,24 @@ class AtcApiDecisionsTest(unittest.TestCase):
         with urllib.request.urlopen(self.api + path, timeout=2) as r:
             return json.loads(r.read())
 
-    def _post(self, path, body, token=None):
+    def _post(self, path, body, token=None, cookie=None):
         data = json.dumps(body).encode()
         headers = {"Content-Type": "application/json"}
         if token is not None:
             headers["X-ATC-Operator"] = token
+        if cookie is not None:
+            headers["Cookie"] = f"atc_operator={cookie}"
         req = urllib.request.Request(self.api + path, data=data, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
                 return r.status, json.loads(r.read())
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
+
+    def _get_page(self):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as r:
+            return r.status, r.headers.get("Set-Cookie")
 
     def _stub_calls(self):
         """One entry per invocation, each the exact argv list it received.
@@ -167,6 +175,29 @@ class AtcApiDecisionsTest(unittest.TestCase):
         code, body = self._post("/decisions/dr_open01/rule",
                                  {"decision": "yes", "rationale": "Because it is ready."},
                                  token="wrong-token")
+        self.assertEqual(403, code)
+        self.assertEqual([], self._stub_calls())   # never reached the gateway
+
+    def test_page_load_sets_operator_cookie(self):
+        code, set_cookie = self._get_page()
+        self.assertEqual(200, code)
+        self.assertIsNotNone(set_cookie)
+        self.assertIn(f"atc_operator={self.token}", set_cookie)
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("SameSite=Strict", set_cookie)
+        self.assertIn("Path=/api", set_cookie)
+
+    def test_rule_accepts_cookie_with_no_header(self):
+        code, body = self._post("/decisions/dr_open01/rule",
+                                 {"decision": "yes", "rationale": "Because it is ready."},
+                                 cookie=self.token)
+        self.assertEqual(200, code)
+        self.assertTrue(body.get("ok"))
+
+    def test_rule_rejects_wrong_or_missing_cookie(self):
+        code, body = self._post("/decisions/dr_open01/rule",
+                                 {"decision": "yes", "rationale": "Because it is ready."},
+                                 cookie="wrong-token")
         self.assertEqual(403, code)
         self.assertEqual([], self._stub_calls())   # never reached the gateway
 
