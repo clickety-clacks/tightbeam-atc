@@ -2467,10 +2467,24 @@ function deskAgo(at){
 function deskDisplayList(){
   const decisions = (DATA && DATA.decisions) || [];
   const followupByDr = {}; followups.forEach(f => followupByDr[f.drId] = f);
+  const decisionsById = {}; decisions.forEach(d => decisionsById[d.id] = d);
   const answerFor = {}; decisions.forEach(d => { if (d.supersedes) answerFor[d.supersedes] = d; });
   const list = [];
   decisions.forEach(d => {
-    if (d.supersedes && followupByDr[d.supersedes]) return;   // it's an answer, folded in below
+    // d is the answer to a followed-up original that is STILL in the feed —
+    // skip here, it folds in below when we reach that original.
+    if (d.supersedes && followupByDr[d.supersedes] && decisionsById[d.supersedes]) return;
+    // d is the answer to a followed-up original that has already dropped out
+    // of the feed (superseded rows aren't status=open) — nothing will ever
+    // visit that original id, so anchor the fold on d itself, keyed by the
+    // original id so the chip's identity/position doesn't move.
+    if (d.supersedes && followupByDr[d.supersedes]){
+      const followup = followupByDr[d.supersedes];
+      list.push({key: d.supersedes, shown: d, followup, answered: true,
+                 deadlineAt: Math.min(followup.deadlineAt, d.deadlineAt),
+                 sortAt: followup.raisedAt});
+      return;
+    }
     const followup = followupByDr[d.id];
     const answer = followup ? answerFor[d.id] : null;
     const shown = answer || d;
