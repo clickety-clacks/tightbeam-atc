@@ -54,6 +54,7 @@ Config:
   TB_ATC_AUDIT_LOG   ruling audit log path (default <web>/../atc-rulings.log)
 """
 import copy, json, math, os, posixpath, re, secrets, sqlite3, subprocess, threading, time, uuid
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -70,8 +71,13 @@ BASE_DIR = Path(os.environ.get("TB_BASE_DIR", str(Path.home() / ".tightbeam")))
 STATE_DB = BASE_DIR / "state.db"
 # The operator token gates /rule and /ask. It is not a security boundary —
 # there is no login here, by design — it exists only to stop a stray curl or
-# a careless agent from ruling something. Generated once, on first start.
+# a careless agent from ruling something. Generated once, on first start. The
+# browser never sees it directly: GET / sets it as an HttpOnly cookie, so
+# there is nothing for a human to type or store, and nothing client JS can
+# read. The X-ATC-Operator header still works too, for a future approved
+# client that isn't a browser tab.
 TOKEN_FILE = Path(os.environ.get("TB_ATC_TOKEN_FILE", WEB.parent / "operator.token"))
+OPERATOR_COOKIE = "atc_operator"
 # A second audit trail, independent of whatever the gateway itself records —
 # belt and suspenders while ATC rules via the interim (CLI shell-out) path.
 AUDIT_LOG = Path(os.environ.get("TB_ATC_AUDIT_LOG", WEB.parent / "atc-rulings.log"))
@@ -264,11 +270,16 @@ ATC is a second one, not a replacement.
 
 ## Ruling and follow-ups (operator-token only)
 
-Both endpoints require header `X-ATC-Operator: <token>` — the token in
-`~/.tightbeam-atc/operator.token` (mode 600), generated on first start,
-never served over HTTP. It is not a security boundary — there is no login
-here, by design — it exists only to stop a stray curl or a careless agent
-from ruling something or waking a raiser. Wrong or missing token → 403.
+Both endpoints require the operator token, sent either way: as the
+`atc_operator` cookie GET / sets (HttpOnly, SameSite=Strict, path `/api`) —
+the browser tab does this automatically, nothing to type or paste — or as
+header `X-ATC-Operator: <token>` for a future non-browser client. The token
+itself lives in `~/.tightbeam-atc/operator.token` (mode 600), generated on
+first start, never served over HTTP directly. Wrong or missing token/cookie
+→ 403. The cookie is a speed bump against accidental calls — a stray curl
+or a careless agent — not a security boundary: the ruling identity (an
+approved ATC device, `ruledViaSessionKey`) is the audit, once that lands;
+until then the ATC-side ruling log below is the second trail.
 
 `POST /api/decisions/<dr_id>/rule` — body `{decision:<label>} | {response:<text>}`,
 plus `rationale` (required: at least one sentence; a long-enough free-text
@@ -323,9 +334,13 @@ def help_json():
                          "decision request, read from state.db (mode=ro), "
                          "never from CLI polling; ATC displays it and files "
                          "author=atc:desk arrows/tags",
-            "operatorToken": "X-ATC-Operator header, required on /rule and "
-                              "/ask; token lives in ~/.tightbeam-atc/"
-                              "operator.token (mode 600), never served over HTTP",
+            "operatorToken": "required on /rule and /ask, via either the "
+                              "atc_operator cookie GET / sets automatically "
+                              "(HttpOnly, SameSite=Strict) or an X-ATC-Operator "
+                              "header for non-browser clients; token lives in "
+                              "~/.tightbeam-atc/operator.token (mode 600), "
+                              "never served over HTTP directly — a speed bump, "
+                              "not a security boundary",
             "decisionSelection": "GET /api/selection and /api/state carry "
                                   "decision:{id,question,raiserAgentId,"
                                   "workItemId,deadlineAt}|null — which Desk "
@@ -336,9 +351,10 @@ def help_json():
             {"method": "GET", "path": "/api/help", "does": "this document"},
             {"method": "GET", "path": "/api/state", "does": "viewer reports, tags, arrows, searches, followups"},
             {"method": "POST", "path": "/api/decisions/<dr_id>/rule",
-             "body": "{decision:<label>}|{response:<text>}, rationale (required); needs X-ATC-Operator"},
+             "body": "{decision:<label>}|{response:<text>}, rationale (required); "
+                     "needs the atc_operator cookie or X-ATC-Operator header"},
             {"method": "POST", "path": "/api/decisions/<dr_id>/ask",
-             "body": "{question:<text>}; needs X-ATC-Operator"},
+             "body": "{question:<text>}; needs the atc_operator cookie or X-ATC-Operator header"},
             {"method": "GET", "path": "/api/selection", "does": "per-client selection, focus, camera"},
             {"method": "GET", "path": "/data.json", "does": "the population, decisions[], and derived state"},
             {"method": "POST", "path": "/api/select", "body": "{add:[id], remove:[id], clear:bool}"},
@@ -600,10 +616,24 @@ class Handler(BaseHTTPRequestHandler):
     def _check_operator_token(self):
         """Not a security boundary — there is no login here, by design.
         This exists only to stop a stray curl or a careless agent from
-        ruling a decision or waking a raiser. Constant-time compare anyway:
-        it costs nothing and removes the question."""
-        tok = self.headers.get("X-ATC-Operator")
-        return bool(tok) and secrets.compare_digest(tok, OPERATOR_TOKEN)
+        ruling a decision or waking a raiser. The browser tab authenticates
+        via the HttpOnly cookie GET / set for it; the header remains for a
+        future non-browser client. Either is checked with a constant-time
+        compare: it costs nothing and removes the question."""
+        header_tok = self.headers.get("X-ATC-Operator")
+        if header_tok and secrets.compare_digest(header_tok, OPERATOR_TOKEN):
+            return True
+        cookie_header = self.headers.get("Cookie")
+        if cookie_header:
+            jar = SimpleCookie()
+            try:
+                jar.load(cookie_header)
+            except Exception:
+                jar = {}
+            morsel = jar.get(OPERATOR_COOKIE)
+            if morsel and secrets.compare_digest(morsel.value, OPERATOR_TOKEN):
+                return True
+        return False
 
     # ---------- reads ----------
     def _serve_file(self, path):
@@ -630,6 +660,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         # the feed and the page itself must never be cached; this is a live view
         self.send_header("Cache-Control", "no-store")
+        if target.name == "index.html":
+            # every page load re-sets the cookie to the current token, so a
+            # service restart (which may mint a new one) is invisible to a
+            # tab that gets reloaded — no prompt, nothing to re-paste.
+            self.send_header("Set-Cookie",
+                              f"{OPERATOR_COOKIE}={OPERATOR_TOKEN}; Path=/api; "
+                              "HttpOnly; SameSite=Strict")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1086,6 +1123,6 @@ if __name__ == "__main__":
     load_tags()
     OPERATOR_TOKEN = ensure_operator_token()
     print(f"tb-atc on http://{HOST}:{PORT}/  (web root: {WEB})", flush=True)
-    print(f"operator token: {TOKEN_FILE} (mode 600) — the page asks for it once", flush=True)
+    print(f"operator token: {TOKEN_FILE} (mode 600) — set as a cookie on every page load", flush=True)
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     srv.serve_forever()
