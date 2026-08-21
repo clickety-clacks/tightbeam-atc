@@ -51,8 +51,11 @@ Config:
   TB_ATC_PORT  port                             (default 8787)
   TB_ATC_WEB   directory holding index.html etc (default ./web next to this file)
   TB_ATC_STATE file tags are persisted to  (default <web>/../tags.json)
+  TB_BASE_DIR  Tightbeam base dir, for state.db (default ~/.tightbeam)
+  TB_ATC_TOKEN_FILE  operator token path (default <web>/../operator.token)
+  TB_ATC_AUDIT_LOG   ruling audit log path (default <web>/../atc-rulings.log)
 """
-import copy, json, math, os, posixpath, threading, time, uuid
+import copy, json, math, os, posixpath, re, secrets, sqlite3, subprocess, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -63,6 +66,17 @@ WEB = Path(os.environ.get("TB_ATC_WEB", Path(__file__).resolve().parent.parent /
 # Tags are somebody's annotations, so they must survive a restart of the
 # service that happens to be serving the page they are pinned to.
 STATE_FILE = Path(os.environ.get("TB_ATC_STATE", WEB.parent / "tags.json"))
+# state.db lives in the Tightbeam base dir, not the ATC deployment — same
+# path the generator already uses, opened the same way: mode=ro, always.
+BASE_DIR = Path(os.environ.get("TB_BASE_DIR", str(Path.home() / ".tightbeam")))
+STATE_DB = BASE_DIR / "state.db"
+# The operator token gates /rule and /ask. It is not a security boundary —
+# there is no login here, by design — it exists only to stop a stray curl or
+# a careless agent from ruling something. Generated once, on first start.
+TOKEN_FILE = Path(os.environ.get("TB_ATC_TOKEN_FILE", WEB.parent / "operator.token"))
+# A second audit trail, independent of whatever the gateway itself records —
+# belt and suspenders while ATC rules via the interim (CLI shell-out) path.
+AUDIT_LOG = Path(os.environ.get("TB_ATC_AUDIT_LOG", WEB.parent / "atc-rulings.log"))
 
 # Bounds. Everything here is in memory and reachable without credentials, so
 # each collection needs a ceiling; without one a single caller can exhaust the
@@ -86,6 +100,11 @@ MAX_VIEWER_REPORTS = 50
 MAX_ID = 128
 MAX_IDS_PER_CALL = 500
 CMD_HISTORY = 200
+MAX_DECISION_LABEL = 200
+MAX_RATIONALE = 4000
+MAX_RESPONSE = 4000
+MAX_QUESTION = 2000
+CLI_TIMEOUT = 20   # seconds — the one gateway call a rule/ask click makes
 
 # A page that reconnects across a restart must be able to tell that the world
 # it was tracking is gone: sequence numbers alone restart at zero and would
@@ -122,6 +141,11 @@ state = {
     "searches": {},         # searchId -> search
     "searchSeq": 0,
     "searchesRev": 0,
+    # A follow-up George asked on a decision, captured at ask-time so the
+    # chip can still show the original question and countdown clock even
+    # after the row itself is superseded and drops out of decisions[].
+    "followups": {},        # drId -> {drId, question, askedAt, originalQuestion, raisedAt, deadlineAt}
+    "followupsRev": 0,
 }
 
 
@@ -263,9 +287,38 @@ item. Because it is the only writer of that author, `DELETE ...?author=atc:desk`
 is always safe to run yourself if you want the board clear regardless — the
 next generator tick simply re-files whatever is still actually open.
 
-ATC never rules. The page shows the exact `operator-rule` command for each
-option so a human can copy it and run it themselves (through Roci Desk, or a
-terminal) — that is by design: this view is unauthenticated, ruling is not.
+Agents never rule — only the two endpoints below do, and both require the
+operator token George alone holds. Roci Desk is the other control surface;
+ATC is a second one, not a replacement.
+
+## Ruling and follow-ups (operator-token only)
+
+Both endpoints require header `X-ATC-Operator: <token>` — the token in
+`~/.tightbeam-atc/operator.token` (mode 600), generated on first start,
+never served over HTTP. It is not a security boundary — there is no login
+here, by design — it exists only to stop a stray curl or a careless agent
+from ruling something or waking a raiser. Wrong or missing token → 403.
+
+`POST /api/decisions/<dr_id>/rule` — body `{decision:<label>} | {response:<text>}`,
+plus `rationale` (required: at least one sentence; a long-enough free-text
+`response` may serve as its own rationale, a picked `decision` label never
+does). The row is read fresh from `state.db` (mode=ro) at click time — never
+cached — and must be `kind='operator', status='open'`; a `decision` must
+match one of the row's own `options[].label`. On success this makes ONE
+`tightbeam operator-rule` call and writes a line to the ATC-side audit log
+(`~/.tightbeam-atc/atc-rulings.log`) as a second trail independent of
+whatever the gateway itself records.
+
+`POST /api/decisions/<dr_id>/ask` — body `{question:<text>}`. Same row
+checks. On success this sends ONE `tightbeam wake` to the row's raiser with
+a fixed prompt asking them to answer by re-filing with `--supersedes
+<dr_id>`, and records the follow-up (question, asked-at, the original
+question/deadline) so the page can show "asked Nm ago — waiting" and later
+render the superseding row in place of the original.
+
+Neither endpoint runs on a cadence — each is exactly one gateway call, made
+only when a human clicks, for the same reason `decisions[]` itself never
+polls the CLI: clickety-clacks/tightbeam#10.
 
 ## Not fighting the human
 
@@ -298,11 +351,18 @@ def help_json():
             "decisions": "/data.json's decisions[] is every open operator "
                          "decision request, read from state.db (mode=ro), "
                          "never from CLI polling; ATC displays it and files "
-                         "author=atc:desk arrows/tags but never rules",
+                         "author=atc:desk arrows/tags",
+            "operatorToken": "X-ATC-Operator header, required on /rule and "
+                              "/ask; token lives in ~/.tightbeam-atc/"
+                              "operator.token (mode 600), never served over HTTP",
         },
         "endpoints": [
             {"method": "GET", "path": "/api/help", "does": "this document"},
-            {"method": "GET", "path": "/api/state", "does": "viewer reports, tags, arrows, searches"},
+            {"method": "GET", "path": "/api/state", "does": "viewer reports, tags, arrows, searches, followups"},
+            {"method": "POST", "path": "/api/decisions/<dr_id>/rule",
+             "body": "{decision:<label>}|{response:<text>}, rationale (required); needs X-ATC-Operator"},
+            {"method": "POST", "path": "/api/decisions/<dr_id>/ask",
+             "body": "{question:<text>}; needs X-ATC-Operator"},
             {"method": "GET", "path": "/api/selection", "does": "per-client selection, focus, camera"},
             {"method": "GET", "path": "/data.json", "does": "the population, decisions[], and derived state"},
             {"method": "POST", "path": "/api/select", "body": "{add:[id], remove:[id], clear:bool}"},
@@ -347,7 +407,8 @@ def save_tags():
         STATE_FILE.write_text(json.dumps(
             {"tags": list(state["tags"].values()), "tagSeq": state["tagSeq"],
              "arrows": list(state["arrows"].values()), "arrowSeq": state["arrowSeq"],
-             "searches": list(state["searches"].values()), "searchSeq": state["searchSeq"]}))
+             "searches": list(state["searches"].values()), "searchSeq": state["searchSeq"],
+             "followups": list(state["followups"].values())}))
     except OSError:
         pass                            # a display, not a database: never fail a request on this
 
@@ -372,6 +433,85 @@ def load_tags():
             state["searches"][q["searchId"]] = q
     state["searchSeq"] = max(int(d.get("searchSeq") or 0), len(state["searches"]))
     state["searchesRev"] += 1
+    for f in d.get("followups", []):
+        if isinstance(f, dict) and f.get("drId"):
+            state["followups"][f["drId"]] = f
+    state["followupsRev"] += 1
+
+
+def ensure_operator_token():
+    """Read the existing token, or mint and persist one (mode 600). Never
+    served over HTTP — a human reads it off disk once and pastes it into
+    the page. If the file can't be read or written, fall back to an
+    in-memory token: the service still works, it just won't survive a
+    restart with the same token (a stray curl gets no easier either way)."""
+    try:
+        if TOKEN_FILE.exists():
+            tok = TOKEN_FILE.read_text().strip()
+            if tok:
+                return tok
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tok = secrets.token_hex(24)
+        TOKEN_FILE.write_text(tok)
+        os.chmod(TOKEN_FILE, 0o600)
+        return tok
+    except OSError as e:
+        print(f"WARNING: operator token file {TOKEN_FILE} unusable ({e}); "
+              "using an ephemeral in-memory token instead", flush=True)
+        return secrets.token_hex(24)
+
+
+def read_decision_row(dr_id):
+    """One-shot, at click time — never cached, never polled. Opened and
+    closed within this call; the mode=ro connection matches the generator's
+    own and is the only DB access this server ever makes."""
+    try:
+        con = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return None
+    try:
+        r = con.execute("SELECT * FROM decision_requests WHERE id=?", (dr_id,)).fetchone()
+    finally:
+        con.close()
+    if not r:
+        return None
+    d = dict(r)
+    try:
+        opts = json.loads(d.get("options") or "[]")
+        d["options"] = opts if isinstance(opts, list) else []
+    except (TypeError, ValueError):
+        d["options"] = []
+    return d
+
+
+def looks_like_a_sentence(text):
+    """Not a grammar checker — a floor. 'Because …' passes; 'ok' or a bare
+    option label does not. Whitespace-only or single-token text is refused
+    outright; anything with real content and a space is accepted."""
+    t = (text or "").strip()
+    return len(t) >= 8 and " " in t
+
+
+def run_cli(args):
+    """The one gateway call a rule/ask click makes — never on a cadence,
+    never in a loop. Runs OUTSIDE the state lock: it can take real time,
+    and every other viewer's request must not wait on it."""
+    try:
+        r = subprocess.run(["tightbeam", *args], capture_output=True, text=True,
+                            timeout=CLI_TIMEOUT)
+        return (r.returncode == 0, r.stdout, r.stderr)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return (False, "", str(e))
+
+
+def log_ruling(dr_id, decision_or_response):
+    try:
+        with open(AUDIT_LOG, "a") as f:
+            iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            f.write(f"ruled {dr_id} {decision_or_response} by operator via atc at {iso}\n")
+    except OSError:
+        pass
 
 
 def clip(v, n):
@@ -425,6 +565,13 @@ def compatibility_report(report, client_id=None):
             "at": report.get("at", 0)}
 
 
+# Set once in __main__, before the server starts accepting requests. Reading
+# a plain module global at call time (not import time) is deliberate: it
+# means the token file is only ever touched when this file actually runs as
+# the server, never on a bare import (e.g. from a test).
+OPERATOR_TOKEN = None
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -459,6 +606,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self._send({})
+
+    def _check_operator_token(self):
+        """Not a security boundary — there is no login here, by design.
+        This exists only to stop a stray curl or a careless agent from
+        ruling a decision or waking a raiser."""
+        tok = self.headers.get("X-ATC-Operator")
+        return bool(tok) and tok == OPERATOR_TOKEN
 
     # ---------- reads ----------
     def _serve_file(self, path):
@@ -507,7 +661,8 @@ class Handler(BaseHTTPRequestHandler):
                         "arrows": list(state["arrows"].values()),
                         "searches": list(state["searches"].values()),
                         "namesVisible": state["namesVisible"],
-                        "annotationsVisible": state["annotationsVisible"]}
+                        "annotationsVisible": state["annotationsVisible"],
+                        "followups": list(state["followups"].values())}
         elif u.path == "/api/selection":
             # two distinct things: what a human brushed, and what a focus or
             # filter is currently highlighting. Neither implies the other.
@@ -558,10 +713,89 @@ class Handler(BaseHTTPRequestHandler):
                         "searches": list(state["searches"].values()),
                         "searchesRev": state["searchesRev"],
                         "namesVisible": state["namesVisible"],
-                        "annotationsVisible": state["annotationsVisible"]}
+                        "annotationsVisible": state["annotationsVisible"],
+                        "followups": list(state["followups"].values()),
+                        "followupsRev": state["followupsRev"]}
         if snap is None:
             return self._send({"error": "not found"}, 404)
         self._send(snap)
+
+    # ---------- ruling and follow-ups ----------
+    # Both make the ONE gateway call a click is allowed to make, OUTSIDE the
+    # state lock — a subprocess can take real time, and no other viewer's
+    # request should have to wait on it. Only the (short) state update that
+    # follows a successful call takes the lock.
+    def _rule_decision(self, dr_id, b):
+        if not self._check_operator_token():
+            return ({"error": "forbidden"}, 403)
+        row = read_decision_row(dr_id)
+        if not row:
+            return ({"error": "no such decision"}, 404)
+        if row.get("kind") != "operator" or row.get("status") != "open":
+            return ({"error": "not an open operator decision"}, 409)
+        decision = clip(b.get("decision"), MAX_DECISION_LABEL)
+        response = clip(b.get("response"), MAX_RESPONSE)
+        rationale = clip(b.get("rationale"), MAX_RATIONALE)
+        if decision and response:
+            return ({"error": "pass decision or response, not both"}, 400)
+        if not decision and not response:
+            return ({"error": "decision or response required"}, 400)
+        if decision:
+            labels = {o.get("label") for o in row["options"] if isinstance(o, dict)}
+            if decision not in labels:
+                return ({"error": "decision does not match this row's options"}, 400)
+        # rationale is required on every ruling; a long-enough free-text
+        # response may serve as its own rationale, nothing else does
+        rationale_text = rationale if looks_like_a_sentence(rationale) else None
+        if not rationale_text and response and looks_like_a_sentence(response):
+            rationale_text = response
+        if not rationale_text:
+            return ({"error": "rationale required: at least one sentence "
+                               "(a long-enough free-text response can serve as "
+                               "its own rationale; a picked option cannot)"}, 400)
+        args = ["--as-user", str(row.get("ownerUserId") or ""), "operator-rule", dr_id]
+        args += ["--decision", decision] if decision else ["--response", response]
+        args += ["--rationale", rationale_text]
+        ok, out_text, err_text = run_cli(args)
+        if not ok:
+            return ({"error": "gateway call failed", "detail": err_text[:500]}, 502)
+        log_ruling(dr_id, decision or response)
+        return ({"ok": True, "cli": out_text[:2000]}, 200)
+
+    def _ask_followup(self, dr_id, b):
+        if not self._check_operator_token():
+            return ({"error": "forbidden"}, 403)
+        row = read_decision_row(dr_id)
+        if not row:
+            return ({"error": "no such decision"}, 404)
+        if row.get("kind") != "operator" or row.get("status") != "open":
+            return ({"error": "not an open operator decision"}, 409)
+        question = clip(b.get("question"), MAX_QUESTION)
+        if not question or not question.strip():
+            return ({"error": "question required"}, 400)
+        raiser_key = row.get("raiserSessionKey")
+        if not raiser_key:
+            return ({"error": "this row has no raiser session to wake"}, 409)
+        prompt = (
+            "George has a follow-up on your decision request " + dr_id + " before he rules:\n"
+            "\"" + question + "\"\n"
+            "Answer by re-asking with `operator-ask … --supersedes " + dr_id + "` and put your "
+            "answer in context.note (keep the original note; add a section headed by George's "
+            "question). Same options unless the answer changes them. Do not wait for the deadline."
+        )
+        ok, out_text, err_text = run_cli(["wake", "--session", raiser_key, "--prompt", prompt])
+        if not ok:
+            return ({"error": "wake failed", "detail": err_text[:500]}, 502)
+        with lock:
+            state["followups"][dr_id] = {
+                "drId": dr_id, "question": question,
+                "askedAt": int(time.time() * 1000),
+                "originalQuestion": row.get("question"),
+                "raisedAt": row.get("raisedAt"), "deadlineAt": row.get("deadlineAt"),
+            }
+            state["followupsRev"] += 1
+            save_tags()
+        return ({"ok": True}, 200)
 
     # ---------- writes ----------
     def do_POST(self):
@@ -569,6 +803,13 @@ class Handler(BaseHTTPRequestHandler):
         b = self._body()
         if b is None:
             return self._send({"error": "body too large"}, 413)
+        parts = u.path.split("/")
+        if (len(parts) == 5 and parts[1] == "api" and parts[2] == "decisions"
+                and parts[4] in ("rule", "ask")):
+            dr_id = clip(parts[3], MAX_ID)
+            handler = self._rule_decision if parts[4] == "rule" else self._ask_followup
+            result, code = handler(dr_id, b)
+            return self._send(result, code)
         out = None
         with lock:
             if u.path == "/api/select":
@@ -863,6 +1104,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     load_tags()
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    OPERATOR_TOKEN = ensure_operator_token()
     print(f"tb-atc on http://{HOST}:{PORT}/  (web root: {WEB})", flush=True)
+    print(f"operator token: {TOKEN_FILE} (mode 600) — the page asks for it once", flush=True)
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
     srv.serve_forever()

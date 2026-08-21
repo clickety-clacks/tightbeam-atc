@@ -72,8 +72,11 @@ clickety-clacks/tightbeam#10 — do not reintroduce that pattern here or
 anywhere else in this repo). The generator, not you, owns `author=atc:desk`
 arrows and tags mirroring each open, not-yet-expired request onto the board;
 you can read them like any other, but don't author your own under that name.
-ATC never rules — it shows the exact `operator-rule` command to copy, ruling
-itself is Roci Desk's job.
+**Agents never rule.** George rules from the page itself now (`POST
+/api/decisions/<dr_id>/rule`) or asks a follow-up first (`POST
+/api/decisions/<dr_id>/ask`) — both require the `X-ATC-Operator` token he
+alone holds, so neither is something you can do. Roci Desk stays the other
+control surface; ATC is a second one, not a replacement.
 
 ## The three rules that matter
 

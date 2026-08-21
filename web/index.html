@@ -260,12 +260,39 @@
     border:1px solid #3a3d42; border-radius:4px; padding:4px 8px;
     font:600 10.5px/1.2 inherit; letter-spacing:.04em; text-transform:none; }
   .deskopts button:hover, .deskopts button.on { color:#d8d6d1; border-color:#b08d57; }
-  #deskcmd { display:block; margin-top:6px; width:100%; box-sizing:border-box;
-    background:#101214; border:1px solid #3a3d42; border-radius:3px; color:#d8d6d1;
-    padding:5px 7px; font:11px/1.4 ui-monospace,Menlo,monospace; cursor:text; }
   body.light .deskopts button { color:#5c6b78; background:#fff; border-color:#b8c7d9; }
   body.light .deskopts button:hover, body.light .deskopts button.on { color:#26323c; border-color:#c23b22; }
-  body.light #deskcmd { background:#fff; border-color:#b8c7d9; color:#26323c; }
+  /* the follow-up thread — question, George's ask, answer (or "waiting") */
+  .deskthread { margin:6px 0; padding:5px 8px; border-left:2px solid #3a3d42;
+    display:flex; flex-direction:column; gap:2px; }
+  .deskthread .tline { font-size:10.5px; line-height:1.4; color:#9a9ea6; }
+  .deskthread .tline b { color:#b08d57; font-weight:600; text-transform:none;
+    letter-spacing:0; margin-right:4px; }
+  /* the same thread, compacted onto a strip chip once a follow-up is in play */
+  #desk .chip .deskthread { border-left-color:currentColor; margin:2px 0 0; padding:3px 0 0 7px; }
+  #desk .chip .deskthread .tline { color:inherit; opacity:.85;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:34ch; }
+  .deskmuted { color:#7c8188; font-size:11px; font-style:italic; }
+  .desklink { cursor:pointer; color:#4bb8b8; font-size:11px; text-decoration:underline;
+    text-underline-offset:2px; }
+  .desklink:hover { color:#6fd0d0; }
+  #deskaskbox { margin-top:6px; display:flex; flex-direction:column; gap:5px; }
+  #deskask textarea, #deskresponse, #deskrationale { display:block; width:100%;
+    box-sizing:border-box; background:#101214; border:1px solid #3a3d42; border-radius:3px;
+    color:#d8d6d1; padding:6px 8px; font:12px/1.4 inherit; resize:vertical; min-height:44px; }
+  #deskresponse, #deskrationale { margin-top:6px; }
+  #deskaskq { min-height:36px; }
+  #deskasksend, #deskrulebtn { align-self:flex-start; cursor:pointer; color:#101214;
+    background:#b08d57; border:1px solid #b08d57; border-radius:4px; padding:6px 12px;
+    font:700 11px/1.2 inherit; letter-spacing:.04em; margin-top:8px; }
+  #deskrulebtn:disabled { cursor:not-allowed; opacity:.4; }
+  #deskrulebtn:not(:disabled):hover, #deskasksend:hover { background:#c4a06a; }
+  #deskerr { color:#e0685c; font-size:11px; margin-top:5px; min-height:1em; }
+  body.light .deskthread { border-left-color:#c3cdd8; }
+  body.light .deskthread .tline { color:#5c6b78; }
+  body.light .deskmuted { color:#8a97a3; }
+  body.light #deskask textarea, body.light #deskresponse, body.light #deskrationale {
+    background:#fff; border-color:#b8c7d9; color:#26323c; }
   #selui { pointer-events:none; box-sizing:border-box; max-width:100%;
     background:#1b1e22dd; border:1px solid #3a3d42; border-radius:5px;
     padding:8px 11px; color:#9a9ea6; font-size:11px; letter-spacing:.08em;
@@ -1812,6 +1839,39 @@ const API = './api';
 const CLIENT_ID = Math.random().toString(36).slice(2, 10);
 let apiSeq = 0, apiTagsRev = -1, apiGen = null, apiUp = false, apiJoined = false;
 let tags = [];                                   /* [{tagId,target,text,source}] */
+let followups = [], followupsRev = -1;           /* dr_id -> {question, askedAt, ...} */
+/* The operator token gates /rule and /ask. Not a security boundary — no
+   login here, by design — it exists only to stop a stray curl or a careless
+   agent. Asked for once, kept in localStorage; a wrong token just gets 403s
+   back, so there is nothing destructive about asking again. */
+let operatorToken = localStorage.getItem('atcOperatorToken') || null;
+function ensureOperatorToken(){
+  if (operatorToken) return operatorToken;
+  const tok = prompt('ATC operator token (see ~/.tightbeam-atc/operator.token on the host):');
+  if (tok && tok.trim()){ operatorToken = tok.trim(); localStorage.setItem('atcOperatorToken', operatorToken); }
+  return operatorToken;
+}
+async function apiDecisionAction(drId, action, body){
+  const tok = ensureOperatorToken();
+  if (!tok) throw new Error('no operator token supplied');
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 25000);   /* the one gateway call can take real time */
+  try {
+    const r = await fetch(API + '/decisions/' + encodeURIComponent(drId) + '/' + action, {
+      method: 'POST', signal: ctl.signal, cache: 'no-store',
+      headers: {'content-type': 'application/json', 'X-ATC-Operator': tok},
+      body: JSON.stringify(body)});
+    const data = await r.json().catch(() => ({}));
+    if (r.status === 403){
+      /* the stored token is wrong; forget it so the next attempt re-prompts
+         instead of silently failing the same way forever */
+      operatorToken = null; localStorage.removeItem('atcOperatorToken');
+      throw new Error('operator token rejected — try again');
+    }
+    if (!r.ok) throw new Error(data.error || ('http ' + r.status));
+    return data;
+  } finally { clearTimeout(t); }
+}
 
 /* every request is bounded and checked: a hung fetch must not stall the loop,
    and a 500 must not read as success */
@@ -1865,6 +1925,11 @@ async function apiPull(){
     }
     if (typeof d.annotationsVisible === 'boolean' && d.annotationsVisible !== view.annotationsVisible){
       setAnnotationsVisible(d.annotationsVisible);
+    }
+    if (d.followupsRev !== followupsRev){
+      followupsRev = d.followupsRev;
+      followups = Array.isArray(d.followups) ? d.followups : [];
+      renderDesk();
     }
     if (typeof d.seq === 'number' && d.seq >= apiSeq) apiSeq = d.seq;
     apiUp = true;
@@ -2087,7 +2152,17 @@ async function refresh(){
 
 /* ---------- theme toggle ---------- */
 addEventListener('keydown', e=>{
-  if (e.target && e.target.tagName === 'INPUT') return;
+  /* the desk rule/rationale/follow-up boxes are textareas, not inputs — a
+     single-letter shortcut firing while typing "a note" would be a real bug */
+  const typing = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
+  if (deskFocus && e.key === 'Escape'){ e.preventDefault(); deskFocus = null; endFocus('background'); return; }
+  if (deskFocus && (e.metaKey || e.ctrlKey) && e.key === 'Enter'){
+    e.preventDefault();
+    const entry = deskFocusEntry();
+    if (entry && deskRuleReady()) submitDeskRule(entry);
+    return;
+  }
+  if (typing) return;
   if (e.key === '/'){ e.preventDefault(); searchEl.focus(); searchEl.select(); return; }
   if (e.key==='c' || e.key==='C'){ apiClearTags(); }
   else if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
@@ -2363,31 +2438,66 @@ function deskCountdown(deadlineAt){
   const txt = h > 0 ? h + 'h ' + m + 'm' : m + 'm';
   return {expired, txt: expired ? 'expired ' + txt + ' ago' : txt + ' left'};
 }
-function deskClass(d){
-  const ms = d.deadlineAt - Date.now();
+function deskClass(ms){
   if (ms <= 0) return 'expired';
   if (ms <= 4 * 3600000) return 'amber';
   return 'red';
 }
+function deskAgo(at){
+  const m = Math.max(0, Math.floor((Date.now() - at) / 60000));
+  return m < 1 ? 'just now' : m + 'm ago';
+}
+/* A decision that George asked a follow-up on gets superseded by a fresh
+   row once the raiser answers. Fold that pair into ONE entry so the chip
+   swaps in place rather than the original vanishing and a new one landing
+   somewhere else in the list — this is the only place that pairing happens;
+   everything downstream (chip, pane, focus) just reads `entry`. */
+function deskDisplayList(){
+  const decisions = (DATA && DATA.decisions) || [];
+  const followupByDr = {}; followups.forEach(f => followupByDr[f.drId] = f);
+  const answerFor = {}; decisions.forEach(d => { if (d.supersedes) answerFor[d.supersedes] = d; });
+  const list = [];
+  decisions.forEach(d => {
+    if (d.supersedes && followupByDr[d.supersedes]) return;   // it's an answer, folded in below
+    const followup = followupByDr[d.id];
+    const answer = followup ? answerFor[d.id] : null;
+    const shown = answer || d;
+    const deadlineAt = followup ? Math.min(followup.deadlineAt, shown.deadlineAt) : shown.deadlineAt;
+    list.push({key: d.id, shown, followup, answered: !!answer, deadlineAt,
+               sortAt: followup ? followup.raisedAt : d.raisedAt});
+  });
+  list.sort((a, b) => a.sortAt - b.sortAt);
+  return list;
+}
+function deskThreadHtml(entry){
+  if (!entry.followup) return '';
+  const rows = [['asked', entry.followup.originalQuestion], ['George', entry.followup.question]];
+  rows.push(entry.answered ? ['answer', entry.shown.note || '(no note)']
+                            : ['status', 'waiting for the PO’s answer']);
+  return '<div class="deskthread">' + rows.map(([who, txt]) =>
+    '<div class="tline"><b>' + esc(who) + ':</b> ' + esc(txt) + '</div>').join('') + '</div>';
+}
 const deskEl = document.getElementById('desk');
 function renderDesk(){
-  const decisions = (DATA && DATA.decisions) || [];
-  document.title = (decisions.length ? '(' + decisions.length + ') ' : '') + 'ATC';
-  if (!decisions.length){
+  const list = deskDisplayList();
+  document.title = (list.length ? '(' + list.length + ') ' : '') + 'ATC';
+  if (!list.length){
     deskEl.className = '';
     deskEl.innerHTML = '<div class="deskhead">desk clear</div>';
     return;
   }
   deskEl.className = deskCollapsed ? 'collapsed' : '';
-  const n = decisions.length;
+  const n = list.length;
   deskEl.innerHTML =
     '<div class="deskhead" id="deskhead">' + n + ' need' + (n === 1 ? 's' : '')
       + ' George' + (deskCollapsed ? ' ▸' : ' ▾') + '</div>'
-    + decisions.map(d => {
-        const cd = deskCountdown(d.deadlineAt);
-        return '<div class="chip ' + deskClass(d) + '" data-dr="' + esc(d.id) + '">'
-          + '<span class="q">' + esc(d.question) + '</span>'
-          + '<span class="meta">' + esc(d.raiserId) + ' · ' + cd.txt + '</span>'
+    + list.map(entry => {
+        const cd = deskCountdown(entry.deadlineAt);
+        return '<div class="chip ' + deskClass(entry.deadlineAt - Date.now())
+          + '" data-dr="' + esc(entry.key) + '">'
+          + '<span class="q">' + esc(entry.shown.question) + '</span>'
+          + deskThreadHtml(entry)
+          + '<span class="meta">' + esc(entry.shown.raiserId) + ' · ' + cd.txt + '</span>'
           + '</div>';
       }).join('');
 }
@@ -2401,50 +2511,135 @@ deskEl.addEventListener('click', ev => {
 });
 
 const detailEl = document.getElementById('detail');
-function deskRuleCmd(d, opt){
-  return 'tightbeam --as-user ' + shq(d.ownerUserId) + ' operator-rule ' + shq(d.id)
-    + ' --decision ' + shq(opt);
+function deskFocusEntry(){
+  if (!deskFocus) return null;
+  return deskDisplayList().find(e => e.key === deskFocus) || null;
 }
-function deskContent(d){
-  const cd = deskCountdown(d.deadlineAt);
-  const opts = (d.options || []).map((o, i) =>
-    '<button type="button" class="deskopt' + (i === 0 ? ' on' : '') + '" data-cmd="'
-      + esc(deskRuleCmd(d, o)) + '">' + esc(o) + '</button>').join('');
-  const firstCmd = d.options && d.options.length ? deskRuleCmd(d, d.options[0]) : '';
+function deskRuleReady(){
+  const opt = detailEl.querySelector('.deskopt.on');
+  const response = (document.getElementById('deskresponse')?.value || '').trim();
+  const rationale = (document.getElementById('deskrationale')?.value || '').trim();
+  const looksLikeSentence = t => t.length >= 8 && t.includes(' ');
+  const hasChoice = !!opt || response.length > 0;
+  const rationaleOk = looksLikeSentence(rationale) || (!opt && looksLikeSentence(response));
+  return hasChoice && rationaleOk;
+}
+function deskSyncRuleButton(){
+  const btn = document.getElementById('deskrulebtn');
+  if (btn) btn.disabled = !deskRuleReady();
+}
+function deskContent(entry){
+  const d = entry.shown;
+  const cd = deskCountdown(entry.deadlineAt);
+  const opts = (d.options || []).map(o =>
+    '<button type="button" class="deskopt" data-label="' + esc(o) + '">' + esc(o) + '</button>').join('');
+  const askBlocked = entry.followup && !entry.answered;
   return '<span class="t">operator decision · ' + esc(d.raiserId) + '</span>'
     + '<div>' + esc(d.question) + '</div>'
-    + (d.note ? '<span class="k">PO note</span><div>' + esc(d.note) + '</div>' : '')
-    + '<span class="k">deadline</span>' + new Date(d.deadlineAt).toLocaleString()
-      + ' · ' + cd.txt
-    + '<span class="k">rule it (through Roci — ATC does not rule)</span>'
-      + '<div class="deskopts">' + opts + '</div>'
-    + '<input id="deskcmd" readonly value="' + esc(firstCmd) + '">'
+    + deskThreadHtml(entry)
+    + (!entry.followup && d.note ? '<span class="k">PO note</span><div>' + esc(d.note) + '</div>' : '')
+    + '<span class="k">deadline</span>' + new Date(entry.deadlineAt).toLocaleString() + ' · ' + cd.txt
+    + '<span class="k">ask a follow-up</span>'
+    + (askBlocked
+        ? '<div class="deskmuted">asked ' + deskAgo(entry.followup.askedAt) + ' — waiting</div>'
+        : ('<div id="deskask"><span id="deskasktoggle" class="desklink">ask a follow-up</span>'
+          + '<div id="deskaskbox" style="display:none">'
+          + '<textarea id="deskaskq" placeholder="e.g. give me the ELI5 version" maxlength="2000"></textarea>'
+          + '<button type="button" id="deskasksend">Send</button></div></div>'))
+    + '<span class="k">rule it</span>'
+    + '<div class="deskopts">' + opts + '</div>'
+    + '<textarea id="deskresponse" placeholder="Respond in text instead…" maxlength="4000"></textarea>'
+    + '<textarea id="deskrationale" placeholder="Because … / Next: …" maxlength="4000"></textarea>'
+    + '<button type="button" id="deskrulebtn" disabled>Rule (⌘/Ctrl+Enter)</button>'
+    + '<div id="deskerr"></div>'
     + '<span class="k">id</span><span class="seg">' + esc(d.id) + '</span>';
 }
-/* Clicking an option fills + copies its exact command; clicking the input
-   itself selects all, for a manual copy if the clipboard permission is
-   denied. Delegated on #detail since its content is rebuilt on every render. */
+async function submitDeskRule(entry){
+  const btn = document.getElementById('deskrulebtn'), errEl = document.getElementById('deskerr');
+  const opt = detailEl.querySelector('.deskopt.on');
+  const response = (document.getElementById('deskresponse')?.value || '').trim();
+  const rationale = (document.getElementById('deskrationale')?.value || '').trim();
+  const body = opt ? {decision: opt.dataset.label, rationale} : {response, rationale};
+  if (btn){ btn.disabled = true; btn.textContent = 'ruling…'; }
+  if (errEl) errEl.textContent = '';
+  try {
+    await apiDecisionAction(entry.shown.id, 'rule', body);
+    /* success: the chip/tag/arrow/search clear on the generator's next tick
+       once the row reads ruled (phase 1 cleanup, unchanged). Close the pane
+       now rather than leave the human staring at a form for a decision
+       that is already made. */
+    deskFocus = null; endFocus('background');
+  } catch(e){
+    if (btn){ btn.disabled = false; btn.textContent = 'Rule (⌘/Ctrl+Enter)'; }
+    if (errEl) errEl.textContent = String(e.message || e);
+  }
+}
+async function submitDeskAsk(entry){
+  const q = (document.getElementById('deskaskq')?.value || '').trim();
+  if (!q) return;
+  const sendBtn = document.getElementById('deskasksend');
+  if (sendBtn){ sendBtn.disabled = true; sendBtn.textContent = 'sending…'; }
+  try {
+    await apiDecisionAction(entry.shown.id, 'ask', {question: q});
+    /* the server has recorded the follow-up; the next /api/pull tick brings
+       followupsRev forward and re-renders this pane in the waiting state */
+  } catch(e){
+    if (sendBtn){ sendBtn.disabled = false; sendBtn.textContent = 'Send'; }
+    alert('Could not send the follow-up: ' + (e.message || e));
+  }
+}
+/* Delegated on #detail since its content is rebuilt on every render — a
+   per-render listener would leak, and re-querying live elements each time
+   keeps this correct across rebuilds without any extra bookkeeping. */
 detailEl.addEventListener('click', ev => {
-  const btn = ev.target.closest('.deskopt');
-  if (btn){
-    detailEl.querySelectorAll('.deskopt').forEach(b => b.classList.toggle('on', b === btn));
-    const cmd = btn.dataset.cmd, input = document.getElementById('deskcmd');
-    if (input) input.value = cmd;
-    navigator.clipboard?.writeText(cmd).catch(()=>{});
+  const opt = ev.target.closest('.deskopt');
+  if (opt){
+    detailEl.querySelectorAll('.deskopt').forEach(b => b.classList.toggle('on', b === opt));
+    const response = document.getElementById('deskresponse');
+    if (response) response.value = '';         /* picking an option and typing a response are exclusive */
+    deskSyncRuleButton();
     return;
   }
-  if (ev.target.id === 'deskcmd') ev.target.select();
+  if (ev.target.id === 'deskasktoggle'){
+    const box = document.getElementById('deskaskbox');
+    if (box){ box.style.display = 'flex'; document.getElementById('deskaskq')?.focus(); }
+    ev.target.style.display = 'none';
+    return;
+  }
+  if (ev.target.id === 'deskasksend'){
+    const entry = deskFocusEntry();
+    if (entry) submitDeskAsk(entry);
+    return;
+  }
+  if (ev.target.id === 'deskrulebtn'){
+    const entry = deskFocusEntry();
+    if (entry && deskRuleReady()) submitDeskRule(entry);
+  }
 });
-function openDeskDetail(id){
-  const d = ((DATA && DATA.decisions) || []).find(x => x.id === id);
-  if (!d) return;
-  deskFocus = d;
-  if (d.raiserAgentId) focusNode(selKeyFor(d.raiserAgentId), 'neighborhood');
+detailEl.addEventListener('input', ev => {
+  if (ev.target.id === 'deskresponse'){
+    if (ev.target.value.trim()){
+      detailEl.querySelectorAll('.deskopt.on').forEach(b => b.classList.remove('on'));
+    }
+    deskSyncRuleButton();
+  } else if (ev.target.id === 'deskrationale'){
+    deskSyncRuleButton();
+  }
+});
+function openDeskDetail(key){
+  const list = deskDisplayList();
+  const entry = list.find(e => e.key === key);
+  if (!entry) return;
+  deskFocus = key;
+  if (entry.shown.raiserAgentId) focusNode(selKeyFor(entry.shown.raiserAgentId), 'neighborhood');
   else renderDetail();
 }
-
 function renderDetail(){
-  if (deskFocus){ detailEl.innerHTML = deskContent(deskFocus); detailEl.style.display = 'block'; return; }
+  if (deskFocus){
+    const entry = deskFocusEntry();
+    if (entry){ detailEl.innerHTML = deskContent(entry); detailEl.style.display = 'block'; return; }
+    deskFocus = null;   /* vanished — ruled/withdrawn elsewhere; fall through below */
+  }
   const m = view.focus.stage === 1 ? focusMesh() : null;
   if (!m){ detailEl.style.display = 'none'; return; }
   detailEl.innerHTML = nodeContent(m.userData, false);
