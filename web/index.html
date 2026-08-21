@@ -2402,7 +2402,7 @@ deskEl.addEventListener('click', ev => {
 
 const detailEl = document.getElementById('detail');
 function deskRuleCmd(d, opt){
-  return 'tightbeam --as-user ' + d.ownerUserId + ' operator-rule ' + shq(d.id)
+  return 'tightbeam --as-user ' + shq(d.ownerUserId) + ' operator-rule ' + shq(d.id)
     + ' --decision ' + shq(opt);
 }
 function deskContent(d){
