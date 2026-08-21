@@ -176,13 +176,22 @@ most recent report through the compatibility fields at the top level. Pass
 `?clientId=<id>` to read only that viewer. Every result says which `clientId` it
 describes and includes that viewer's camera pose.
 
-Each viewer report contains two different things and they do not imply each other:
+Each viewer report contains several different things and they do not imply
+each other:
 
   selected   what a human brushed
   focused    what a focus or filter is lighting, with `mode`
+  decision   which Desk chip, if any, that viewer has open right now
 
 A human's bare "these" or "this one" almost always means `selected`. Answering
 about the wrong one is the most common way to be confidently useless here.
+
+`decision` is `{id, question, raiserAgentId, workItemId, deadlineAt}` when a
+Desk chip is open, `null` otherwise — set the moment a chip opens or closes,
+the same way `focused` tracks a node focus. Asked "which decision do I have
+selected?", read this rather than inferring it from the focus neighbourhood:
+opening a chip also focuses the raiser, but the reverse is not true, and a
+focus alone does not mean a decision is open.
 
 ## Searching, and naming what you searched for
 
@@ -317,6 +326,11 @@ def help_json():
             "operatorToken": "X-ATC-Operator header, required on /rule and "
                               "/ask; token lives in ~/.tightbeam-atc/"
                               "operator.token (mode 600), never served over HTTP",
+            "decisionSelection": "GET /api/selection and /api/state carry "
+                                  "decision:{id,question,raiserAgentId,"
+                                  "workItemId,deadlineAt}|null — which Desk "
+                                  "chip a viewer has open; read it rather "
+                                  "than inferring from the focus",
         },
         "endpoints": [
             {"method": "GET", "path": "/api/help", "does": "this document"},
@@ -514,6 +528,21 @@ def focused_arrow_report(v):
             "to": clip(v.get("to"), MAX_ID)}
 
 
+def decision_report(v):
+    """Which Desk chip, if any, this viewer currently has open — read-
+    before-write for the Desk: an agent asked what's selected must be able
+    to tell a decision is open the same way it can tell a node is focused,
+    rather than inferring it from the focus neighbourhood alone."""
+    if not isinstance(v, dict) or not v.get("id"):
+        return None
+    deadline = v.get("deadlineAt")
+    return {"id": clip(v.get("id"), MAX_ID),
+            "question": clip(v.get("question"), 2000),
+            "raiserAgentId": clip(v.get("raiserAgentId"), MAX_ID),
+            "workItemId": clip(v.get("workItemId"), MAX_ID),
+            "deadlineAt": deadline if isinstance(deadline, (int, float)) and not isinstance(deadline, bool) else None}
+
+
 def compatibility_report(report, client_id=None):
     """Project one private viewer report through the original read shape."""
     report = report or {}
@@ -522,6 +551,7 @@ def compatibility_report(report, client_id=None):
             "focused": {"mode": report.get("focusMode", "none"),
                         "nodes": copy.deepcopy(report.get("focused", []))},
             "camera": copy.deepcopy(report.get("camera")),
+            "decision": copy.deepcopy(report.get("decision")),
             "at": report.get("at", 0)}
 
 
@@ -615,7 +645,7 @@ class Handler(BaseHTTPRequestHandler):
                         "focused": compat["focused"]["nodes"],
                         "focusMode": compat["focused"]["mode"],
                         "selectionAt": compat["at"], "selectionBy": compat["clientId"],
-                        "camera": compat["camera"],
+                        "camera": compat["camera"], "decision": compat["decision"],
                         "viewerReports": copy.deepcopy(list(state["viewerReports"].values())),
                         "tags": list(state["tags"].values()), "seq": state["seq"],
                         "arrows": list(state["arrows"].values()),
@@ -870,6 +900,7 @@ class Handler(BaseHTTPRequestHandler):
                         "clientId": client_id, "selection": selection, "focused": focused,
                         "focusMode": mode, "focusedArrow": focused_arrow_report(b.get("focusedArrow")),
                         "camera": camera_report(b.get("camera")),
+                        "decision": decision_report(b.get("decision")),
                         "at": int(time.time() * 1000),
                     }
                     state["selectionBy"] = client_id
