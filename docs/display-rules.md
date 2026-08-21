@@ -91,6 +91,12 @@ Every search — typed or applied by an agent — is filed as a card under the
 status strip, newest on top. Clicking one runs it again and puts its terms back
 in the box, where they can be edited rather than retyped. The × forgets it.
 
+A saved card starts a new view from that card alone. Opening one clears node,
+neighbourhood, and Arrow Focus, drops the fit and its camera return, and stops
+any flight at the pose currently on screen. Selection stays selected. A card
+with matches frames them; a card with no matches leaves the camera where it is.
+An explicitly saved empty ID set stays empty even when the card also has terms.
+
 That is what makes the third background click cheap: clearing a search is no
 longer destructive, so a click can do it. Identical searches are refreshed
 rather than piled up, so a patrol re-running the same query leaves one card and

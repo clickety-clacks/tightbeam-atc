@@ -489,6 +489,18 @@ function flyTo(pos, target, after){
   flight = {p0:camera.position.clone(), p1:pos.clone(),
             t0:controls.target.clone(), t1:target.clone(), k:0, after};
 }
+/* End a superseded camera transaction at the pose currently on screen. The
+   orbit adopts that exact pose, so canceling a flight never jumps to either
+   endpoint and never leaves its completion callback able to restore stale
+   framing state. */
+function stopFlightHere(){
+  if (!flight) return;
+  flight = null;
+  const d = camera.position.clone().sub(controls.target);
+  orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+  orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(controls.target);
+  orbitUserOwned = false; userMoved = false;
+}
 let lastGen = 0, agentsHash = '', _rested = false;
 
 function disposeGroup(g){
@@ -1214,6 +1226,13 @@ document.getElementById('cards').addEventListener('dblclick', ev => {
    can be edited rather than retyped. */
 function openSearch(q){
   activeSearchId = typingCardId = q.searchId;   /* edits land on this card */
+  /* A saved card replaces the active view stack. It keeps the selection, but
+     no focus, fit bookmark, or camera transaction may survive underneath the
+     card and reappear when the filter is later dismissed. */
+  stopFlightHere();
+  camMark = null;
+  view.fit = false;
+  clearFocus();
   /* The terms go back in the box whenever the card has any, whoever filed it.
      An agent's card carries both a picked set and the words describing it, and
      showing an empty box there left no way to adjust the search — which is the
@@ -1221,15 +1240,19 @@ function openSearch(q){
      into a text search, which is what typing in that box has always meant. */
   searchEl.value = q.query || '';
   searchClearBtn.style.display = searchEl.value ? 'block' : 'none';
-  if ((q.ids || []).length) setFilter('agent', {ids: q.ids});
+  /* Before resultKind existed, a non-empty ids list was the fixed-set stamp.
+     Keep those durable cards working; only an EMPTY fixed set needs the new
+     explicit kind because its old shape was indistinguishable from text. */
+  const fixed = q.resultKind === 'ids' || (!q.resultKind && (q.ids || []).length);
+  if (fixed) setFilter('agent', {ids: q.ids || []});
   else setFilter('user', {query: q.query || ''});
   renderCards();
   /* Re-opening a search is applying it, so it belongs on the wire like any
      other filter — otherwise a second page, or an agent asking what is on
      screen, still believes the old one is running. */
   apiFetch('/filter', {method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify((q.ids || []).length
-      ? {ids: q.ids, query: q.query || undefined}
+    body: JSON.stringify(fixed
+      ? {ids: q.ids || [], query: q.query || undefined}
       : {query: q.query || ''})}).catch(()=>{});
 }
 
@@ -1906,8 +1929,8 @@ function applyCommand(c){
     focusNode(selKeyFor(c.id), c.mode === 'neighborhood' ? 'neighborhood' : 'single');
   } else if (c.kind === 'filter'){
     if (c.clear){ setFilter('none'); activeSearchId = typingCardId = null; renderCards(); }
-    else if ((c.ids || []).length){
-      setFilter('agent', {ids: c.ids});
+    else if (c.resultKind === 'ids' || (c.ids || []).length){
+      setFilter('agent', {ids: c.ids || []});
       if (c.searchId){ activeSearchId = c.searchId; renderCards(); }
     } else if (c.query){
       /* a text search on the wire — the same thing a human types */
@@ -2259,6 +2282,18 @@ function renderDetail(){
   if (!m){ detailEl.style.display = 'none'; return; }
   detailEl.innerHTML = nodeContent(m.userData, false);
   detailEl.style.display = 'block';
+  /* On a wide screen the detail pane shares the saved-card edge. Begin it
+     below the pile so every card remains a reachable control while a node is
+     focused. Portrait owns the bottom edge and keeps its CSS layout. */
+  if (!matchMedia('(max-aspect-ratio: 1/1)').matches){
+    const pile = document.getElementById('cards').getBoundingClientRect();
+    const top = Math.max(76, pile.bottom + 10);
+    detailEl.style.top = top + 'px';
+    detailEl.style.maxHeight = Math.max(80, innerHeight - top - 18) + 'px';
+  } else {
+    detailEl.style.top = '';
+    detailEl.style.maxHeight = '';
+  }
 }
 
 /* ---------- tooltip ---------- */
