@@ -1983,11 +1983,23 @@ async function apiReportSelection(){
   })() : null;
   if (focArrow) foc.push({id: focArrow.arrowId, type: 'arrow',
     title: (arrowById(focArrow.arrowId)?.text) || (focArrow.from + ' → ' + focArrow.to)});
+  /* read-before-write for the Desk: which chip (if any) is open, reported
+     the same way a node focus is — set the instant it opens or closes, so
+     an agent asked "which decision do I have selected?" does not have to
+     infer it from the focus neighbourhood. */
+  const deskEntry = deskFocus ? deskFocusEntry() : null;
+  const decision = deskEntry ? {
+    id: deskEntry.shown.id, question: deskEntry.shown.question,
+    raiserAgentId: deskEntry.shown.raiserAgentId || null,
+    workItemId: deskEntry.shown.workItemId || null,
+    deadlineAt: deskEntry.deadlineAt,
+  } : null;
   const body = JSON.stringify({clientId: CLIENT_ID, selection: sel,
                                focused: foc, focusMode: mode, focusedArrow: focArrow,
                                camera: {position: camera.position.toArray(),
                                         target: controls.target.toArray(),
-                                        framing: view.framing, inFlight: !!flight}});
+                                        framing: view.framing, inFlight: !!flight},
+                               decision});
   /* Re-assert periodically even when unchanged so the report timestamp says
      this viewer is still connected. Other viewers have separate records. */
   if (body === lastReport && ++reportSkips < 5) return;
