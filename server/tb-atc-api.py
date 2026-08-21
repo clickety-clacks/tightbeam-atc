@@ -640,9 +640,10 @@ class Handler(BaseHTTPRequestHandler):
     def _check_operator_token(self):
         """Not a security boundary — there is no login here, by design.
         This exists only to stop a stray curl or a careless agent from
-        ruling a decision or waking a raiser."""
+        ruling a decision or waking a raiser. Constant-time compare anyway:
+        it costs nothing and removes the question."""
         tok = self.headers.get("X-ATC-Operator")
-        return bool(tok) and tok == OPERATOR_TOKEN
+        return bool(tok) and secrets.compare_digest(tok, OPERATOR_TOKEN)
 
     # ---------- reads ----------
     def _serve_file(self, path):
