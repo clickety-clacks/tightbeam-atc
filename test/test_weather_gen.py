@@ -75,6 +75,10 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
             self.assertFalse(items["wi_code_false_closed"]["merged"])
             self.assertIsNone(items["wi_code_unknown_closed"]["merged"])
 
+            incomplete = items["wi_code_incomplete"]
+            self.assertIsNone(incomplete["code"])
+            self.assertIsNone(incomplete["merged"])
+
             counts = items["wi_assignment_counts"]
             self.assertEqual({"open": 1, "terminal": 2}, counts["assignments"])
             self.assertEqual(["completion", "verdict"], counts["attestKinds"])
@@ -101,6 +105,7 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
             ("wi_code_true_closed", "closed code merged", "closed", 5),
             ("wi_code_false_closed", "closed code not merged", "closed", 4),
             ("wi_code_unknown_closed", "closed code unknown", "closed", 3),
+            ("wi_code_incomplete", "incomplete effect coverage", "open", 2),
             ("wi_assignment_counts", "assignment counts", "open", 2),
             ("wi_explicit_ready", "explicit ready", "open", 1),
         ]
@@ -112,6 +117,8 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
             ("asg_true", "wi_code_true_closed", "session:holder", "closed", 9_999_999_999_992, None),
             ("asg_false", "wi_code_false_closed", "session:holder", "closed", 9_999_999_999_993, None),
             ("asg_unknown", "wi_code_unknown_closed", "session:holder", "closed", 9_999_999_999_994, None),
+            ("asg_incomplete", "wi_code_incomplete", "session:holder", "closed", 9_999_999_999_994, None),
+            ("asg_incomplete_review", "wi_code_incomplete", "session:holder", "closed", 9_999_999_999_994, "asg_incomplete"),
             ("asg_counts_open", "wi_assignment_counts", "session:holder", "open", None, None),
             ("asg_counts_done", "wi_assignment_counts", "session:holder", "closed", 9_999_999_999_995, None),
             ("asg_counts_revoked", "wi_assignment_counts", "session:holder", "closed", 9_999_999_999_996, None),
@@ -131,6 +138,9 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
             ("asg_true", "session:holder", 110, "progress", None, refs(merged)),
             ("asg_false", "session:holder", 120, "progress", None, refs(not_merged)),
             ("asg_unknown", "session:holder", 130, "progress", None, refs("f" * 40)),
+            ("asg_incomplete", "session:holder", 131, "verdict", "tests-passed", None),
+            ("asg_incomplete_review", "session:holder", 132, "verdict",
+             "reviewed-clean", refs(not_merged)),
             ("asg_counts_done", "session:holder", 140, "completion", None, None),
             ("asg_counts_revoked", "session:holder", 150, "verdict", "verified", None),
             ("asg_ready", "session:holder", 160, "verdict", "ready-to-merge",

@@ -96,15 +96,30 @@ def load_branch():
         stamp.touch()
     return True
 
-# which items ever produced code? a ruling or a recon has nothing to merge,
-# so it must not read as a pending merge. assignment_effects is optional.
+# Which items produced code? A positive code effect is sufficient, but the
+# absence of one is not: assignment_effects has partial live coverage. Non-code
+# is proven only when every assignment on the item has an explicit non-code
+# effect. The table itself is optional on older ledgers.
+CODE_EFFECTS = {"code", "release", "live_mutation"}
 try:
-    code_items = {r["workItemId"] for r in q(
-        """SELECT DISTINCT a.workItemId FROM assignment_effects e
-           JOIN assignments a ON a.id = e.assignmentId
-           WHERE e.effectKind IN ('code','release','live_mutation')""")}
+    effects_by_item = {}
+    for effect in q("""SELECT a.workItemId, e.effectKind
+                       FROM assignments a
+                       LEFT JOIN assignment_effects e ON e.assignmentId=a.id"""):
+        effects_by_item.setdefault(effect["workItemId"], []).append(effect["effectKind"])
 except sqlite3.Error:
-    code_items = None                       # unavailable: treat every item as code
+    effects_by_item = {}
+
+def code_state(work_item_id, producer_refs):
+    """True/False only from durable positive or complete explicit evidence."""
+    if producer_refs:
+        return True
+    effects = effects_by_item.get(work_item_id, ())
+    if any(effect in CODE_EFFECTS for effect in effects):
+        return True
+    if effects and all(effect is not None for effect in effects):
+        return False
+    return None
 
 # cherry-picked and rebased work lands under a different sha, so ancestry
 # alone reports false "not merged". Fall back to patch equivalence, cached
@@ -329,7 +344,7 @@ for r in rows:
     tgt = imminent[0]["sessionKey"] if imminent else None
     flow = {aid: ("in" if (tgt is None or sk == tgt) else "out")
             for aid, sk in turn_sk.items()}
-    is_code = True if code_items is None else (wid in code_items or bool(prod_refs))
+    is_code = code_state(wid, prod_refs)
     counts = assignment_counts_by.get(wid)
     assignment_counts = {
         "open": counts[0]["openCount"] if counts else 0,
@@ -347,7 +362,7 @@ for r in rows:
                   "assignments": assignment_counts,
                   "readyToMerge": "ready-to-merge" in verd,
                   "closedAt": closed_at,
-                  "merged": merged_in_branch(refs) if is_code else None,
+                  "merged": merged_in_branch(refs) if is_code is True else None,
                   # effect tags are advisory and often incomplete, so a commit
                   # filed BY A PRODUCER also proves code
                   "code": is_code})

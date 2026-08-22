@@ -1512,8 +1512,8 @@ function buildItems(items){
     itemGroup.add(mesh); itemMeshes.push(mesh);
     const dcol = w.merged === true ? T.discBlack
                : w.readyToMerge === true ? T.discG
-               : !w.code ? T.discN
-               : w.merged == null ? T.discY
+               : w.code === false ? T.discN
+               : w.code === true && w.merged == null ? T.discY
                : null;
     if (dcol != null){
       /* solid ring, not a wireframe: the named radius is the OUTER edge and
@@ -2250,7 +2250,9 @@ function nodeContent(u, clamp){
       (st==='run'?'▶ ':'⏸ ')+(byId[h]?byId[h].name:h)).join('<br>') || 'no turns active';
     const merged = w.merged === true ? 'in the branch'
                  : w.merged === false ? 'NOT in the branch'
-                 : (w.code ? 'branch state unknown' : 'nothing to merge');
+                 : w.code === true ? 'branch state unknown'
+                 : w.code === false ? 'nothing to merge'
+                 : 'code classification unknown';
     return '<span class="t">' + (w.short || w.id) + '</span>'
       + '<div' + (clamp ? ' class="clamp5"' : '') + '>' + w.title + '</div>'
       + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · ' + merged
