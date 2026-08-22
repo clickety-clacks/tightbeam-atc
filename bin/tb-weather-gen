@@ -396,7 +396,12 @@ for r in rows:
                   "flow": flow, "attestKinds": sorted(kinds),
                   "verdictKinds": sorted(verd),
                   "assignments": assignment_counts,
-                  "readyToMerge": "ready-to-merge" in verd,
+                  # Ready = completed code review (completion + reviewed-clean,
+                  # stale-review-checked, no open card) awaiting canonical
+                  # landing. 01b1381 narrowed this to a literal 'ready-to-merge'
+                  # verdict no rail files, extinguishing the state; restored
+                  # 2026-08-22 (mike). The explicit verdict still counts too.
+                  "readyToMerge": ("ready-to-merge" in verd) or stage >= 5,
                   "closedAt": closed_at,
                   "merged": merged_in_branch(refs) if is_code is True else None,
                   # effect tags are advisory and often incomplete, so a commit
