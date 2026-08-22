@@ -10,13 +10,6 @@ Configuration (environment variables):
                    If unset, the snapshot is only written to TB_WEATHER_OUT —
                    use that when the web root is on the same machine.
   TB_WEATHER_KEY   Optional ssh identity file for the scp push.
-  TB_WEATHER_REPO  Optional path to a clone of the code repo. When set, each
-                   item's recorded commits are tested for ancestry in
-                   TB_WEATHER_BRANCH, which is the only reliable way to know
-                   whether work actually landed — review verdicts say the
-                   gate passed, not that code reached the branch.
-  TB_WEATHER_BRANCH  Branch to test against. Default: origin/main
-
 Every signal is derived from durable rows: stages from attest kinds and
 verdicts, running turns from open rows in `turns`, queued turns from pending
 `wakes`, pulses from recently fired wakes. Nothing is estimated.
@@ -29,8 +22,10 @@ DB = f"file:{BASE}/state.db?mode=ro"
 OUT = os.environ.get("TB_WEATHER_OUT", "/tmp/tb-weather.json")
 DEST = os.environ.get("TB_WEATHER_DEST")
 KEY = os.environ.get("TB_WEATHER_KEY")
-REPO = os.environ.get("TB_WEATHER_REPO")            # optional git clone
-BRANCH = os.environ.get("TB_WEATHER_BRANCH", "origin/main")
+REMOTE = "git@github.com:clickety-clacks/tightbeam-atc.git"
+BRANCH = "refs/heads/main"
+CACHE = BASE / "atc-canonical.git"
+CACHE_BRANCH = "refs/tb-atc/main"
 
 def kind_of(name):
     n = name.lower()
@@ -47,23 +42,48 @@ con = sqlite3.connect(DB, uri=True)
 con.row_factory = sqlite3.Row
 q = lambda sql, *a: con.execute(sql, a).fetchall()
 
-# ---- ground truth for "merged": ancestry in the real branch.
+# ---- ground truth for "merged": ancestry in the canonical remote branch.
 # No attest kind carries this. An item can hold completion, reviewed-clean,
-# AND verified and still not be on the branch, so the branch is the only
-# authority. Without a configured repo, merge state is simply unknown.
-branch_shas, branch_pfx = set(), set()
-if REPO and Path(REPO, ".git").exists():
-    git = lambda *a: subprocess.run(["git", "-C", REPO, *a],
-                                    capture_output=True, text=True)
-    stamp = Path(OUT + ".fetch")                    # refresh at most every 5m
+# AND verified and still not be on the branch, so that remote branch is the
+# only authority. The cache is service-owned and survives session workdirs.
+git = lambda *a: subprocess.run(["git", "--git-dir", str(CACHE), *a],
+                                capture_output=True, text=True)
+branch_shas, branch_pfx = None, None
+
+def load_branch():
+    global branch_shas, branch_pfx
+    if branch_shas is not None:
+        return bool(branch_shas)
+    branch_shas, branch_pfx = set(), set()
+    if not REMOTE or not BRANCH:
+        return False
+    if not CACHE.exists():
+        made = subprocess.run(["git", "init", "--bare", "--quiet", str(CACHE)],
+                              capture_output=True, text=True)
+        if made.returncode != 0:
+            return False
+    elif git("rev-parse", "--is-bare-repository").stdout.strip() != "true":
+        return False
+
+    stamp = CACHE / "tb-atc-fetch"
     try: stale = time.time() - stamp.stat().st_mtime > 300
     except OSError: stale = True
-    if stale:
-        git("fetch", "--quiet", "--all")
+    ref_exists = git("show-ref", "--verify", "--quiet", CACHE_BRANCH).returncode == 0
+    if stale or not ref_exists:
+        fetched = git("fetch", "--quiet", "--force", REMOTE,
+                      f"{BRANCH}:{CACHE_BRANCH}")
+        if fetched.returncode != 0:
+            return False
+    listed = git("rev-list", CACHE_BRANCH)
+    if listed.returncode != 0:
+        return False
+    branch_shas = set(listed.stdout.split())
+    branch_pfx = {s[:12] for s in branch_shas}
+    if not branch_shas:
+        return False
+    if stale or not ref_exists:
         stamp.touch()
-    out = git("rev-list", BRANCH).stdout.split()
-    branch_shas = set(out)
-    branch_pfx = {s[:12] for s in out}
+    return True
 
 # which items ever produced code? a ruling or a recon has nothing to merge,
 # so it must not read as a pending merge. assignment_effects is optional.
@@ -79,35 +99,52 @@ except sqlite3.Error:
 # alone reports false "not merged". Fall back to patch equivalence, cached
 # per branch tip because it costs a subprocess per commit.
 EQUIV = Path(OUT + ".equiv.json")
-PROBE_V = 2                       # bump when probe semantics change
-_tip = git("rev-parse", BRANCH).stdout.strip() if branch_shas else ""
-try:
-    _c = json.load(open(EQUIV))
-    equiv_cache = (_c["map"] if _c.get("tip") == _tip
-                   and _c.get("v") == PROBE_V else {})
-except Exception:
-    equiv_cache = {}
+PROBE_V = 3                       # bump when probe semantics change
+_tip, equiv_cache = "", {}
+
+def load_equiv_cache():
+    global _tip, equiv_cache
+    if _tip:
+        return
+    _tip = git("rev-parse", CACHE_BRANCH).stdout.strip()
+    try:
+        _c = json.load(open(EQUIV))
+        equiv_cache = (_c["map"] if _c.get("tip") == _tip
+                       and _c.get("v") == PROBE_V else {})
+    except Exception:
+        equiv_cache = {}
 
 def probe(c):
     """True: equivalent content is on the branch. False: it is not.
-    None: the commit is not in this clone, so nothing can be concluded."""
+    None: the commit or lookup is unavailable, so nothing can be concluded."""
+    load_equiv_cache()
     if c in equiv_cache: return equiv_cache[c]
     if git("cat-file", "-e", c + "^{commit}").returncode != 0:
-        r = None
+        fetched = git("fetch", "--quiet", REMOTE, c)
+        if fetched.returncode != 0 or git("cat-file", "-e", c + "^{commit}").returncode != 0:
+            return None
+    checked = git("cherry", CACHE_BRANCH, c, c + "~1")
+    if checked.returncode != 0:
+        return None
+    result = checked.stdout.strip()
+    if result.startswith("-"):
+        r = True
+    elif result.startswith("+"):
+        r = False
     else:
-        r = git("cherry", BRANCH, c, c + "~1").stdout.strip().startswith("-")
+        return None
     equiv_cache[c] = r
     return r
 
 def merged_in_branch(refs):
-    if not branch_shas or not refs: return None     # detection unavailable
+    if not refs or not load_branch(): return None   # detection unavailable
     for c in refs:
         if c in branch_shas or c[:12] in branch_pfx: return True
         if len(c) < 12 and any(s.startswith(c) for s in branch_shas): return True
     seen = [probe(c) for c in refs]
     if any(v is True for v in seen): return True
-    if all(v is None for v in seen): return None    # unverifiable, not absent
-    return False
+    if all(v is False for v in seen): return False
+    return None                                     # unverifiable, not absent
 
 NOW = int(time.time() * 1000)
 
@@ -374,6 +411,7 @@ snap = {"generatedAt": NOW, "agents": agents, "links": links,
         "items": open_items + landed, "messages": msgs, "wakes": wakes_out}
 json.dump(snap, open(OUT, "w"))
 if branch_shas:
+    load_equiv_cache()
     json.dump({"tip": _tip, "v": PROBE_V, "map": equiv_cache}, open(EQUIV, "w"))
 if DEST:
     cmd = ["scp", "-q"]
