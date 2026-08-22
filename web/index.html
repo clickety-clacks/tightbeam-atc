@@ -2174,16 +2174,7 @@ function cancelTouchHold(clear = true){
   touchHold = null;
 }
 function touchHoldKeys(e){
-  /* The finger is a coarse pointer and the nodes move. Sample within the same
-     10 px hold tolerance, but keep normal ray order on the first ray that
-     hits so screen proximity never changes depth or ownership precedence. */
-  const offsets = [[0,0],[-5,0],[5,0],[0,-5],[0,5],[-5,-5],[5,-5],[-5,5],[5,5]];
-  for (const [dx, dy] of offsets){
-    const keys = pickAllHover({clientX:e.clientX + dx, clientY:e.clientY + dy})
-      .map(selKey).filter(Boolean);
-    if (keys.length) return keys;
-  }
-  return [];
+  return pickAllHover(e).map(selKey).filter(Boolean);
 }
 function startTouchHold(e){
   if (e.pointerType !== 'touch') return;
