@@ -1557,12 +1557,20 @@ function buildItems(items){
     Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, closed, baseY: closed? null : pos.y});
     mesh.rotation.y = spin.get(w.id) || 0;
     itemGroup.add(mesh); itemMeshes.push(mesh);
+    /* The merge ring is a statement about LANDED work. An open item that has
+       not claimed landing gets no ring: "merge unknown" is a tautology for
+       unfinished work, not an alarm. Landed = closed, or evidence-complete
+       (completion + reviewed-clean with no open assignment) — the same gate
+       the old stage>=5 carried before the color vocabulary landed. */
+    const landedRing = closed || ((w.assignments?.open ?? 1) === 0
+                && (w.attestKinds || []).includes('completion')
+                && (w.verdictKinds || []).includes('reviewed-clean'));
     const dcol = w.merged === true ? T.discBlack
                : w.readyToMerge === true ? T.discG
                : w.code === false ? T.discN
                : w.code === true && w.merged == null ? T.discY
                : null;
-    if (dcol != null){
+    if (landedRing && dcol != null){
       /* solid ring, not a wireframe: the named radius is the OUTER edge and
          the band runs inward from it */
       const R = .8, BAND = .18;
