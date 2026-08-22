@@ -15,11 +15,12 @@ Configuration (environment variables):
                    TB_WEATHER_BRANCH, which is the only reliable way to know
                    whether work actually landed — review verdicts say the
                    gate passed, not that code reached the branch.
+  TB_WEATHER_REMOTE  Canonical remote name. Default: origin
   TB_WEATHER_BRANCH  Branch to test against. Default: origin/main
 
-Every signal is derived from durable rows: stages from attest kinds and
-verdicts, running turns from open rows in `turns`, queued turns from pending
-`wakes`, pulses from recently fired wakes. Nothing is estimated.
+Every signal is derived from durable rows: evidence inventories from attests,
+running turns from open rows in `turns`, queued turns from pending `wakes`,
+pulses from recently fired wakes. Nothing is estimated.
 """
 import hashlib, json, os, re, sqlite3, subprocess, time
 from pathlib import Path
@@ -30,18 +31,21 @@ OUT = os.environ.get("TB_WEATHER_OUT", "/tmp/tb-weather.json")
 DEST = os.environ.get("TB_WEATHER_DEST")
 KEY = os.environ.get("TB_WEATHER_KEY")
 REPO = os.environ.get("TB_WEATHER_REPO")            # optional git clone
+REMOTE = os.environ.get("TB_WEATHER_REMOTE", "origin")
 BRANCH = os.environ.get("TB_WEATHER_BRANCH", "origin/main")
 
-def kind_of(name):
-    n = name.lower()
-    if n == "main": return "main"
-    if "product owner" in n: return "po"
-    if "patrol" in n or "watchdog" in n: return "patrol"
-    if "orchestrator" in n: return "orch"
-    if "coder" in n: return "coder"
-    if "review" in n: return "rev"
-    if "spec" in n: return "spec"
-    return "coder"
+def kind_of(archetype, roles):
+    """Return only role classes backed by durable role or archetype rows."""
+    if "main" in roles:
+        return "main"
+    return {
+        "product-owner": "po",
+        "orchestrator": "orch",
+        "coder": "coder",
+        "reviewer": "rev",
+        "spec-writer": "spec",
+        "recon": "recon",
+    }.get(archetype, "agent")
 
 con = sqlite3.connect(DB, uri=True)
 con.row_factory = sqlite3.Row
@@ -52,18 +56,24 @@ q = lambda sql, *a: con.execute(sql, a).fetchall()
 # AND verified and still not be on the branch, so the branch is the only
 # authority. Without a configured repo, merge state is simply unknown.
 branch_shas, branch_pfx = set(), set()
+canonical_remote_url = None
 if REPO and Path(REPO, ".git").exists():
     git = lambda *a: subprocess.run(["git", "-C", REPO, *a],
                                     capture_output=True, text=True)
-    stamp = Path(OUT + ".fetch")                    # refresh at most every 5m
-    try: stale = time.time() - stamp.stat().st_mtime > 300
-    except OSError: stale = True
-    if stale:
-        git("fetch", "--quiet", "--all")
-        stamp.touch()
-    out = git("rev-list", BRANCH).stdout.split()
-    branch_shas = set(out)
-    branch_pfx = {s[:12] for s in out}
+    remote = git("remote", "get-url", REMOTE)
+    # The branch must belong to the named canonical remote. A local branch or
+    # an arbitrary clone path is not durable repository identity.
+    if remote.returncode == 0 and BRANCH.startswith(REMOTE + "/"):
+        canonical_remote_url = remote.stdout.strip() or None
+        stamp = Path(OUT + ".fetch")                # refresh at most every 5m
+        try: stale = time.time() - stamp.stat().st_mtime > 300
+        except OSError: stale = True
+        if stale and git("fetch", "--quiet", REMOTE).returncode == 0:
+            stamp.touch()
+        branch = git("rev-list", BRANCH)
+        if branch.returncode == 0:
+            branch_shas = set(branch.stdout.split())
+            branch_pfx = {s[:12] for s in branch_shas}
 
 # which items ever produced code? a ruling or a recon has nothing to merge,
 # so it must not read as a pending merge. assignment_effects is optional.
@@ -73,7 +83,7 @@ try:
            JOIN assignments a ON a.id = e.assignmentId
            WHERE e.effectKind IN ('code','release','live_mutation')""")}
 except sqlite3.Error:
-    code_items = None                       # unavailable: treat every item as code
+    code_items = set()              # without durable evidence, do not claim code
 
 # cherry-picked and rebased work lands under a different sha, so ancestry
 # alone reports false "not merged". Fall back to patch equivalence, cached
@@ -130,6 +140,11 @@ for r in q("SELECT bySession, max(ts) AS t FROM attests GROUP BY bySession"):
 # both were a CLI round trip away until now.
 rows = q("""SELECT sessionKey, displayName, state, spawnedBy,
                    archetype, harness, model FROM sessions""")
+role_rows = q("SELECT name, boundSessionKey FROM roles "
+              "WHERE boundSessionKey IS NOT NULL")
+roles_by_session = {}
+for role in role_rows:
+    roles_by_session.setdefault(role["boundSessionKey"], set()).add(role["name"])
 holders_open = {r["holderKey"] for r in q(
     "SELECT DISTINCT holderKey FROM assignments WHERE state='open'")}
 sess = {r["sessionKey"]: r for r in rows
@@ -148,11 +163,7 @@ def _agent_id(session_key):
 ids = {k: _agent_id(k) for k in sess}
 agents = []
 for k, r in sess.items():
-    kind = kind_of(r["displayName"] or "")
-    # a top-of-tree session whose name classifies as nothing else is an
-    # owner-level mind (e.g. a PO named after its product), not a worker
-    if kind == "coder" and not r["spawnedBy"]:
-        kind = "po"
+    kind = kind_of(r["archetype"], roles_by_session.get(k, set()))
     agents.append({
         "id": ids[k],
         "name": (r["displayName"] or k)[:120],
@@ -228,6 +239,11 @@ ev_by = by_item("""SELECT a.workItemId, t.kind, t.verdictKind, t.commitRefs, t.t
                    WHERE a.workItemId IN ({IN})""")
 closed_by = by_item("""SELECT workItemId, max(closedAt) AS m FROM assignments
                        WHERE workItemId IN ({IN}) GROUP BY workItemId""")
+assignment_counts_by = by_item(
+    """SELECT workItemId,
+              sum(CASE WHEN state='open' THEN 1 ELSE 0 END) AS openCount,
+              sum(CASE WHEN state='open' THEN 0 ELSE 1 END) AS terminalCount
+       FROM assignments WHERE workItemId IN ({IN}) GROUP BY workItemId""")
 # ordered by dueAt so the first row per item is the imminent one
 wake_by = by_item("""SELECT work_item_id, sessionKey FROM wakes
                      WHERE state='pending' AND work_item_id IN ({IN})
@@ -257,30 +273,8 @@ for r in rows:
     verd = {e["verdictKind"] for e in ev if e["verdictKind"]}
     closed_at = None
     if r["state"] == "closed" and not has_open_assignment:
-        stage = 6
         lc = closed_by.get(wid)
         closed_at = lc[0]["m"] if lc else None
-    else:
-        stage = 0
-        if "progress" in kinds: stage = 1
-        if "tests-passed" in verd: stage = 2
-        if "completion" in kinds: stage = 3
-        if verd & {"reviewed-clean", "spec-reviewed", "verified"}: stage = 4
-        # A review only clears the work it actually saw. If the producer filed
-        # again after the last reviewed-clean, that verdict is stale and the
-        # item is back in review, not ready to merge.
-        last_clean = max((e["ts"] for e in ev if e["verdictKind"] == "reviewed-clean"),
-                         default=None)
-        # Completion AFTER a review is the normal sequence — the completion rail
-        # requires a linked review, so it always lands just after the verdict.
-        # What makes a review stale is new code TESTED after it.
-        last_tested = max((e["ts"] for e in ev
-                           if e["verdictKind"] == "tests-passed"), default=None)
-        stale_review = (last_clean is not None and last_tested is not None
-                        and last_tested > last_clean + 300_000)
-        if ("completion" in kinds and "reviewed-clean" in verd and not stale_review
-                and not has_open_assignment):
-            stage = 5
     # green = a turn is executing on this card; yellow = a turn is queued for it
     turns, turn_sk = {}, {}
     for sk in item_run.get(wid, ()):
@@ -296,31 +290,37 @@ for r in rows:
     tgt = imminent[0]["sessionKey"] if imminent else None
     flow = {aid: ("in" if (tgt is None or sk == tgt) else "out")
             for aid, sk in turn_sk.items()}
-    is_code = True if code_items is None else (wid in code_items or bool(prod_refs))
+    is_code = wid in code_items or bool(prod_refs)
+    counts = assignment_counts_by.get(wid)
+    assignment_counts = {
+        "open": counts[0]["openCount"] if counts else 0,
+        "terminal": counts[0]["terminalCount"] if counts else 0,
+    }
     # the page decides how much of a title to show; truncating here threw the
     # rest away before anything could ask for it
     # The FULL id, because anything reading this view has to be able to act on
     # it: `tightbeam work-item-get` refuses a short id with unknown_work_item.
     # `short` is for display only.
     items.append({"id": wid, "short": wid[:11], "title": (r["title"] or "")[:2000],
-                  "stage": stage, "holders": holders, "turns": turns, "flow": flow,
-                  # nothing to merge means no merge state, not a green ring
+                  "state": r["state"], "holders": holders, "turns": turns,
+                  "flow": flow, "attestKinds": sorted(kinds),
+                  "verdictKinds": sorted(verd),
+                  "assignments": assignment_counts,
+                  "readyToMerge": "ready-to-merge" in verd,
                   "closedAt": closed_at,
                   "merged": merged_in_branch(refs) if is_code else None,
                   # effect tags are advisory and often incomplete, so a commit
                   # filed BY A PRODUCER also proves code
                   "code": is_code})
 # show the whole open sky so drainage is visible; landings by closure recency
-open_items = [w for w in items if w["stage"] < 6][:240]
-landed = sorted((w for w in items if w["stage"] >= 6),
+open_items = [w for w in items if w["state"] == "open"][:240]
+closed_items = sorted((w for w in items if w["state"] == "closed"),
                 key=lambda w: w["closedAt"] or 0, reverse=True)[:16]
 
 # ---- traffic: every delivered message, not just wakes. Wakes are a small
 # subset; the messages table is where the conversation actually lives.
 # Senders are role paths, resolved through the roles table's binding.
-role_of = {"agent:" + r["name"]: r["boundSessionKey"]
-           for r in q("SELECT name, boundSessionKey FROM roles "
-                      "WHERE boundSessionKey IS NOT NULL")}
+role_of = {"agent:" + r["name"]: r["boundSessionKey"] for r in role_rows}
 msgs = []
 for r in q("""SELECT id, sessionKey, sender FROM messages
               WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 400""",
@@ -371,7 +371,8 @@ for r in q("""SELECT t.wakeId, w.creatorSessionKey, t.sessionKey, t.startedAt
                       "state": "run" if r["startedAt"] else "wait"})
 
 snap = {"generatedAt": NOW, "agents": agents, "links": links,
-        "items": open_items + landed, "messages": msgs, "wakes": wakes_out}
+        "items": open_items + closed_items, "messages": msgs, "wakes": wakes_out,
+        "mergeSource": {"remote": canonical_remote_url, "branch": BRANCH}}
 json.dump(snap, open(OUT, "w"))
 if branch_shas:
     json.dump({"tip": _tip, "v": PROBE_V, "map": equiv_cache}, open(EQUIV, "w"))
@@ -380,7 +381,7 @@ if DEST:
     if KEY: cmd += ["-i", KEY, "-o", "IdentitiesOnly=yes"]
     subprocess.run(cmd + [OUT, DEST], check=True)
 pending = [w for w in open_items
-           if w["stage"] >= 5 and w["code"] and w["merged"] is False]
+           if w["readyToMerge"] and w["code"] and w["merged"] is not True]
 print(f"snapshot: {len(agents)} agents, {len(open_items)} open, "
-      f"{len(landed)} landed, {len(msgs)} msgs, "
-      f"{len(pending)} awaiting a real merge")
+      f"{len(closed_items)} closed, {len(msgs)} msgs, "
+      f"{len(pending)} explicitly ready but not merged")
