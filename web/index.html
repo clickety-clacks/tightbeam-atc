@@ -1424,7 +1424,7 @@ function renderLegend(){
     `<span style="margin-left:12px">hedron flashing = turn waiting · working ring = turn running (agents and work items)</span>` +
     `<br><span style="color:${hx(T.liveHot)}">● blue agent = acted just now</span>` +
     `<span style="margin-left:8px;color:${hx(T.liveCold)}">● grey = idle an hour or more</span>` +
-    `<span style="margin-left:10px">discs hang below the grid · floating solids = open items · floor solids = closed items</span>` +
+    `<span style="margin-left:10px">discs hang below the grid · floating solids = work items (altitude = evidence remaining) · floor solids = landed</span>` +
     `<span style="margin-left:10px"><span class="sw" style="background:${hx(T.discBlack)};border:1px solid currentColor"></span>black ring = canonical branch contains the code</span>` +
     `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = explicit ready-to-merge verdict</span>` +
     `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = durable non-code item</span>` +
@@ -1544,27 +1544,30 @@ function buildItems(items){
     if (active.length){ active.forEach(h=>anchor.add(APOS[h])); anchor.multiplyScalar(1/active.length); anchor.y = 0; }
     else { anchor.set(-55 + (idx%24)*4.6, 0, 62 + Math.floor(idx/24)*5); }
     const closed = w.state === 'closed';
-    const col = closed ? T.itemClosed : T.itemOpen;
-    /* Floor placement carries only the durable closed state. Evidence rows do
-       not change an item's altitude, size, or motion. */
+    /* Altitude IS evidence: items descend as attests accumulate and rest on
+       the floor once the evidence is complete (stage>=5) or the item closes.
+       This is the board's core metaphor (mike: its removal was a regression;
+       restored 2026-08-22). Color grades along the same stages. */
+    const stage = w.stage ?? (closed ? 6 : 0);
+    const landed = stage >= 5;
+    const col = (T.stage && T.stage[stage] != null) ? T.stage[stage]
+              : (closed ? T.itemClosed : T.itemOpen);
     const sc = scatter(w.short || w.id);
-    const pos = closed
+    const pos = landed
       ? new THREE.Vector3(anchor.x + sc.x, 1.05, anchor.z + 3.2 + sc.z)
-      : new THREE.Vector3(anchor.x + sc.x, 10 + (idx%3)*.8, anchor.z + sc.z);
-    const igeo = new THREE.IcosahedronGeometry(.525, 0);
+      : new THREE.Vector3(anchor.x + sc.x,
+                          6 + (4 - Math.min(stage, 4))*4.2 + (idx%3)*.8,
+                          anchor.z + sc.z);
+    const igeo = new THREE.IcosahedronGeometry(landed ? .475 : .525, 0);
     const mesh = diagramMesh(igeo, col);
     mesh.position.copy(pos);
-    Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, closed, baseY: closed? null : pos.y});
+    Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, closed, landed, baseY: landed? null : pos.y});
     mesh.rotation.y = spin.get(w.id) || 0;
     itemGroup.add(mesh); itemMeshes.push(mesh);
     /* The merge ring is a statement about LANDED work. An open item that has
        not claimed landing gets no ring: "merge unknown" is a tautology for
-       unfinished work, not an alarm. Landed = closed, or evidence-complete
-       (completion + reviewed-clean with no open assignment) — the same gate
-       the old stage>=5 carried before the color vocabulary landed. */
-    const landedRing = closed || ((w.assignments?.open ?? 1) === 0
-                && (w.attestKinds || []).includes('completion')
-                && (w.verdictKinds || []).includes('reviewed-clean'));
+       unfinished work, not an alarm. */
+    const landedRing = landed;
     const dcol = w.merged === true ? T.discBlack
                : w.readyToMerge === true ? T.discG
                : w.code === false ? T.discN

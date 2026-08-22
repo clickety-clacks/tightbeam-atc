@@ -340,9 +340,30 @@ for r in rows:
     kinds = {e["kind"] for e in ev}
     verd = {e["verdictKind"] for e in ev if e["verdictKind"]}
     closed_at = None
+    # Evidence stage drives the page's core metaphor: items DESCEND as
+    # evidence accumulates and land on the floor when it is complete. The
+    # snapshot rewrite dropped this; restored 2026-08-22 (mike: regression).
     if r["state"] == "closed" and not has_open_assignment:
+        stage = 6
         lc = closed_by.get(wid)
         closed_at = lc[0]["m"] if lc else None
+    else:
+        stage = 0
+        if "progress" in kinds: stage = 1
+        if "tests-passed" in verd: stage = 2
+        if "completion" in kinds: stage = 3
+        if verd & {"reviewed-clean", "spec-reviewed", "verified"}: stage = 4
+        # A review only clears the work it actually saw: new code TESTED after
+        # the last reviewed-clean puts the item back in review.
+        last_clean = max((e["ts"] for e in ev
+                          if e["verdictKind"] == "reviewed-clean"), default=None)
+        last_tested = max((e["ts"] for e in ev
+                           if e["verdictKind"] == "tests-passed"), default=None)
+        stale_review = (last_clean is not None and last_tested is not None
+                        and last_tested > last_clean + 300_000)
+        if ("completion" in kinds and "reviewed-clean" in verd and not stale_review
+                and not has_open_assignment):
+            stage = 5
     # green = a turn is executing on this card; yellow = a turn is queued for it
     turns, turn_sk = {}, {}
     for sk in item_run.get(wid, ()):
@@ -370,7 +391,8 @@ for r in rows:
     # it: `tightbeam work-item-get` refuses a short id with unknown_work_item.
     # `short` is for display only.
     items.append({"id": wid, "short": wid[:11], "title": (r["title"] or "")[:2000],
-                  "state": r["state"], "holders": holders, "turns": turns,
+                  "state": r["state"], "stage": stage,
+                  "holders": holders, "turns": turns,
                   "flow": flow, "attestKinds": sorted(kinds),
                   "verdictKinds": sorted(verd),
                   "assignments": assignment_counts,
