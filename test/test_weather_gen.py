@@ -13,95 +13,129 @@ ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "bin" / "tb-weather-gen"
 
 
-class WeatherGeneratorReadinessTest(unittest.TestCase):
-    def test_open_assignment_caps_ready_and_closed_items(self):
+def make_state_db(path):
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE sessions (
+            sessionKey TEXT PRIMARY KEY, displayName TEXT, state TEXT,
+            spawnedBy TEXT, archetype TEXT, harness TEXT, model TEXT
+        );
+        CREATE TABLE work_items (
+            id TEXT PRIMARY KEY, title TEXT, state TEXT, createdAt INTEGER
+        );
+        CREATE TABLE assignments (
+            id TEXT PRIMARY KEY, workItemId TEXT, holderKey TEXT, state TEXT,
+            closedAt INTEGER, reviewsAssignmentId TEXT
+        );
+        CREATE TABLE assignment_effects (assignmentId TEXT, effectKind TEXT);
+        CREATE TABLE attests (
+            assignmentId TEXT, bySession TEXT, ts INTEGER, kind TEXT,
+            verdictKind TEXT, commitRefs TEXT
+        );
+        CREATE TABLE turns (
+            sessionKey TEXT, assignmentId TEXT, wakeId TEXT, createdAt INTEGER,
+            startedAt INTEGER, endedAt INTEGER
+        );
+        CREATE TABLE wakes (
+            wakeId TEXT, creatorSessionKey TEXT, sessionKey TEXT, state TEXT,
+            dueAt INTEGER, firedAt INTEGER, work_item_id TEXT
+        );
+        CREATE TABLE roles (name TEXT, boundSessionKey TEXT);
+        CREATE TABLE messages (id TEXT, sessionKey TEXT, sender TEXT, timestamp INTEGER);
+    """)
+    con.execute(
+        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("session:holder", "Product Owner By Name Only", "active", None,
+         "coder", "codex", "test"),
+    )
+    return con
+
+
+class WeatherGeneratorEvidenceTest(unittest.TestCase):
+    def test_emits_only_durable_evidence_and_canonical_merge_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            self._make_state_db(base / "state.db")
-            output = base / "weather.json"
-            env = os.environ.copy()
-            env.update({"TB_BASE_DIR": str(base), "TB_WEATHER_OUT": str(output)})
-            env.pop("TB_WEATHER_DEST", None)
-            env.pop("TB_WEATHER_REPO", None)
+            helper = WeatherGeneratorCanonicalMergeTest()
+            remote, merged, _, not_merged = helper._make_remote(base)
+            self._make_state_db(base / "state.db", merged, not_merged)
+            snapshot = helper._run_snapshot(base, remote)
+            items = {item["id"]: item for item in snapshot["items"]}
 
-            subprocess.run(["python3", str(GENERATOR)], env=env, check=True,
-                           capture_output=True, text=True)
-            items = {item["id"]: item for item in json.loads(output.read_text())["items"]}
+            later = items["wi_later_verdict"]
+            self.assertEqual("open", later["state"])
+            self.assertEqual(["verdict"], later["attestKinds"])
+            self.assertEqual(["reviewed-clean"], later["verdictKinds"])
 
-            self.assertEqual(4, items["wi_mixed_ready"]["stage"])
-            self.assertEqual(4, items["wi_mixed_closed"]["stage"])
-            self.assertEqual(5, items["wi_terminal_ready"]["stage"])
-            self.assertEqual(6, items["wi_terminal_closed"]["stage"])
+            non_code = items["wi_non_code_closed"]
+            self.assertEqual("closed", non_code["state"])
+            self.assertFalse(non_code["code"])
+            self.assertIsNone(non_code["merged"])
 
-    def _make_state_db(self, path):
-        con = sqlite3.connect(path)
-        con.executescript("""
-            CREATE TABLE sessions (
-                sessionKey TEXT PRIMARY KEY, displayName TEXT, state TEXT,
-                spawnedBy TEXT, archetype TEXT, harness TEXT, model TEXT
-            );
-            CREATE TABLE work_items (
-                id TEXT PRIMARY KEY, title TEXT, state TEXT, createdAt INTEGER
-            );
-            CREATE TABLE assignments (
-                id TEXT PRIMARY KEY, workItemId TEXT, holderKey TEXT, state TEXT,
-                closedAt INTEGER, reviewsAssignmentId TEXT
-            );
-            CREATE TABLE assignment_effects (assignmentId TEXT, effectKind TEXT);
-            CREATE TABLE attests (
-                assignmentId TEXT, bySession TEXT, ts INTEGER, kind TEXT,
-                verdictKind TEXT, commitRefs TEXT
-            );
-            CREATE TABLE turns (
-                sessionKey TEXT, assignmentId TEXT, wakeId TEXT, createdAt INTEGER,
-                startedAt INTEGER, endedAt INTEGER
-            );
-            CREATE TABLE wakes (
-                wakeId TEXT, creatorSessionKey TEXT, sessionKey TEXT, state TEXT,
-                dueAt INTEGER, firedAt INTEGER, work_item_id TEXT
-            );
-            CREATE TABLE roles (name TEXT, boundSessionKey TEXT);
-            CREATE TABLE messages (id TEXT, sessionKey TEXT, sender TEXT, timestamp INTEGER);
-        """)
-        con.execute(
-            "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("session:holder", "Coder", "active", None, "coder", "codex", "test"),
-        )
+            self.assertTrue(items["wi_code_true_closed"]["merged"])
+            self.assertFalse(items["wi_code_false_closed"]["merged"])
+            self.assertIsNone(items["wi_code_unknown_closed"]["merged"])
+
+            counts = items["wi_assignment_counts"]
+            self.assertEqual({"open": 1, "terminal": 2}, counts["assignments"])
+            self.assertEqual(["completion", "verdict"], counts["attestKinds"])
+            self.assertEqual(["verified"], counts["verdictKinds"])
+
+            ready = items["wi_explicit_ready"]
+            self.assertTrue(ready["readyToMerge"])
+            self.assertFalse(ready["merged"])
+
+            agent = next(a for a in snapshot["agents"]
+                         if a["name"] == "Product Owner By Name Only")
+            self.assertEqual("coder", agent["kind"])
+            self.assertEqual("coder", agent["archetype"])
+            self.assertEqual("refs/heads/main", snapshot["mergeSource"]["branch"])
+            self.assertEqual("git@github.com:clickety-clacks/tightbeam-atc.git",
+                             snapshot["mergeSource"]["remote"])
+
+    def _make_state_db(self, path, merged, not_merged):
+        con = make_state_db(path)
 
         items = [
-            ("wi_mixed_ready", "mixed ready", "open", 4),
-            ("wi_mixed_closed", "mixed closed", "closed", 3),
-            ("wi_terminal_ready", "terminal ready", "open", 2),
-            ("wi_terminal_closed", "terminal closed", "closed", 1),
+            ("wi_later_verdict", "later verdict", "open", 7),
+            ("wi_non_code_closed", "closed non-code", "closed", 6),
+            ("wi_code_true_closed", "closed code merged", "closed", 5),
+            ("wi_code_false_closed", "closed code not merged", "closed", 4),
+            ("wi_code_unknown_closed", "closed code unknown", "closed", 3),
+            ("wi_assignment_counts", "assignment counts", "open", 2),
+            ("wi_explicit_ready", "explicit ready", "open", 1),
         ]
         con.executemany("INSERT INTO work_items VALUES (?, ?, ?, ?)", items)
 
-        assignments = []
-        for wid in ("wi_mixed_ready", "wi_mixed_closed"):
-            assignments.append((f"asg_{wid}_open", wid, "session:holder", "open", None, None))
-        for wid in ("wi_mixed_ready", "wi_mixed_closed", "wi_terminal_ready",
-                    "wi_terminal_closed"):
-            assignments.append((f"asg_{wid}_code", wid, "session:holder", "closed",
-                                9_999_999_999_998, None))
-            assignments.append((f"asg_{wid}_review", wid, "session:holder", "closed",
-                                9_999_999_999_999,
-                                f"asg_{wid}_code"))
+        assignments = [
+            ("asg_later", "wi_later_verdict", "session:holder", "closed", 9_999_999_999_990, None),
+            ("asg_non_code", "wi_non_code_closed", "session:holder", "closed", 9_999_999_999_991, None),
+            ("asg_true", "wi_code_true_closed", "session:holder", "closed", 9_999_999_999_992, None),
+            ("asg_false", "wi_code_false_closed", "session:holder", "closed", 9_999_999_999_993, None),
+            ("asg_unknown", "wi_code_unknown_closed", "session:holder", "closed", 9_999_999_999_994, None),
+            ("asg_counts_open", "wi_assignment_counts", "session:holder", "open", None, None),
+            ("asg_counts_done", "wi_assignment_counts", "session:holder", "closed", 9_999_999_999_995, None),
+            ("asg_counts_revoked", "wi_assignment_counts", "session:holder", "closed", 9_999_999_999_996, None),
+            ("asg_ready", "wi_explicit_ready", "session:holder", "open", None, None),
+        ]
         con.executemany("INSERT INTO assignments VALUES (?, ?, ?, ?, ?, ?)", assignments)
         con.executemany(
-            "INSERT INTO assignment_effects VALUES (?, 'code')",
-            [(f"asg_{wid}_code",) for wid, _, _, _ in items],
+            "INSERT INTO assignment_effects VALUES (?, ?)",
+            [("asg_non_code", "coordination"), ("asg_true", "code"),
+             ("asg_false", "code"), ("asg_unknown", "code"),
+             ("asg_ready", "code")],
         )
 
-        attests = []
-        for wid, _, _, _ in items:
-            code = f"asg_{wid}_code"
-            review = f"asg_{wid}_review"
-            attests.extend([
-                (code, "session:holder", 100, "progress", None, None),
-                (code, "session:holder", 200, "verdict", "tests-passed", None),
-                (review, "session:holder", 300, "verdict", "reviewed-clean", None),
-                (code, "session:holder", 301, "completion", None, None),
-            ])
+        refs = lambda sha: json.dumps([{"repo": "fixture:repo", "commit": sha}])
+        attests = [
+            ("asg_later", "session:holder", 100, "verdict", "reviewed-clean", None),
+            ("asg_true", "session:holder", 110, "progress", None, refs(merged)),
+            ("asg_false", "session:holder", 120, "progress", None, refs(not_merged)),
+            ("asg_unknown", "session:holder", 130, "progress", None, refs("f" * 40)),
+            ("asg_counts_done", "session:holder", 140, "completion", None, None),
+            ("asg_counts_revoked", "session:holder", 150, "verdict", "verified", None),
+            ("asg_ready", "session:holder", 160, "verdict", "ready-to-merge",
+             refs(not_merged)),
+        ]
         con.executemany("INSERT INTO attests VALUES (?, ?, ?, ?, ?, ?)", attests)
         con.commit()
         con.close()
@@ -147,6 +181,10 @@ class WeatherGeneratorCanonicalMergeTest(unittest.TestCase):
             self.assertIsNone(items["wi_lookup_timeout"]["merged"])
 
     def _run(self, base, remote, fail_fetch=False, hang_fetch=False):
+        snapshot = self._run_snapshot(base, remote, fail_fetch, hang_fetch)
+        return {item["id"]: item for item in snapshot["items"]}
+
+    def _run_snapshot(self, base, remote, fail_fetch=False, hang_fetch=False):
         output = base / "weather.json"
         wrapper = base / "git-wrapper" / "git"
         wrapper.parent.mkdir()
@@ -179,7 +217,7 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *args])
         env.pop("TB_WEATHER_DEST", None)
         subprocess.run(["python3", str(GENERATOR)], env=env, check=True,
                        capture_output=True, text=True, timeout=8)
-        return {item["id"]: item for item in json.loads(output.read_text())["items"]}
+        return json.loads(output.read_text())
 
     def _make_remote(self, root):
         source = root / "source"
@@ -228,8 +266,7 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *args])
         return remote, landed, equivalent, absent
 
     def _make_state_db(self, path, commits_by_item):
-        WeatherGeneratorReadinessTest()._make_state_db(path)
-        con = sqlite3.connect(path)
+        con = make_state_db(path)
         for created_at, (wid, commits) in enumerate(commits_by_item.items(), 1):
             assignment = "asg_" + wid
             con.execute("INSERT INTO work_items VALUES (?, ?, 'open', ?)",

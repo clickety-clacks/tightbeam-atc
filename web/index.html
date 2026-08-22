@@ -275,15 +275,13 @@ const edgeMats = new Set();
 let searchTimer = null;      /* declared here so setFilter, above the box, can cancel it */
 const TETHER_SEGS = 40;   /* subdivisions per tether, for the traveling wave */
 
-const STAGE_NAMES = ['specced','building','tests pass','reviewed','verdict clean','gate ready','merged'];
-const SEGS = ['spec bound','producer completion','tests + baselines','independent review','reviewed-clean verdict','merge attest'];
-const KIND_R = { main:1.7, po:1.25, patrol:1.15, orch:1.0, coder:.8, rev:.8, spec:.8 };
+const AGENT_R = .8;
 
 const THEMES = {
   dark: {
     name:'dark', bg:0x101214, fill:0x14171b, fogNear:70, fogFar:190,
     grid1:0x2a2d31, grid2:0x1c1f23,
-    stage:[0xc4453c,0xc97b35,0xc9a835,0xa3b23c,0x6fae4e,0x3f9d63,0x2c7a4b],
+    itemOpen:0xc4453c, itemClosed:0x2c7a4b,
     kind:{main:0xb08d57,po:0xa58968,patrol:0xc9a835,orch:0x8a8f96,coder:0x7f8890,rev:0x6b7684,spec:0x91836b},
     liveHot:0x3d8fd6, liveCold:0x4e545c,
     tag:{neutral:'#9aa0a8', red:'#e0685c', amber:'#d9a441', green:'#6fae4e',
@@ -292,7 +290,8 @@ const THEMES = {
     tagHalo:'rgba(16,18,20,.93)',    /* but each glyph keeps its own backing */
     retired:0x33363a, arcA:0xb08d57, arcB:0x22252a,
     tetherRun:0x6fae4e, tetherWait:0xc9a835, tetherSched:0xb9bfc7, pulse:0xb08d57, pulseSub:0x5f6670, pulseUser:0x6f9ecf,
-    discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63, shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
+    discBlack:0x000000, discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63,
+    shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
     flashRun:0x6fae4e, flashWait:0xc9a835,
     metalness:.55, roughness:.3, agentMetal:.75, agentRough:.35, baseEmissive:.25, edges:false,
     amb:0x8a8a92, keyC:0xfff2dd, rimC:0x5b7285,
@@ -300,7 +299,7 @@ const THEMES = {
   light: { /* NASA documentation / plotter paper */
     name:'light', bg:0xf2eee2, fill:0xfaf7ee, fogNear:90, fogFar:230,
     grid1:0xa9bccf, grid2:0xd8dfe6,
-    stage:[0xc23b22,0xd07a2a,0xc9a227,0x8a9a2e,0x4e8a4e,0x2e7d5b,0x1f5e46],
+    itemOpen:0xc23b22, itemClosed:0x1f5e46,
     kind:{main:0xc23b22,po:0xb06a3b,patrol:0xc9a227,orch:0x5c6b78,coder:0x6e7b87,rev:0x52616e,spec:0x7a6a4f},
     liveHot:0x2f6fb5, liveCold:0xaab3bc,
     tag:{neutral:'#5c6b78', red:'#c23b22', amber:'#b8860b', green:'#2e7d4f',
@@ -309,7 +308,8 @@ const THEMES = {
     tagHalo:'rgba(250,247,238,.96)',
     retired:0xcdc7b8, arcA:0x26323c, arcB:0xd8dfe6,
     tetherRun:0x2e7d4f, tetherWait:0xb8860b, tetherSched:0x1b232b, pulse:0xc23b22, pulseSub:0x8a97a3, pulseUser:0x3d6ea8,
-    discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3, shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
+    discBlack:0x000000, discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3,
+    shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
     flashRun:0x2e7d4f, flashWait:0xb8860b,
     metalness:.05, roughness:.85, agentMetal:.05, agentRough:.9, baseEmissive:.0, edges:true,
     amb:0xffffff, keyC:0xfff8ec, rimC:0xb8c7d9,
@@ -1367,20 +1367,21 @@ function measureLegend(){
 }
 
 function renderLegend(){
-  const c = i => '#'+T.stage[i].toString(16).padStart(6,'0');
   const hx = v => '#'+v.toString(16).padStart(6,'0');
   document.getElementById('legend').innerHTML =
-    STAGE_NAMES.map((n,i)=>`<span class="sw" style="background:${c(i)};${i?'margin-left:10px':''}"></span>${n}`).join('') +
+    `<span class="sw" style="background:${hx(T.itemOpen)}"></span>open item` +
+    `<span class="sw" style="background:${hx(T.itemClosed)};margin-left:10px"></span>closed item` +
     `<br><span style="color:${hx(T.tetherRun)}">━ green: turn executing now</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherSched)}">━ faint: holds an open card, no turn</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow: turn queued, not started</span>` +
     `<span style="margin-left:12px">hedron flashing = turn waiting · working ring = turn running (agents and work items)</span>` +
     `<br><span style="color:${hx(T.liveHot)}">● blue agent = acted just now</span>` +
     `<span style="margin-left:8px;color:${hx(T.liveCold)}">● grey = idle an hour or more</span>` +
-    `<span style="margin-left:10px">discs hang below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = reviewed, not merged yet</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = in the branch. we have landed</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = nothing to merge</span>` +
+    `<span style="margin-left:10px">discs hang below the grid · floating solids = open items · floor solids = closed items</span>` +
+    `<span style="margin-left:10px"><span class="sw" style="background:${hx(T.discBlack)};border:1px solid currentColor"></span>black ring = canonical branch contains the code</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = explicit ready-to-merge verdict</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = durable non-code item</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = code merge state unknown</span>` +
     `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring around an item = orphaned, no live holder</span>` +
     `<span style="margin-left:10px;color:${hx(T.pulse)}">traveling dot = wake</span>` +
     `<span style="margin-left:8px;color:${hx(T.pulse)}">strobing line = message</span>` +
@@ -1413,7 +1414,7 @@ function buildGround(agents){
   roots.forEach((r,i)=>place(r.id, i*(Math.PI*2/roots.length), (i+1)*(Math.PI*2/roots.length), 0));
   agents.forEach(a=>{
     const d = DEPTH[a.id] ?? 2;
-    const r = (KIND_R[a.kind] || KIND_R.coder) * 1.9 * Math.pow(.72, d);
+    const r = AGENT_R * 1.9 * Math.pow(.72, d);
     /* colour is recency, not role: solid blue when it has just acted,
        fading to grey by an hour idle. A name is a guess; a timestamp is a fact. */
     const IDLE_FULL = 3600;
@@ -1495,32 +1496,26 @@ function buildItems(items){
     const anchor = new THREE.Vector3();
     if (active.length){ active.forEach(h=>anchor.add(APOS[h])); anchor.multiplyScalar(1/active.length); anchor.y = 0; }
     else { anchor.set(-55 + (idx%24)*4.6, 0, 62 + Math.floor(idx/24)*5); }
-    const col = T.stage[w.stage];
-    /* on the floor once the evidence is complete; the ring says whether it
-       actually reached the branch */
-    const landed = w.stage >= 5;
-    const j = (idx%5)-2;
+    const closed = w.state === 'closed';
+    const col = closed ? T.itemClosed : T.itemOpen;
+    /* Floor placement carries only the durable closed state. Evidence rows do
+       not change an item's altitude, size, or motion. */
     const sc = scatter(w.short || w.id);
-    const pos = landed
+    const pos = closed
       ? new THREE.Vector3(anchor.x + sc.x, 1.05, anchor.z + 3.2 + sc.z)
-      : new THREE.Vector3(anchor.x + sc.x,
-                          6 + (4 - w.stage)*4.2 + (idx%3)*.8,
-                          anchor.z + sc.z);
-    const igeo = new THREE.IcosahedronGeometry(landed? .475 : .525, 0);
+      : new THREE.Vector3(anchor.x + sc.x, 10 + (idx%3)*.8, anchor.z + sc.z);
+    const igeo = new THREE.IcosahedronGeometry(.525, 0);
     const mesh = diagramMesh(igeo, col);
     mesh.position.copy(pos);
-    Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, landed, baseY: landed? null : pos.y});
+    Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, closed, baseY: closed? null : pos.y});
     mesh.rotation.y = spin.get(w.id) || 0;
     itemGroup.add(mesh); itemMeshes.push(mesh);
-    if (landed){
-      /* green: the code is in. yellow: code that is not in yet.
-         neutral: nothing to merge, the item just needs closing. */
-      /* yellow is reserved for work proven to be off the branch; anything
-         unverifiable or non-code is neutral, not a pending merge */
-      /* green: in the branch. yellow: reviewed and ready, not merged yet.
-         grey: nothing to merge (a ruling, recon, guidance) */
-      const dcol = (w.stage>=6 || w.merged===true) ? T.discG
-                 : (w.code && w.merged===false)    ? T.discY : T.discN;
+    const dcol = w.merged === true ? T.discBlack
+               : w.readyToMerge === true ? T.discG
+               : !w.code ? T.discN
+               : w.merged == null ? T.discY
+               : null;
+    if (dcol != null){
       /* solid ring, not a wireframe: the named radius is the OUTER edge and
          the band runs inward from it */
       const R = .8, BAND = .18;
@@ -1534,11 +1529,11 @@ function buildItems(items){
     }
     const vals = Object.values(w.turns||{});
     const act = vals.includes('run') ? 'run' : vals.includes('wait') ? 'wait' : null;
-    if (act==='run' && w.stage<6){
+    if (act==='run' && w.state==='open'){
       mesh.userData.workingRing = true;
       mesh.userData.ringR = .78;
     }
-    if (act==='wait' && w.stage<6) mesh.userData.waitFlash = true;
+    if (act==='wait' && w.state==='open') mesh.userData.waitFlash = true;
     /* custody: an agent holding an open card on this item. Drawn for every
        holder that has no live turn — a turn tether supersedes it. */
     (w.holders||[]).forEach(hid=>{
@@ -1570,7 +1565,7 @@ function buildItems(items){
         new THREE.MeshBasicMaterial({color:T.halo, side:THREE.DoubleSide, transparent:true, opacity:.7}));
       halo.userData={pulse:true}; mesh.add(halo);
     }
-    if (!active.length){
+    if (w.state==='open' && !active.length){
       /* orphan mark: a billboard ring AROUND the item, so it never reads as a
          landing marker on the ground */
       const ring = new THREE.Mesh(new THREE.RingGeometry(.78,.9,48),
@@ -2243,7 +2238,14 @@ function pickClick(ev){
 function nodeContent(u, clamp){
   if (u.type === 'item'){
     const w = u.w;
-    const segs = SEGS.map((x,i)=>(i<w.stage?'●':'○')+' '+x).join('<br>');
+    const attestKinds = (w.attestKinds||[]).map(esc);
+    const verdictKinds = (w.verdictKinds||[]).map(esc);
+    const evidence = [
+      'attests: ' + (attestKinds.join(', ') || 'none'),
+      'verdicts: ' + (verdictKinds.join(', ') || 'none'),
+      'assignments: ' + (w.assignments?.open || 0) + ' open · '
+        + (w.assignments?.terminal || 0) + ' terminal',
+    ].join('<br>');
     const acts = Object.entries(w.turns||{}).map(([h,st])=>
       (st==='run'?'▶ ':'⏸ ')+(byId[h]?byId[h].name:h)).join('<br>') || 'no turns active';
     const merged = w.merged === true ? 'in the branch'
@@ -2251,15 +2253,16 @@ function nodeContent(u, clamp){
                  : (w.code ? 'branch state unknown' : 'nothing to merge');
     return '<span class="t">' + (w.short || w.id) + '</span>'
       + '<div' + (clamp ? ' class="clamp5"' : '') + '>' + w.title + '</div>'
-      + '<span class="k">state</span>' + STAGE_NAMES[w.stage] + ' · ' + merged
-      + ((w.holders||[]).length ? '' : ' · ORPHANED')
-      + '<span class="k">evidence</span><span class="seg">' + segs + '</span>'
+      + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · ' + merged
+      + (w.readyToMerge ? ' · ready-to-merge verdict filed' : '')
+      + (w.state!=='open' || (w.holders||[]).length ? '' : ' · no open holder')
+      + '<span class="k">evidence</span><span class="seg">' + evidence + '</span>'
       + '<span class="k">turns</span><span class="seg">' + acts + '</span>'
       /* the pane has room, and this is the id the CLI will accept */
       + (clamp ? '' : '<span class="k">id</span><span class="seg">' + w.id + '</span>');
   }
   const a = u.a;
-  const held = ((DATA&&DATA.items)||[]).filter(w=>(w.holders||[]).includes(a.id) && w.stage<6).length;
+  const held = ((DATA&&DATA.items)||[]).filter(w=>(w.holders||[]).includes(a.id) && w.state==='open').length;
   const idle = a.idleFor == null ? 'never acted'
     : a.idleFor < 90 ? 'acting now'
     : a.idleFor < 3600 ? Math.round(a.idleFor/60) + ' min idle'
@@ -3494,10 +3497,9 @@ function tickFrame(){
     const heldStill = u.w && view.focus.key === 'i:' + u.w.id;
     if (u.baseY){
       m.position.y = heldStill ? u.baseY : u.baseY + Math.sin(t*1.2+u.phase)*.25;
-      if (!heldStill) m.rotation.y += .004;
     }
-    if (u.landed && !heldStill){ m.rotation.y += .0015; }
-    if (u.w && (u.baseY || u.landed)) spin.set(u.w.id, m.rotation.y);
+    if (u.w && !heldStill) m.rotation.y += .003;
+    if (u.w) spin.set(u.w.id, m.rotation.y);
     if (u.workingRing) updateRings(m, t);
     if (u.waitFlash && u.lineMat){ u.lineMat.opacity = (.15 + (0.5+0.5*Math.sin(t*2.6+u.phase))*.6) * (u.dim ?? 1); }
     m.children.forEach(ch=>{
