@@ -26,6 +26,7 @@ REMOTE = "git@github.com:clickety-clacks/tightbeam-atc.git"
 BRANCH = "refs/heads/main"
 CACHE = BASE / "atc-canonical.git"
 CACHE_BRANCH = "refs/tb-atc/main"
+REMOTE_TIMEOUT = 5                 # fail to unknown within one client refresh
 
 def kind_of(name):
     n = name.lower()
@@ -46,8 +47,16 @@ q = lambda sql, *a: con.execute(sql, a).fetchall()
 # No attest kind carries this. An item can hold completion, reviewed-clean,
 # AND verified and still not be on the branch, so that remote branch is the
 # only authority. The cache is service-owned and survives session workdirs.
-git = lambda *a: subprocess.run(["git", "--git-dir", str(CACHE), *a],
-                                capture_output=True, text=True)
+def git(*args, **kwargs):
+    return subprocess.run(["git", "--git-dir", str(CACHE), *args],
+                          capture_output=True, text=True, **kwargs)
+
+def remote_fetch(*args):
+    try:
+        return git("fetch", *args, timeout=REMOTE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None
+
 branch_shas, branch_pfx = None, None
 
 def load_branch():
@@ -70,9 +79,9 @@ def load_branch():
     except OSError: stale = True
     ref_exists = git("show-ref", "--verify", "--quiet", CACHE_BRANCH).returncode == 0
     if stale or not ref_exists:
-        fetched = git("fetch", "--quiet", "--force", REMOTE,
-                      f"{BRANCH}:{CACHE_BRANCH}")
-        if fetched.returncode != 0:
+        fetched = remote_fetch("--quiet", "--force", REMOTE,
+                               f"{BRANCH}:{CACHE_BRANCH}")
+        if fetched is None or fetched.returncode != 0:
             return False
     listed = git("rev-list", CACHE_BRANCH)
     if listed.returncode != 0:
@@ -120,8 +129,9 @@ def probe(c):
     load_equiv_cache()
     if c in equiv_cache: return equiv_cache[c]
     if git("cat-file", "-e", c + "^{commit}").returncode != 0:
-        fetched = git("fetch", "--quiet", REMOTE, c)
-        if fetched.returncode != 0 or git("cat-file", "-e", c + "^{commit}").returncode != 0:
+        fetched = remote_fetch("--quiet", REMOTE, c)
+        if (fetched is None or fetched.returncode != 0
+                or git("cat-file", "-e", c + "^{commit}").returncode != 0):
             return None
     checked = git("cherry", CACHE_BRANCH, c, c + "~1")
     if checked.returncode != 0:

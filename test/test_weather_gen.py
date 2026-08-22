@@ -137,17 +137,29 @@ class WeatherGeneratorCanonicalMergeTest(unittest.TestCase):
 
             self.assertIsNone(items["wi_lookup_failure"]["merged"])
 
-    def _run(self, base, remote, fail_fetch=False):
+    def test_canonical_lookup_timeout_is_unknown_and_writes_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote, landed, _, _ = self._make_remote(root)
+            self._make_state_db(root / "state.db", {"wi_lookup_timeout": [landed]})
+            items = self._run(root, remote, hang_fetch=True)
+
+            self.assertIsNone(items["wi_lookup_timeout"]["merged"])
+
+    def _run(self, base, remote, fail_fetch=False, hang_fetch=False):
         output = base / "weather.json"
         wrapper = base / "git-wrapper" / "git"
         wrapper.parent.mkdir()
         wrapper.write_text("""#!/usr/bin/env python3
 import os
 import sys
+import time
 
 args = sys.argv[1:]
 if "fetch" in args and os.environ.get("TEST_GIT_FAIL") == "1":
     raise SystemExit(1)
+if "fetch" in args and os.environ.get("TEST_GIT_HANG") == "1":
+    time.sleep(60)
 args = [os.environ["TEST_GIT_REMOTE"] if arg ==
         "git@github.com:clickety-clacks/tightbeam-atc.git" else arg
         for arg in args]
@@ -162,10 +174,11 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *args])
             "TEST_GIT_REMOTE": str(remote),
             "TEST_REAL_GIT": shutil.which("git"),
             "TEST_GIT_FAIL": "1" if fail_fetch else "0",
+            "TEST_GIT_HANG": "1" if hang_fetch else "0",
         })
         env.pop("TB_WEATHER_DEST", None)
         subprocess.run(["python3", str(GENERATOR)], env=env, check=True,
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, timeout=8)
         return {item["id"]: item for item in json.loads(output.read_text())["items"]}
 
     def _make_remote(self, root):
