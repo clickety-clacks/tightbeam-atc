@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
+import contextlib
+import io
 import json
 import os
+import runpy
 import shutil
 import sqlite3
 import subprocess
 import tempfile
 import unittest
+import warnings
+from unittest import mock
 from pathlib import Path
 
 
@@ -95,6 +100,77 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
             self.assertEqual("refs/heads/main", snapshot["mergeSource"]["branch"])
             self.assertEqual("git@github.com:clickety-clacks/tightbeam-atc.git",
                              snapshot["mergeSource"]["remote"])
+
+    def test_effects_and_assignment_counts_share_one_read_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db = base / "state.db"
+            con = make_state_db(db)
+            con.commit()
+            self.assertEqual("wal", con.execute("PRAGMA journal_mode=WAL").fetchone()[0])
+            con.execute("INSERT INTO work_items VALUES "
+                        "('wi_race', 'effect coverage race', 'open', 1)")
+            con.execute("INSERT INTO assignments VALUES "
+                        "('asg_first', 'wi_race', 'session:holder', 'closed', 1, NULL)")
+            con.execute("INSERT INTO assignment_effects VALUES "
+                        "('asg_first', 'coordination')")
+            con.commit()
+            con.close()
+
+            real_connect = sqlite3.connect
+            interleaved = {"done": False}
+
+            class InterleavingConnection:
+                def __init__(self, reader):
+                    self.reader = reader
+
+                @property
+                def row_factory(self):
+                    return self.reader.row_factory
+
+                @row_factory.setter
+                def row_factory(self, value):
+                    self.reader.row_factory = value
+
+                def execute(self, sql, params=()):
+                    cursor = self.reader.execute(sql, params)
+                    if (not interleaved["done"]
+                            and "LEFT JOIN assignment_effects" in sql):
+                        writer = real_connect(db)
+                        writer.execute("INSERT INTO assignments VALUES "
+                                       "('asg_later', 'wi_race', 'session:holder', "
+                                       "'open', NULL, NULL)")
+                        writer.commit()
+                        writer.close()
+                        interleaved["done"] = True
+                    return cursor
+
+            def intercepted_connect(database, *args, **kwargs):
+                reader = real_connect(database, *args, **kwargs)
+                return InterleavingConnection(reader)
+
+            output = base / "weather.json"
+            env = {
+                "TB_BASE_DIR": str(base),
+                "TB_WEATHER_OUT": str(output),
+            }
+            with mock.patch.dict(os.environ, env, clear=False), \
+                    mock.patch("sqlite3.connect", side_effect=intercepted_connect):
+                os.environ.pop("TB_WEATHER_DEST", None)
+                with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+                    warnings.simplefilter("ignore", ResourceWarning)
+                    runpy.run_path(str(GENERATOR), run_name="__main__")
+
+            item = next(item for item in json.loads(output.read_text())["items"]
+                        if item["id"] == "wi_race")
+            self.assertTrue(interleaved["done"])
+            self.assertEqual({"open": 0, "terminal": 1}, item["assignments"])
+            self.assertIs(item["code"], False)
+            check = real_connect(db)
+            self.assertEqual(2, check.execute(
+                "SELECT count(*) FROM assignments WHERE workItemId='wi_race'"
+            ).fetchone()[0])
+            check.close()
 
     def _make_state_db(self, path, merged, not_merged):
         con = make_state_db(path)

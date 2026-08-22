@@ -43,6 +43,7 @@ def kind_of(archetype, roles):
 
 con = sqlite3.connect(DB, uri=True)
 con.row_factory = sqlite3.Row
+con.execute("BEGIN")             # every projected fact comes from one snapshot
 q = lambda sql, *a: con.execute(sql, a).fetchall()
 
 # ---- ground truth for "merged": ancestry in the canonical remote branch.
