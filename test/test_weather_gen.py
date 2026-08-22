@@ -65,6 +65,20 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
             self.assertEqual("origin/main", snapshot["mergeSource"]["branch"])
             self.assertEqual(str(base / "repo"), snapshot["mergeSource"]["remote"])
 
+            # Retaining origin/main locally must not turn a failed canonical
+            # refresh into a false absence claim.
+            missing_remote = base / "missing-origin"
+            self._git(base / "repo", "remote", "set-url", "origin",
+                      str(missing_remote))
+            failed_output = base / "failed-weather.json"
+            env["TB_WEATHER_OUT"] = str(failed_output)
+            subprocess.run(["python3", str(GENERATOR)], env=env, check=True,
+                           capture_output=True, text=True)
+            failed = {item["id"]: item for item in
+                      json.loads(failed_output.read_text())["items"]}
+            self.assertIsNone(failed["wi_code_false_closed"]["merged"])
+            self.assertIsNone(failed["wi_code_true_closed"]["merged"])
+
     def _make_repo(self, path):
         path.mkdir()
         self._git(path, "init", "-q", "-b", "main")

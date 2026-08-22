@@ -66,14 +66,23 @@ if REPO and Path(REPO, ".git").exists():
     if remote.returncode == 0 and BRANCH.startswith(REMOTE + "/"):
         canonical_remote_url = remote.stdout.strip() or None
         stamp = Path(OUT + ".fetch")                # refresh at most every 5m
-        try: stale = time.time() - stamp.stat().st_mtime > 300
-        except OSError: stale = True
+        stamp_key = f"{canonical_remote_url}\n{BRANCH}\n"
+        try:
+            stale = (stamp.read_text() != stamp_key
+                     or time.time() - stamp.stat().st_mtime > 300)
+        except OSError:
+            stale = True
+        lookup_available = not stale
         if stale and git("fetch", "--quiet", REMOTE).returncode == 0:
-            stamp.touch()
-        branch = git("rev-list", BRANCH)
-        if branch.returncode == 0:
-            branch_shas = set(branch.stdout.split())
-            branch_pfx = {s[:12] for s in branch_shas}
+            stamp.write_text(stamp_key)
+            lookup_available = True
+        # A stale remote-tracking ref is not canonical evidence after a failed
+        # required refresh. Preserve unknown rather than claiming false.
+        if lookup_available:
+            branch = git("rev-list", BRANCH)
+            if branch.returncode == 0:
+                branch_shas = set(branch.stdout.split())
+                branch_pfx = {s[:12] for s in branch_shas}
 
 # which items ever produced code? a ruling or a recon has nothing to merge,
 # so it must not read as a pending merge. assignment_effects is optional.
