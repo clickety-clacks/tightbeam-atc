@@ -523,6 +523,31 @@ function homeTarget(){
   });
   return n ? c.multiplyScalar(1 / n) : HOME_TGT.clone();
 }
+
+/* The resting frame is SOLVED from the live org, not a fixed radius. The old
+   constant 66/34 had to be wide enough for the whole board, so the view opened
+   framed on everything — including retired agents and abandoned work parked off
+   to one side. Frame the same population homeTarget() centres on: every
+   non-retired agent and every item something still holds. */
+function livePoints(){
+  const pts = [];
+  selectables().forEach(m => {
+    const u = m.userData;
+    if (u.w && !(u.w.holders || []).length) return;   /* orphaned work */
+    if (u.a && u.a.retired) return;                   /* retired agents */
+    fitPoints(m, pts);
+  });
+  return pts;
+}
+function restingPose(ang){
+  const fallback = new THREE.Vector3(Math.sin(ang)*66, 34, Math.cos(ang)*66);
+  const pts = livePoints();
+  if (!pts.length) return {pos: fallback, target: homeTarget()};
+  const e = new THREE.Vector3(Math.sin(ang), 0, Math.cos(ang))
+    .multiplyScalar(Math.cos(.42)).setY(Math.sin(.42)).normalize();
+  const {camPos, target} = frameTo(pts, homeTarget(), e);
+  return {pos: camPos, target};
+}
 function flyTo(pos, target, after){
   flight = {p0:camera.position.clone(), p1:pos.clone(),
             t0:controls.target.clone(), t1:target.clone(), k:0, after};
@@ -1053,10 +1078,16 @@ function commitChromeOffset(){
    which happens before the flight starts — snapped the whole image sideways
    and the zoom then appeared to begin somewhere else. Only the destination is
    set here; tickFrame eases toward it, so the pane opening reads as a pan. */
+/* Centring in the clear rectangle still left the subject sitting low, because
+   the chrome that reserves the bottom is a legend a viewer reads once while the
+   space above stays empty. Lift the image by a fraction of the viewport so the
+   subject sits above centre. Applied here, so every framing path — the resting
+   fit, focus, and fit-to-selection — inherits the same bias. */
+const VIEW_LIFT = .07;
 function applyChromeOffset(immediate){
   const b = clearRect();
   chromeAim.x = (b.left + b.right) / 2 - b.vw / 2;
-  chromeAim.y = (b.top + b.bottom) / 2 - b.vh / 2;
+  chromeAim.y = (b.top + b.bottom) / 2 - b.vh / 2 - b.vh * VIEW_LIFT;
   if (immediate){ chromeOff.x = chromeAim.x; chromeOff.y = chromeAim.y; commitChromeOffset(); }
 }
 
@@ -2058,7 +2089,17 @@ async function refresh(){
       const rest = homeTarget();
       if (firstSnapshot || rest.distanceToSquared(orbitTgt) > .25){
         _rested = true;
-        orbitTgt.copy(rest);
+        /* The opening view is fitted to the live org, once. Later snapshots
+           only re-centre: refitting under a resting viewer would jolt the
+           distance every time a node appeared. */
+        if (firstSnapshot){
+          const pose = restingPose(Math.atan2(camera.position.x, camera.position.z));
+          camera.position.copy(pose.pos);
+          orbitTgt.copy(pose.target);
+          const d = pose.pos.clone().sub(pose.target);
+          orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+          orbitAngle = Math.atan2(d.x, d.z);
+        } else orbitTgt.copy(rest);
         controls.target.copy(orbitTgt);
       }
     }
@@ -2229,10 +2270,11 @@ function activateHit(hit){
     camMark = null;
     clearFocus();
     const ang = Math.atan2(camera.position.x, camera.position.z);
-    const home = new THREE.Vector3(Math.sin(ang)*66, 34, Math.cos(ang)*66);
-    const rest = homeTarget();
-    flyTo(home, rest, ()=>{
-      orbitAngle = ang; orbitR = 66; orbitH = 36; orbitTgt.copy(rest);
+    const pose = restingPose(ang);
+    flyTo(pose.pos, pose.target, ()=>{
+      const d = pose.pos.clone().sub(pose.target);
+      orbitAngle = ang; orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+      orbitTgt.copy(pose.target);
       orbitUserOwned = false; userMoved = false;
     });
   } else {
