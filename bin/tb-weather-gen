@@ -23,7 +23,12 @@ OUT = os.environ.get("TB_WEATHER_OUT", "/tmp/tb-weather.json")
 DEST = os.environ.get("TB_WEATHER_DEST")
 KEY = os.environ.get("TB_WEATHER_KEY")
 REMOTE_TIMEOUT = 4                 # leave one second to publish within a 5s refresh
-REMOTE_DEADLINE = time.monotonic() + REMOTE_TIMEOUT
+# One budget PER REMOTE, not one for the whole run: a single deadline computed
+# at import gave four registered repositories four seconds between them, so a
+# cold start silently degraded every item to unknown.
+_deadlines = {}
+def remote_deadline(remote):
+    return _deadlines.setdefault(remote, time.monotonic() + REMOTE_TIMEOUT)
 UNKNOWN_TTL = 300
 
 # Product-owned canonical integration refs. A commitRef names the checkout that
@@ -84,7 +89,7 @@ def cache_git(remote, *args, **kwargs):
                           capture_output=True, text=True, **kwargs)
 
 def remote_fetch(remote, *args):
-    remaining = REMOTE_DEADLINE - time.monotonic()
+    remaining = remote_deadline(remote) - time.monotonic()
     if remaining <= 0:
         return None
     try:
@@ -100,7 +105,13 @@ local_hosts = {socket.gethostname(), socket.gethostname().split(".", 1)[0]}
 repo_remotes = {}
 
 def checkout_remote(repo):
-    """Resolve a durable host:path checkout to a registered canonical origin."""
+    """Resolve a durable host:path checkout to its canonical origin.
+
+    Returns the registered remote, False when the origin was READ and is not a
+    registered repository, or None when the checkout could not be consulted at
+    all (deleted, unreachable host, no path). The two failures are different:
+    a foreign origin tells us this commit is not ours to land, while a deleted
+    workdir tells us nothing except which repository to ask first."""
     if repo in repo_remotes:
         return repo_remotes[repo]
     resolved = None
@@ -114,7 +125,7 @@ def checkout_remote(repo):
                         capture_output=True, text=True, timeout=REMOTE_TIMEOUT)
                 elif host_ssh.get(host):
                     command = f"git -C {shlex.quote(path)} remote get-url origin"
-                    remaining = min(1, REMOTE_DEADLINE - time.monotonic())
+                    remaining = min(1, remote_deadline("ssh:" + host) - time.monotonic())
                     if remaining <= 0:
                         found = None
                     else:
@@ -125,7 +136,7 @@ def checkout_remote(repo):
                 else:
                     found = None
                 if found is not None and found.returncode == 0:
-                    resolved = canonical_remote(found.stdout.strip())
+                    resolved = canonical_remote(found.stdout.strip()) or False
             except (OSError, subprocess.TimeoutExpired):
                 pass
     repo_remotes[repo] = resolved
@@ -255,7 +266,7 @@ def probe(remote, branch, cached, tip, c):
     unknown.pop(c, None)
     return r
 
-def branch_probe(remote, branch, commit):
+def branch_probe(remote, branch, commit, cheap=False):
     loaded = load_branch(remote, branch)
     if loaded is None:
         return None
@@ -268,6 +279,11 @@ def branch_probe(remote, branch, commit):
             return True
         if len(matches) > 1:
             return None
+    if cheap:
+        # Registry-wide search: ancestry only. Patch equivalence costs a
+        # subprocess per commit per repository, and we are asking every
+        # repository — pay it only where the checkout named one.
+        return None
     tip = cache_git(remote, "rev-parse", cached).stdout.strip()
     if not tip:
         return None
@@ -278,13 +294,34 @@ def merged_in_branch(refs):
         return None
     seen = []
     for repo, commit in refs:
-        remote = checkout_remote(repo)
-        if remote is None or not isinstance(commit, str) \
+        if not isinstance(commit, str) \
                 or re.fullmatch(r"[0-9a-f]{7,40}", commit) is None:
             seen.append(None)
             continue
-        seen.extend(branch_probe(remote, branch, commit)
-                    for branch in CANONICAL_REFS[remote])
+        remote = checkout_remote(repo)
+        # The checkout that produced a commit is usually GONE — deleted when its
+        # session retired, which is the custody defect this projection exists to
+        # expose. Resolving it only narrows the search; it is never the proof.
+        # Ancestry on a registered canonical ref is landing proof whichever
+        # workdir produced the commit, so when the checkout cannot be resolved,
+        # ask every registered repository instead of giving up.
+        if remote is False:          # origin read, and it is not one of ours
+            seen.append(None)
+            continue
+        targets = ([(remote, branch) for branch in CANONICAL_REFS[remote]]
+                   if remote else
+                   [(r, branch) for r, branches in CANONICAL_REFS.items()
+                    for branch in branches])
+        probes = [branch_probe(r, branch, commit, cheap=not remote)
+                  for r, branch in targets]
+        if not remote:
+            # A miss across every repository is not proof of absence: one of
+            # them may simply have been unreachable this run.
+            seen.append(True if any(v is True for v in probes)
+                        else (False if probes and all(v is False for v in probes)
+                              else None))
+        else:
+            seen.extend(probes)
     if any(v is True for v in seen): return True
     if seen and all(v is False for v in seen): return False
     return None                                     # unverifiable, not absent
@@ -485,7 +522,7 @@ def prime_checkout_remotes():
                 f"printf '%s\\t' {shlex.quote(token)}; "
                 f"git -C {shlex.quote(path)} remote get-url origin 2>/dev/null || true; "
                 "printf '\\n'")
-        remaining = min(1, REMOTE_DEADLINE - time.monotonic())
+        remaining = min(1, remote_deadline("ssh:" + host) - time.monotonic())
         try:
             if remaining <= 0:
                 raise subprocess.TimeoutExpired("ssh", 0)

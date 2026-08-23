@@ -285,7 +285,7 @@ class WeatherGeneratorCanonicalMergeTest(unittest.TestCase):
 
             self.assertIs(True, items["wi_https"]["merged"])
 
-    def test_missing_deleted_unregistered_and_partial_sources_are_unknown(self):
+    def test_workdir_identity_is_never_required_for_resolution(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source, remote, landed, _, absent = self._make_remote(root / "atc")
@@ -296,6 +296,7 @@ class WeatherGeneratorCanonicalMergeTest(unittest.TestCase):
                 root / "partial", origin=TIGHTBEAM_REMOTE)
             self._make_state_db(root / "state.db", {
                 "wi_deleted": [(root / "deleted-workdir", landed)],
+                "wi_deleted_absent": [(root / "deleted-workdir", absent)],
                 "wi_unregistered": [(unregistered, unregistered_landed)],
                 "wi_missing_repo": [(None, landed)],
                 "wi_missing_commit_field": [(source, None)],
@@ -308,9 +309,18 @@ class WeatherGeneratorCanonicalMergeTest(unittest.TestCase):
                 TIGHTBEAM_REMOTE: partial_remote,
             })
 
-            self.assertIsNone(items["wi_deleted"]["merged"])
+            # A deleted workdir only costs us the shortcut of knowing WHICH
+            # repository to ask. Ancestry on a registered canonical ref is
+            # landing proof whoever produced the commit, so the landed one
+            # still resolves; the one on no canonical ref stays unknown,
+            # because an unreachable repository is not proof of absence.
+            self.assertIs(True, items["wi_deleted"]["merged"])
+            self.assertIsNone(items["wi_deleted_absent"]["merged"])
             self.assertIsNone(items["wi_unregistered"]["merged"])
-            self.assertIsNone(items["wi_missing_repo"]["merged"])
+            # No repo recorded at all: the spec still says test the recorded
+            # COMMIT against the configured canonical branches, so a commit
+            # that is an ancestor of one resolves.
+            self.assertIs(True, items["wi_missing_repo"]["merged"])
             self.assertIsNone(items["wi_missing_commit_field"]["merged"])
             self.assertIsNone(items["wi_missing_commit"]["merged"])
             self.assertIsNone(items["wi_partial_registry"]["merged"])
