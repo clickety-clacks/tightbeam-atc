@@ -5,6 +5,7 @@ import json
 import os
 import runpy
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -16,6 +17,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "bin" / "tb-weather-gen"
+ATC_REMOTE = "git@github.com:clickety-clacks/tightbeam-atc.git"
+SPECS_REMOTE = "git@github.com:clickety-clacks/tightbeam-specs.git"
+LACHESIS_REMOTE = "git@github.com:clickety-clacks/lachesis.git"
+TIGHTBEAM_REMOTE = "git@github.com:clickety-clacks/tightbeam.git"
+LOCAL_HOST = socket.gethostname().split(".", 1)[0]
 
 
 def make_state_db(path):
@@ -61,9 +67,9 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             helper = WeatherGeneratorCanonicalMergeTest()
-            remote, merged, _, not_merged = helper._make_remote(base)
-            self._make_state_db(base / "state.db", merged, not_merged)
-            snapshot = helper._run_snapshot(base, remote)
+            source, remote, merged, _, not_merged = helper._make_remote(base)
+            self._make_state_db(base / "state.db", source, merged, not_merged)
+            snapshot = helper._run_snapshot(base, {ATC_REMOTE: remote})
             items = {item["id"]: item for item in snapshot["items"]}
 
             later = items["wi_later_verdict"]
@@ -97,9 +103,14 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
                          if a["name"] == "Product Owner By Name Only")
             self.assertEqual("coder", agent["kind"])
             self.assertEqual("coder", agent["archetype"])
-            self.assertEqual("refs/heads/main", snapshot["mergeSource"]["branch"])
-            self.assertEqual("git@github.com:clickety-clacks/tightbeam-atc.git",
-                             snapshot["mergeSource"]["remote"])
+            sources = {s["remote"]: s["branches"]
+                       for s in snapshot["mergeSources"]}
+            self.assertEqual({
+                ATC_REMOTE: ["refs/heads/main"],
+                SPECS_REMOTE: ["refs/heads/main"],
+                LACHESIS_REMOTE: ["refs/heads/main"],
+                TIGHTBEAM_REMOTE: ["refs/heads/main", "refs/heads/0.1.8"],
+            }, sources)
 
     def test_effects_and_assignment_counts_share_one_read_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -172,7 +183,7 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
             ).fetchone()[0])
             check.close()
 
-    def _make_state_db(self, path, merged, not_merged):
+    def _make_state_db(self, path, source, merged, not_merged):
         con = make_state_db(path)
 
         items = [
@@ -208,7 +219,8 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
              ("asg_ready", "code")],
         )
 
-        refs = lambda sha: json.dumps([{"repo": "fixture:repo", "commit": sha}])
+        repo = f"{LOCAL_HOST}:{source}"
+        refs = lambda sha: json.dumps([{"repo": repo, "commit": sha}])
         attests = [
             ("asg_later", "session:holder", 100, "verdict", "reviewed-clean", None),
             ("asg_true", "session:holder", 110, "progress", None, refs(merged)),
@@ -228,53 +240,114 @@ class WeatherGeneratorEvidenceTest(unittest.TestCase):
 
 
 class WeatherGeneratorCanonicalMergeTest(unittest.TestCase):
-    def test_canonical_remote_proves_landed_equivalent_absent_and_unknown(self):
+    def test_registered_integration_refs_prove_atc_and_tightbeam_states(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            remote, landed, equivalent, absent = self._make_remote(root)
+            atc_source, atc_remote, landed, equivalent, absent = self._make_remote(
+                root / "atc")
+            tb_source, tb_remote, release_landed, release_absent = \
+                self._make_release_remote(root / "tightbeam")
             missing = "f" * 40
             self._make_state_db(root / "state.db", {
-                "wi_landed": [landed],
-                "wi_equivalent": [equivalent],
-                "wi_absent": [absent],
-                "wi_missing": [missing],
-                "wi_mixed": [absent, missing],
+                "wi_landed": [(atc_source, landed)],
+                "wi_equivalent": [(atc_source, equivalent)],
+                "wi_absent": [(atc_source, absent)],
+                "wi_missing": [(atc_source, missing)],
+                "wi_mixed": [(atc_source, absent), (atc_source, missing)],
+                "wi_tightbeam_release": [(tb_source, release_landed)],
+                "wi_tightbeam_absent": [(tb_source, release_absent)],
             })
-            items = self._run(root, remote)
+            items = self._run(root, {
+                ATC_REMOTE: atc_remote,
+                TIGHTBEAM_REMOTE: tb_remote,
+            })
 
             self.assertIs(True, items["wi_landed"]["merged"])
             self.assertIs(True, items["wi_equivalent"]["merged"])
             self.assertIs(False, items["wi_absent"]["merged"])
             self.assertIsNone(items["wi_missing"]["merged"])
             self.assertIsNone(items["wi_mixed"]["merged"])
+            self.assertIs(True, items["wi_tightbeam_release"]["merged"])
+            self.assertIs(False, items["wi_tightbeam_absent"]["merged"])
+            self.assertTrue((root / "atc-canonical" / "tightbeam-atc.git").is_dir())
+            self.assertTrue((root / "atc-canonical" / "tightbeam.git").is_dir())
+
+    def test_https_origin_normalizes_to_registered_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, remote, landed, _, _ = self._make_remote(
+                root, origin="https://github.com/clickety-clacks/tightbeam-atc")
+            self._make_state_db(root / "state.db", {
+                "wi_https": [(source, landed)],
+            })
+
+            items = self._run(root, {ATC_REMOTE: remote})
+
+            self.assertIs(True, items["wi_https"]["merged"])
+
+    def test_missing_deleted_unregistered_and_partial_sources_are_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, remote, landed, _, absent = self._make_remote(root / "atc")
+            unregistered, _, unregistered_landed, _, _ = self._make_remote(
+                root / "unregistered",
+                origin="git@github.com:clickety-clacks/not-registered.git")
+            partial, partial_remote, _, _, partial_absent = self._make_remote(
+                root / "partial", origin=TIGHTBEAM_REMOTE)
+            self._make_state_db(root / "state.db", {
+                "wi_deleted": [(root / "deleted-workdir", landed)],
+                "wi_unregistered": [(unregistered, unregistered_landed)],
+                "wi_missing_repo": [(None, landed)],
+                "wi_missing_commit_field": [(source, None)],
+                "wi_missing_commit": [(source, "f" * 40)],
+                "wi_partial_registry": [(partial, partial_absent)],
+                "wi_registered_absent": [(source, absent)],
+            })
+            items = self._run(root, {
+                ATC_REMOTE: remote,
+                TIGHTBEAM_REMOTE: partial_remote,
+            })
+
+            self.assertIsNone(items["wi_deleted"]["merged"])
+            self.assertIsNone(items["wi_unregistered"]["merged"])
+            self.assertIsNone(items["wi_missing_repo"]["merged"])
+            self.assertIsNone(items["wi_missing_commit_field"]["merged"])
+            self.assertIsNone(items["wi_missing_commit"]["merged"])
+            self.assertIsNone(items["wi_partial_registry"]["merged"])
+            self.assertIs(False, items["wi_registered_absent"]["merged"])
 
     def test_canonical_lookup_failure_is_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            remote, landed, _, _ = self._make_remote(root)
-            self._make_state_db(root / "state.db", {"wi_lookup_failure": [landed]})
-            items = self._run(root, remote, fail_fetch=True)
+            source, remote, landed, _, _ = self._make_remote(root)
+            self._make_state_db(root / "state.db", {
+                "wi_lookup_failure": [(source, landed)],
+            })
+            items = self._run(root, {ATC_REMOTE: remote}, fail_fetch=True)
 
             self.assertIsNone(items["wi_lookup_failure"]["merged"])
 
     def test_canonical_lookup_timeout_is_unknown_and_writes_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            remote, landed, _, _ = self._make_remote(root)
-            self._make_state_db(root / "state.db", {"wi_lookup_timeout": [landed]})
-            items = self._run(root, remote, hang_fetch=True)
+            source, remote, landed, _, _ = self._make_remote(root)
+            self._make_state_db(root / "state.db", {
+                "wi_lookup_timeout": [(source, landed)],
+            })
+            items = self._run(root, {ATC_REMOTE: remote}, hang_fetch=True)
 
             self.assertIsNone(items["wi_lookup_timeout"]["merged"])
 
-    def _run(self, base, remote, fail_fetch=False, hang_fetch=False):
-        snapshot = self._run_snapshot(base, remote, fail_fetch, hang_fetch)
+    def _run(self, base, remotes, fail_fetch=False, hang_fetch=False):
+        snapshot = self._run_snapshot(base, remotes, fail_fetch, hang_fetch)
         return {item["id"]: item for item in snapshot["items"]}
 
-    def _run_snapshot(self, base, remote, fail_fetch=False, hang_fetch=False):
+    def _run_snapshot(self, base, remotes, fail_fetch=False, hang_fetch=False):
         output = base / "weather.json"
         wrapper = base / "git-wrapper" / "git"
         wrapper.parent.mkdir()
         wrapper.write_text("""#!/usr/bin/env python3
+import json
 import os
 import sys
 import time
@@ -284,9 +357,8 @@ if "fetch" in args and os.environ.get("TEST_GIT_FAIL") == "1":
     raise SystemExit(1)
 if "fetch" in args and os.environ.get("TEST_GIT_HANG") == "1":
     time.sleep(60)
-args = [os.environ["TEST_GIT_REMOTE"] if arg ==
-        "git@github.com:clickety-clacks/tightbeam-atc.git" else arg
-        for arg in args]
+remotes = json.loads(os.environ["TEST_GIT_REMOTES"])
+args = [remotes.get(arg, arg) for arg in args]
 os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *args])
 """)
         wrapper.chmod(0o755)
@@ -295,7 +367,8 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *args])
             "PATH": str(wrapper.parent) + os.pathsep + env["PATH"],
             "TB_BASE_DIR": str(base),
             "TB_WEATHER_OUT": str(output),
-            "TEST_GIT_REMOTE": str(remote),
+            "TEST_GIT_REMOTES": json.dumps({key: str(value)
+                                             for key, value in remotes.items()}),
             "TEST_REAL_GIT": shutil.which("git"),
             "TEST_GIT_FAIL": "1" if fail_fetch else "0",
             "TEST_GIT_HANG": "1" if hang_fetch else "0",
@@ -305,7 +378,8 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *args])
                        capture_output=True, text=True, timeout=8)
         return json.loads(output.read_text())
 
-    def _make_remote(self, root):
+    def _make_remote(self, root, origin=ATC_REMOTE):
+        root.mkdir(parents=True, exist_ok=True)
         source = root / "source"
         remote = root / "canonical.git"
         subprocess.run(["git", "init", "-b", "main", str(source)], check=True,
@@ -349,21 +423,72 @@ os.execv(os.environ["TEST_REAL_GIT"], [os.environ["TEST_REAL_GIT"], *args])
         subprocess.run(["git", "-C", str(source), "push", "origin",
                         "main", "equivalent", "absent"], check=True,
                        capture_output=True, text=True)
-        return remote, landed, equivalent, absent
+        subprocess.run(["git", "-C", str(source), "remote", "set-url", "origin", origin],
+                       check=True)
+        return source, remote, landed, equivalent, absent
 
-    def _make_state_db(self, path, commits_by_item):
+    def _make_release_remote(self, root):
+        root.mkdir(parents=True, exist_ok=True)
+        source = root / "source"
+        remote = root / "canonical.git"
+        subprocess.run(["git", "init", "-b", "main", str(source)], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"],
+                       check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email",
+                        "test@example.com"], check=True)
+        (source / "base.txt").write_text("base\n")
+        subprocess.run(["git", "-C", str(source), "add", "base.txt"], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-m", "base"],
+                       check=True, capture_output=True, text=True)
+        base = self._rev(source, "HEAD")
+
+        subprocess.run(["git", "-C", str(source), "switch", "-c", "0.1.8", base],
+                       check=True, capture_output=True, text=True)
+        (source / "release.txt").write_text("release integration\n")
+        subprocess.run(["git", "-C", str(source), "add", "release.txt"], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-m", "release landed"],
+                       check=True, capture_output=True, text=True)
+        landed = self._rev(source, "HEAD")
+
+        subprocess.run(["git", "-C", str(source), "switch", "-c", "candidate", base],
+                       check=True, capture_output=True, text=True)
+        (source / "candidate.txt").write_text("not integrated\n")
+        subprocess.run(["git", "-C", str(source), "add", "candidate.txt"], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-m", "candidate"],
+                       check=True, capture_output=True, text=True)
+        absent = self._rev(source, "HEAD")
+
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(source), "remote", "add", "origin", str(remote)],
+                       check=True)
+        subprocess.run(["git", "-C", str(source), "push", "origin",
+                        "main", "0.1.8", "candidate"], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(source), "remote", "set-url", "origin",
+                        TIGHTBEAM_REMOTE], check=True)
+        return source, remote, landed, absent
+
+    def _make_state_db(self, path, refs_by_item):
         con = make_state_db(path)
-        for created_at, (wid, commits) in enumerate(commits_by_item.items(), 1):
+        for created_at, (wid, refs) in enumerate(refs_by_item.items(), 1):
             assignment = "asg_" + wid
             con.execute("INSERT INTO work_items VALUES (?, ?, 'open', ?)",
                         (wid, wid, created_at))
             con.execute("INSERT INTO assignments VALUES (?, ?, ?, 'closed', ?, NULL)",
                         (assignment, wid, "session:holder", 9_999_999_999_999))
             con.execute("INSERT INTO assignment_effects VALUES (?, 'code')", (assignment,))
-            refs = [{"repo": "gibson:/deleted/session-workdir", "commit": commit}
-                    for commit in commits]
+            encoded_refs = []
+            for repo, commit in refs:
+                ref = {}
+                if repo is not None:
+                    ref["repo"] = f"{LOCAL_HOST}:{repo}"
+                if commit is not None:
+                    ref["commit"] = commit
+                encoded_refs.append(ref)
             con.execute("INSERT INTO attests VALUES (?, ?, ?, 'progress', NULL, ?)",
-                        (assignment, "session:holder", 100, json.dumps(refs)))
+                        (assignment, "session:holder", 100, json.dumps(encoded_refs)))
         con.commit()
         con.close()
 

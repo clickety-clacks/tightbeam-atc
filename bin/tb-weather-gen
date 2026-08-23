@@ -14,7 +14,7 @@ Every signal is derived from durable rows: evidence inventories from attests,
 running turns from open rows in `turns`, queued turns from pending `wakes`,
 pulses from recently fired wakes. Nothing is estimated.
 """
-import hashlib, json, os, re, sqlite3, subprocess, time
+import hashlib, json, os, re, shlex, socket, sqlite3, subprocess, time
 from pathlib import Path
 
 BASE = Path(os.environ.get("TB_BASE_DIR", str(Path.home() / ".tightbeam")))
@@ -22,11 +22,22 @@ DB = f"file:{BASE}/state.db?mode=ro"
 OUT = os.environ.get("TB_WEATHER_OUT", "/tmp/tb-weather.json")
 DEST = os.environ.get("TB_WEATHER_DEST")
 KEY = os.environ.get("TB_WEATHER_KEY")
-REMOTE = "git@github.com:clickety-clacks/tightbeam-atc.git"
-BRANCH = "refs/heads/main"
-CACHE = BASE / "atc-canonical.git"
-CACHE_BRANCH = "refs/tb-atc/main"
-REMOTE_TIMEOUT = 5                 # fail to unknown within one client refresh
+REMOTE_TIMEOUT = 4                 # leave one second to publish within a 5s refresh
+REMOTE_DEADLINE = time.monotonic() + REMOTE_TIMEOUT
+UNKNOWN_TTL = 300
+
+# Product-owned canonical integration refs. A commitRef names the checkout that
+# produced the commit, never the branch that integrates it. Resolve that
+# checkout's origin, then consult only this registry: arbitrary remote branches
+# include producer branches and are not landing proof.
+CANONICAL_REFS = {
+    "git@github.com:clickety-clacks/tightbeam-atc.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam-specs.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/lachesis.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam.git":
+        ("refs/heads/main", "refs/heads/0.1.8"),
+}
+CACHE_ROOT = BASE / "atc-canonical"
 
 def kind_of(archetype, roles):
     """Return only role classes backed by durable role or archetype rows."""
@@ -46,56 +57,121 @@ con.row_factory = sqlite3.Row
 con.execute("BEGIN")             # every projected fact comes from one snapshot
 q = lambda sql, *a: con.execute(sql, a).fetchall()
 
-# ---- ground truth for "merged": ancestry in the canonical remote branch.
+# ---- ground truth for "merged": ancestry in registered canonical branches.
 # No attest kind carries this. An item can hold completion, reviewed-clean,
-# AND verified and still not be on the branch, so that remote branch is the
-# only authority. The cache is service-owned and survives session workdirs.
-def git(*args, **kwargs):
-    return subprocess.run(["git", "--git-dir", str(CACHE), *args],
+# AND verified and still not be on an integration branch. The caches are
+# service-owned, one per canonical repository, and survive session workdirs.
+def canonical_remote(value):
+    if not isinstance(value, str):
+        return None
+    remote = value.strip().rstrip("/")
+    if remote.startswith("https://github.com/"):
+        remote = "git@github.com:" + remote[len("https://github.com/"):]
+    if remote.startswith("git@github.com:") and not remote.endswith(".git"):
+        remote += ".git"
+    return remote if remote in CANONICAL_REFS else None
+
+def cache_for(remote):
+    name = remote.rsplit("/", 1)[-1].removesuffix(".git")
+    return CACHE_ROOT / f"{name}.git"
+
+def cache_ref(branch):
+    digest = hashlib.blake2b(branch.encode(), digest_size=8).hexdigest()
+    return f"refs/tb-atc/{digest}"
+
+def cache_git(remote, *args, **kwargs):
+    return subprocess.run(["git", "--git-dir", str(cache_for(remote)), *args],
                           capture_output=True, text=True, **kwargs)
 
-def remote_fetch(*args):
+def remote_fetch(remote, *args):
+    remaining = REMOTE_DEADLINE - time.monotonic()
+    if remaining <= 0:
+        return None
     try:
-        return git("fetch", *args, timeout=REMOTE_TIMEOUT)
+        return cache_git(remote, "fetch", *args, timeout=remaining)
     except subprocess.TimeoutExpired:
         return None
 
-branch_shas, branch_pfx = None, None
+try:
+    host_ssh = {r["name"]: r["ssh"] for r in q("SELECT name, ssh FROM hosts")}
+except sqlite3.Error:
+    host_ssh = {}
+local_hosts = {socket.gethostname(), socket.gethostname().split(".", 1)[0]}
+repo_remotes = {}
 
-def load_branch():
-    global branch_shas, branch_pfx
-    if branch_shas is not None:
-        return bool(branch_shas)
-    branch_shas, branch_pfx = set(), set()
-    if not REMOTE or not BRANCH:
-        return False
-    if not CACHE.exists():
-        made = subprocess.run(["git", "init", "--bare", "--quiet", str(CACHE)],
+def checkout_remote(repo):
+    """Resolve a durable host:path checkout to a registered canonical origin."""
+    if repo in repo_remotes:
+        return repo_remotes[repo]
+    resolved = None
+    if isinstance(repo, str) and ":" in repo:
+        host, path = repo.split(":", 1)
+        if host and Path(path).is_absolute():
+            try:
+                if host in local_hosts:
+                    found = subprocess.run(
+                        ["git", "-C", path, "remote", "get-url", "origin"],
+                        capture_output=True, text=True, timeout=REMOTE_TIMEOUT)
+                elif host_ssh.get(host):
+                    command = f"git -C {shlex.quote(path)} remote get-url origin"
+                    remaining = min(1, REMOTE_DEADLINE - time.monotonic())
+                    if remaining <= 0:
+                        found = None
+                    else:
+                        found = subprocess.run(
+                            ["ssh", "-o", "BatchMode=yes", "-o",
+                             "ConnectTimeout=1", host_ssh[host], command],
+                            capture_output=True, text=True, timeout=remaining)
+                else:
+                    found = None
+                if found is not None and found.returncode == 0:
+                    resolved = canonical_remote(found.stdout.strip())
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    repo_remotes[repo] = resolved
+    return resolved
+
+branches = {}
+
+def load_branch(remote, branch):
+    key = (remote, branch)
+    if key in branches:
+        return branches[key]
+    cache = cache_for(remote)
+    cached = cache_ref(branch)
+    if not cache.exists():
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        made = subprocess.run(["git", "init", "--bare", "--quiet", str(cache)],
                               capture_output=True, text=True)
         if made.returncode != 0:
-            return False
-    elif git("rev-parse", "--is-bare-repository").stdout.strip() != "true":
-        return False
+            branches[key] = None
+            return None
+    elif cache_git(remote, "rev-parse", "--is-bare-repository").stdout.strip() != "true":
+        branches[key] = None
+        return None
 
-    stamp = CACHE / "tb-atc-fetch"
+    stamp = cache / ("tb-atc-fetch-" + cached.rsplit("/", 1)[-1])
     try: stale = time.time() - stamp.stat().st_mtime > 300
     except OSError: stale = True
-    ref_exists = git("show-ref", "--verify", "--quiet", CACHE_BRANCH).returncode == 0
+    ref_exists = cache_git(remote, "show-ref", "--verify", "--quiet", cached).returncode == 0
     if stale or not ref_exists:
-        fetched = remote_fetch("--quiet", "--force", REMOTE,
-                               f"{BRANCH}:{CACHE_BRANCH}")
+        fetched = remote_fetch(remote, "--quiet", "--force", remote,
+                               f"{branch}:{cached}")
         if fetched is None or fetched.returncode != 0:
-            return False
-    listed = git("rev-list", CACHE_BRANCH)
+            branches[key] = None
+            return None
+    listed = cache_git(remote, "rev-list", cached)
     if listed.returncode != 0:
-        return False
-    branch_shas = set(listed.stdout.split())
-    branch_pfx = {s[:12] for s in branch_shas}
-    if not branch_shas:
-        return False
+        branches[key] = None
+        return None
+    shas = set(listed.stdout.split())
+    if not shas:
+        branches[key] = None
+        return None
     if stale or not ref_exists:
         stamp.touch()
-    return True
+    branches[key] = (shas, cached)
+    return branches[key]
 
 # Which items produced code? A positive code effect is sufficient, but the
 # absence of one is not: assignment_effects has partial live coverage. Non-code
@@ -122,56 +198,95 @@ def code_state(work_item_id, producer_refs):
         return False
     return None
 
-# cherry-picked and rebased work lands under a different sha, so ancestry
-# alone reports false "not merged". Fall back to patch equivalence, cached
-# per branch tip because it costs a subprocess per commit.
-EQUIV = Path(OUT + ".equiv.json")
-PROBE_V = 3                       # bump when probe semantics change
-_tip, equiv_cache = "", {}
+# Cherry-picked and rebased work lands under a different sha, so ancestry
+# alone can report false absence. Fall back to sanctioned patch equivalence,
+# cached per canonical repository, registered branch, and branch tip.
+PROBE_V = 5                       # bump when probe semantics change
+equiv = {}
 
-def load_equiv_cache():
-    global _tip, equiv_cache
-    if _tip:
-        return
-    _tip = git("rev-parse", CACHE_BRANCH).stdout.strip()
+def equiv_state(remote, branch, tip):
+    key = (remote, branch)
+    if key in equiv:
+        return equiv[key]
     try:
-        _c = json.load(open(EQUIV))
-        equiv_cache = (_c["map"] if _c.get("tip") == _tip
-                       and _c.get("v") == PROBE_V else {})
+        saved = json.load(open(cache_for(remote) / "tb-atc-equiv.json"))
+        record = saved.get("branches", {}).get(branch, {})
+        state = ({"map": record.get("map", {}),
+                  "unknown": record.get("unknown", {})}
+                 if saved.get("v") == PROBE_V and record.get("tip") == tip
+                 else {"map": {}, "unknown": {}})
     except Exception:
-        equiv_cache = {}
+        state = {"map": {}, "unknown": {}}
+    equiv[key] = state
+    return state
 
-def probe(c):
+def probe(remote, branch, cached, tip, c):
     """True: equivalent content is on the branch. False: it is not.
     None: the commit or lookup is unavailable, so nothing can be concluded."""
-    load_equiv_cache()
-    if c in equiv_cache: return equiv_cache[c]
-    if git("cat-file", "-e", c + "^{commit}").returncode != 0:
-        fetched = remote_fetch("--quiet", REMOTE, c)
-        if (fetched is None or fetched.returncode != 0
-                or git("cat-file", "-e", c + "^{commit}").returncode != 0):
-            return None
-    checked = git("cherry", CACHE_BRANCH, c, c + "~1")
-    if checked.returncode != 0:
+    state = equiv_state(remote, branch, tip)
+    values, unknown = state["map"], state["unknown"]
+    if c in values: return values[c]
+    last_unknown = unknown.get(c)
+    if isinstance(last_unknown, (int, float)) \
+            and time.time() - last_unknown < UNKNOWN_TTL:
         return None
+    unknown.pop(c, None)
+
+    def unavailable():
+        unknown[c] = time.time()
+        return None
+
+    if cache_git(remote, "cat-file", "-e", c + "^{commit}").returncode != 0:
+        fetched = remote_fetch(remote, "--quiet", remote, c)
+        if (fetched is None or fetched.returncode != 0
+                or cache_git(remote, "cat-file", "-e", c + "^{commit}").returncode != 0):
+            return unavailable()
+    checked = cache_git(remote, "cherry", cached, c, c + "~1")
+    if checked.returncode != 0:
+        return unavailable()
     result = checked.stdout.strip()
     if result.startswith("-"):
         r = True
     elif result.startswith("+"):
         r = False
     else:
-        return None
-    equiv_cache[c] = r
+        return unavailable()
+    values[c] = r
+    unknown.pop(c, None)
     return r
 
+def branch_probe(remote, branch, commit):
+    loaded = load_branch(remote, branch)
+    if loaded is None:
+        return None
+    shas, cached = loaded
+    if commit in shas:
+        return True
+    if len(commit) < 40:
+        matches = [sha for sha in shas if sha.startswith(commit)]
+        if len(matches) == 1:
+            return True
+        if len(matches) > 1:
+            return None
+    tip = cache_git(remote, "rev-parse", cached).stdout.strip()
+    if not tip:
+        return None
+    return probe(remote, branch, cached, tip, commit)
+
 def merged_in_branch(refs):
-    if not refs or not load_branch(): return None   # detection unavailable
-    for c in refs:
-        if c in branch_shas or c[:12] in branch_pfx: return True
-        if len(c) < 12 and any(s.startswith(c) for s in branch_shas): return True
-    seen = [probe(c) for c in refs]
+    if not refs:
+        return None
+    seen = []
+    for repo, commit in refs:
+        remote = checkout_remote(repo)
+        if remote is None or not isinstance(commit, str) \
+                or re.fullmatch(r"[0-9a-f]{7,40}", commit) is None:
+            seen.append(None)
+            continue
+        seen.extend(branch_probe(remote, branch, commit)
+                    for branch in CANONICAL_REFS[remote])
     if any(v is True for v in seen): return True
-    if all(v is False for v in seen): return False
+    if seen and all(v is False for v in seen): return False
     return None                                     # unverifiable, not absent
 
 NOW = int(time.time() * 1000)
@@ -317,6 +432,81 @@ wake_by = by_item("""SELECT work_item_id, sessionKey FROM wakes
                      WHERE state='pending' AND work_item_id IN ({IN})
                      ORDER BY dueAt""")
 
+def parse_commit_refs(raw):
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return {(None, None)}
+    if not isinstance(decoded, list):
+        return {(None, None)}
+    refs = set()
+    for ref in decoded:
+        if not isinstance(ref, dict):
+            refs.add((None, None))
+            continue
+        repo, commit = ref.get("repo"), ref.get("commit")
+        refs.add((repo if isinstance(repo, str) else None,
+                  commit if isinstance(commit, str) else None))
+    return refs
+
+def prime_checkout_remotes():
+    """Resolve every needed remote-host checkout with one SSH call per host."""
+    repos = set()
+    for evidence in ev_by.values():
+        for row in evidence:
+            if row["commitRefs"]:
+                repos.update(repo for repo, _commit
+                             in parse_commit_refs(row["commitRefs"]) if repo)
+
+    remote_paths = {}
+    for repo in repos:
+        if ":" not in repo:
+            repo_remotes[repo] = None
+            continue
+        host, path = repo.split(":", 1)
+        if not host or not Path(path).is_absolute():
+            repo_remotes[repo] = None
+        elif host in local_hosts:
+            checkout_remote(repo)
+        else:
+            remote_paths.setdefault(host, []).append((repo, path))
+
+    for host, entries in remote_paths.items():
+        ssh = host_ssh.get(host)
+        if not ssh:
+            repo_remotes.update((repo, None) for repo, _path in entries)
+            continue
+        tokens = {}
+        commands = []
+        for index, (repo, path) in enumerate(entries):
+            token = f"p{index}"
+            tokens[token] = repo
+            commands.append(
+                f"printf '%s\\t' {shlex.quote(token)}; "
+                f"git -C {shlex.quote(path)} remote get-url origin 2>/dev/null || true; "
+                "printf '\\n'")
+        remaining = min(1, REMOTE_DEADLINE - time.monotonic())
+        try:
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("ssh", 0)
+            found = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o",
+                 "ConnectTimeout=1", ssh, "; ".join(commands)],
+                capture_output=True, text=True, timeout=remaining)
+        except (OSError, subprocess.TimeoutExpired):
+            found = None
+        resolved = {}
+        if found is not None and found.returncode == 0:
+            for line in found.stdout.splitlines():
+                if "\t" in line:
+                    token, remote = line.split("\t", 1)
+                    if token in tokens:
+                        resolved[tokens[token]] = canonical_remote(remote)
+        for repo, _path in entries:
+            repo_remotes[repo] = resolved.get(repo)
+
+prime_checkout_remotes()
+
 for r in rows:
     wid = r["id"]
     holders = [ids[h["holderKey"]] for h in holders_by.get(wid, ())
@@ -333,10 +523,11 @@ for r in rows:
     for e in ev:
         if not e["commitRefs"]:
             continue
-        found = re.findall(r'"commit"\s*:\s*"([0-9a-f]{7,40})"', e["commitRefs"])
+        found = parse_commit_refs(e["commitRefs"])
         refs.update(found)
         if e["reviews"] is None:
-            prod_refs.update(found)     # a producer citing a commit means code
+            prod_refs.update(commit for _repo, commit in found if commit)
+                                            # a producer citing a commit means code
     kinds = {e["kind"] for e in ev}
     verd = {e["verdictKind"] for e in ev if e["verdictKind"]}
     closed_at = None
@@ -467,11 +658,25 @@ for r in q("""SELECT t.wakeId, w.creatorSessionKey, t.sessionKey, t.startedAt
 
 snap = {"generatedAt": NOW, "agents": agents, "links": links,
         "items": open_items + closed_items, "messages": msgs, "wakes": wakes_out,
-        "mergeSource": {"remote": REMOTE, "branch": BRANCH}}
+        "mergeSources": [
+            {"remote": remote, "branches": list(branches)}
+            for remote, branches in CANONICAL_REFS.items()
+        ]}
 json.dump(snap, open(OUT, "w"))
-if branch_shas:
-    load_equiv_cache()
-    json.dump({"tip": _tip, "v": PROBE_V, "map": equiv_cache}, open(EQUIV, "w"))
+for remote in CANONICAL_REFS:
+    saved = {}
+    for branch in CANONICAL_REFS[remote]:
+        state = equiv.get((remote, branch))
+        loaded = branches.get((remote, branch))
+        if state is None or loaded is None:
+            continue
+        tip = cache_git(remote, "rev-parse", loaded[1]).stdout.strip()
+        if tip:
+            saved[branch] = {"tip": tip, "map": state["map"],
+                             "unknown": state["unknown"]}
+    if saved:
+        json.dump({"v": PROBE_V, "branches": saved},
+                  open(cache_for(remote) / "tb-atc-equiv.json", "w"))
 if DEST:
     cmd = ["scp", "-q"]
     if KEY: cmd += ["-i", KEY, "-o", "IdentitiesOnly=yes"]

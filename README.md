@@ -156,12 +156,21 @@ The generator can also push the snapshot to another machine over ssh; see
 
 **On merge detection.** No attest kind means "merged" — an item can hold a
 completion, a clean review *and* a verified verdict while its code is still off
-the branch. The generator resolves recorded commit SHAs against
-`git@github.com:clickety-clacks/tightbeam-atc.git` at `refs/heads/main`, using a
-service-owned cache under `TB_BASE_DIR` rather than a session checkout. It also
-checks patch identity, so work that landed as a cherry-pick under a rewritten
-SHA is recognised. Missing commits and failed lookups report unknown rather
-than guessing.
+the branch. Each recorded `host:path` checkout is used only to read its `origin`;
+the generator then resolves the commit through a service-owned cache for that
+canonical repository. Arbitrary remote branches are never landing proof. The
+product-owned integration-ref registry is:
+
+- `clickety-clacks/tightbeam-atc`: `main`
+- `clickety-clacks/tightbeam-specs`: `main`
+- `clickety-clacks/lachesis`: `main`
+- `clickety-clacks/tightbeam`: `main` and `0.1.8`
+
+SSH and HTTPS GitHub origins normalize to the same registered identity. A commit
+is merged when any registered ref proves ancestry or patch identity. It is not
+merged only when every registered ref was fetched and every probe proves
+absence. A missing checkout, unregistered origin, missing commit, or failed
+lookup reports unknown rather than guessing.
 
 ## Control API
 
