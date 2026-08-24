@@ -166,6 +166,15 @@ text match a human types. Every search is FILED as a card the human can click
 to run again, so a filter is not a fleeting command — it leaves something
 behind.
 
+**Every call files a card. Nothing here deduplicates for you.** Filing twice
+leaves two cards, even when they are identical: this service will not decide
+that your call was really somebody else's card, because that is state you
+cannot see from the outside. Keeping the pile tidy is YOUR job. Read
+`GET /api/searches` first, and when you are updating something you filed
+before, pass its `searchId` to `POST /api/searches` — that edits the card in
+place instead of minting a twin. Re-running the same question on a schedule
+means reusing one `searchId`, not filing sixty cards.
+
 **Naming is required, not encouraged.** A filter carrying `ids` is REFUSED
 without a `query` or a `label`, and so is a new card through /api/searches. The
 refusal carries this guidance. Name it for WHAT WAS ASKED, not what matched:
@@ -514,19 +523,14 @@ class Handler(BaseHTTPRequestHandler):
 
             if u.path == "/api/filter":
                 # Applying a search also files it, so it can be re-opened after
-                # it is dismissed. Identical searches are refreshed rather than
-                # piled up: a patrol re-running the same query every minute
-                # should leave one card, not sixty.
+                # it is dismissed. This never collapses a new card into an
+                # existing one: silently returning somebody else's card is
+                # state the caller cannot see, and it left agents believing
+                # they had filed something they had not. Deduplicating is the
+                # CALLER's job -- pass `searchId` to update a card you filed
+                # (POST /api/searches), and the pile stays honest about what
+                # was actually asked for.
                 def _file_search(query, ids, author, source, result_kind):
-                    key = (result_kind, query or "", tuple(ids or ()))
-                    for rec in state["searches"].values():
-                        rec_kind = rec.get("resultKind") or ("ids" if rec.get("ids") else "query")
-                        rec_key = (rec_kind,
-                                   rec.get("query") or "", tuple(rec.get("ids") or ()))
-                        if rec_key == key:
-                            rec["at"] = int(time.time() * 1000)
-                            state["searchesRev"] += 1
-                            return rec
                     if len(state["searches"]) >= MAX_SEARCHES:
                         oldest = min(state["searches"].values(), key=lambda x: x.get("at") or 0)
                         del state["searches"][oldest["searchId"]]
