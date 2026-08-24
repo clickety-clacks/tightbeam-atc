@@ -2586,7 +2586,11 @@ function pickAllHover(ev, max = 4){
   selectables().forEach(m => (m.userData.tagSprites || []).forEach(sp => { if (sp.visible) sprites.push(sp); }));
   const consider = o => {
     const owner = ownerOf(o);
-    if (!owner || !owner.userData.type || !nodeLayerOn(owner)) return;
+    /* A ghosted node is out of play: it must not raise a card either. While a
+       focus or filter narrows the view, only what is lit answers the pointer,
+       so the cards on screen describe the set being examined and nothing
+       behind it. Same predicate the click uses, so hover and click agree. */
+    if (!owner || !owner.userData.type || !nodeLayerOn(owner) || !inScope(owner)) return;
     const k = selKey(owner);
     if (!k || seen.has(k)) return;
     seen.add(k); out.push(owner);
@@ -2596,7 +2600,7 @@ function pickAllHover(ev, max = 4){
      .forEach(h => { if (out.length < max) consider(h.object); });
   /* same near-miss tolerance the click uses, so hover and click agree */
   if (!out.length){
-    const near = nodeNearPointer(ev, m => nodeLayerOn(m) && m.userData.type);
+    const near = nodeNearPointer(ev, m => nodeLayerOn(m) && inScope(m) && m.userData.type);
     if (near) consider(near);
   }
   return out.slice(0, max);
