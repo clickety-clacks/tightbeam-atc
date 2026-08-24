@@ -1049,9 +1049,14 @@ function frameTo(pts, center, e, {margin = 1.15, floor = 6} = {}){
     if (x < x0) x0 = x; if (x > x1) x1 = x;
     if (y < y0) y0 = y; if (y > y1) y1 = y;
   }
+  /* Aim BELOW the middle of the subject so the subject renders above centre:
+     the chrome reserving the bottom is a legend read once, and centring in the
+     clear rectangle still left everything sitting low. A world-space aim keeps
+     projection, render, and picking in agreement. */
+  const AIM_LIFT = .16;                 /* fraction of the framed height */
   const aim = center.clone()
     .addScaledVector(right, (x0 + x1) / 2)
-    .addScaledVector(up,    (y0 + y1) / 2);
+    .addScaledVector(up,    (y0 + y1) / 2 - (y1 - y0) * AIM_LIFT);
 
   const dist = Math.max(floor, frameDistance(pts, aim, e, {
     margin, usableH: (b.right - b.left) / b.vw, usableV: (b.bottom - b.top) / b.vh }));
@@ -1078,12 +1083,13 @@ function commitChromeOffset(){
    which happens before the flight starts — snapped the whole image sideways
    and the zoom then appeared to begin somewhere else. Only the destination is
    set here; tickFrame eases toward it, so the pane opening reads as a pan. */
-/* Centring in the clear rectangle still left the subject sitting low, because
-   the chrome that reserves the bottom is a legend a viewer reads once while the
-   space above stays empty. Lift the image by a fraction of the viewport so the
-   subject sits above centre. Applied here, so every framing path — the resting
-   fit, focus, and fit-to-selection — inherits the same bias. */
-const VIEW_LIFT = .07;
+/* Lifting the subject by displacing the PROJECTION was wrong: setViewOffset
+   moves the rendered image, but overlays and the click raycaster read the
+   camera through project()/unproject(), so leaders pointed ~60px off their
+   nodes and clicks landed where the node was not — worst on small distant
+   ones. The lift now moves the camera's AIM in world space (see frameTo), so
+   render, overlays, and picking cannot disagree. */
+const VIEW_LIFT = 0;
 function applyChromeOffset(immediate){
   const b = clearRect();
   chromeAim.x = (b.left + b.right) / 2 - b.vw / 2;
@@ -2409,6 +2415,27 @@ function pickTagOwner(ev){
   const owner = ownerOf(tagHit.object);
   return (owner && nodeLayerOn(owner) && inScope(owner)) ? owner : null;
 }
+/* A node far from the camera projects to two or three pixels, so an exact ray
+   through its geometry is a coin flip — the orphan row parked at the edge of
+   the org is the worst case, and a click that misses reads as the view being
+   broken rather than as a near miss. When nothing is hit exactly, accept the
+   nearest eligible node within a small SCREEN radius, so the tolerance stays
+   constant to the eye instead of shrinking with distance. */
+const PICK_SLOP = 13;
+const _pk = new THREE.Vector3();
+function nodeNearPointer(ev, eligible){
+  let best = null, bestD = PICK_SLOP;
+  for (const m of selectables()){
+    if (!eligible(m)) continue;
+    m.getWorldPosition(_pk).project(camera);
+    if (_pk.z > 1) continue;                       /* behind the camera */
+    const d = Math.hypot((_pk.x + 1) / 2 * innerWidth - ev.clientX,
+                         (1 - _pk.y) / 2 * innerHeight - ev.clientY);
+    if (d < bestD){ bestD = d; best = m; }
+  }
+  return best;
+}
+
 function pickPlainNode(ev){
   mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(mouse, camera);
@@ -2421,7 +2448,7 @@ function pickPlainNode(ev){
     const owner = ownerOf(h.object);
     if (owner && nodeLayerOn(owner) && inScope(owner)) return owner;
   }
-  return null;
+  return nodeNearPointer(ev, m => nodeLayerOn(m) && inScope(m));
 }
 function pickNode(ev){
   return pickTagOwner(ev) || pickPlainNode(ev);
@@ -2567,6 +2594,11 @@ function pickAllHover(ev, max = 4){
   ray.intersectObjects(sprites, false).forEach(h => consider(h.object));
   ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], true)
      .forEach(h => { if (out.length < max) consider(h.object); });
+  /* same near-miss tolerance the click uses, so hover and click agree */
+  if (!out.length){
+    const near = nodeNearPointer(ev, m => nodeLayerOn(m) && m.userData.type);
+    if (near) consider(near);
+  }
   return out.slice(0, max);
 }
 
