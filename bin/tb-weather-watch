@@ -19,14 +19,19 @@ set -u
 BASE="${TB_BASE_DIR:-$HOME/.tightbeam}"
 DB="$BASE/state.db"
 GEN="${TB_WEATHER_GEN:-$(dirname "$0")/tb-weather-gen}"
-MIN_GAP="${TB_WEATHER_MINGAP:-2}"
+# A COOLDOWN between runs, not between starts. Measured from the start, a gap
+# shorter than the run itself is no gap at all: a full pass over a live org
+# takes ~80s, the database changes constantly, so the generator simply ran
+# back-to-back and held a whole CPU core at 100% for a snapshot the page
+# already stamps "Ns ago". Wait this long AFTER a pass completes.
+MIN_GAP="${TB_WEATHER_MINGAP:-60}"
 
 last=0
 regen(){
   now=$(date +%s)
   [ $((now-last)) -lt "$MIN_GAP" ] && return
-  last=$now
   "$GEN" >/dev/null 2>&1
+  last=$(date +%s)                      # cooldown starts when the pass ENDS
 }
 
 regen                                   # publish something before waiting on anything
