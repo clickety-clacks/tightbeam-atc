@@ -860,7 +860,8 @@ class Handler(BaseHTTPRequestHandler):
             "answer in context.note (keep the original note; add a section headed by George's "
             "question). Same options unless the answer changes them. Do not wait for the deadline."
         )
-        ok, out_text, err_text = run_cli(["wake", "--session", raiser_key, "--prompt", prompt])
+        ok, out_text, err_text = run_cli(["--as-user", str(row.get("ownerUserId") or ""),
+                                          "wake", "--session", raiser_key, "--prompt", prompt])
         if not ok:
             return ({"error": "wake failed", "detail": err_text[:500]}, 502)
         with lock:

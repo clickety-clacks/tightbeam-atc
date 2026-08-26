@@ -273,8 +273,9 @@ class AtcApiDecisionsTest(unittest.TestCase):
         calls = self._stub_calls()
         self.assertEqual(1, len(calls))
         args = calls[0]
-        self.assertEqual(["wake", "--session", "s_raiser01", "--prompt"], args[:4])
-        prompt = args[4]
+        self.assertEqual(["--as-user", "george", "wake", "--session", "s_raiser01",
+                          "--prompt"], args[:6])
+        prompt = args[6]
         self.assertIn("dr_open01", prompt)
         self.assertIn("give me the ELI5", prompt)
         self.assertIn("--supersedes dr_open01", prompt)
