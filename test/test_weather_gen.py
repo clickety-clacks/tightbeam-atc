@@ -63,6 +63,81 @@ def make_state_db(path):
 
 
 class WeatherGeneratorEvidenceTest(unittest.TestCase):
+    def test_unlinked_turn_attribution_matches_prior_query_semantics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            con = make_state_db(base / "state.db")
+            sessions = [
+                ("session:live", "live", "active", None, "coder", "codex", "test"),
+                ("session:multi", "multiple", "active", None, "coder", "codex", "test"),
+                ("session:linked", "linked", "active", None, "coder", "codex", "test"),
+                ("session:ended", "ended", "active", None, "coder", "codex", "test"),
+                ("session:null", "null", "active", None, "coder", "codex", "test"),
+                ("session:bad", "non-integer", "active", None, "coder", "codex", "test"),
+            ]
+            con.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)", sessions)
+            item_ids = [
+                "wi_boundary", "wi_pre_turn", "wi_multiple", "wi_direct",
+                "wi_linked_attest", "wi_ended", "wi_null", "wi_non_integer",
+            ]
+            con.executemany(
+                "INSERT INTO work_items VALUES (?, ?, 'open', ?)",
+                [(wid, wid, index) for index, wid in enumerate(item_ids, 1)],
+            )
+            assignments = [
+                ("asg_" + wid, wid, "session:holder", "closed", 1, None)
+                for wid in item_ids
+            ]
+            con.executemany("INSERT INTO assignments VALUES (?, ?, ?, ?, ?, ?)",
+                            assignments)
+            con.executemany(
+                "INSERT INTO turns VALUES (?, ?, NULL, ?, ?, ?)",
+                [
+                    ("session:live", None, 90, 100, None),
+                    ("session:multi", None, 90, 100, None),
+                    ("session:multi", None, 190, 200, None),
+                    ("session:linked", "asg_wi_direct", 90, 100, None),
+                    ("session:ended", None, 90, 100, 200),
+                    ("session:null", None, 90, None, None),
+                    ("session:bad", None, 90, "not-an-epoch", None),
+                ],
+            )
+            con.executemany(
+                "INSERT INTO attests VALUES (?, ?, ?, 'progress', NULL, NULL)",
+                [
+                    ("asg_wi_boundary", "session:live", 100),
+                    ("asg_wi_pre_turn", "session:live", 99),
+                    ("asg_wi_multiple", "session:multi", 150),
+                    ("asg_wi_linked_attest", "session:linked", 150),
+                    ("asg_wi_ended", "session:ended", 150),
+                    ("asg_wi_null", "session:null", 150),
+                    ("asg_wi_non_integer", "session:bad", 150),
+                ],
+            )
+            con.commit()
+            con.close()
+
+            output = base / "weather.json"
+            env = os.environ.copy()
+            env.update({"TB_BASE_DIR": str(base), "TB_WEATHER_OUT": str(output)})
+            env.pop("TB_WEATHER_DEST", None)
+            result = subprocess.run(["python3", str(GENERATOR)], env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stderr)
+
+            snapshot = json.loads(output.read_text())
+            items = {item["id"]: item for item in snapshot["items"]}
+            agents = {agent["name"]: agent["id"] for agent in snapshot["agents"]}
+            self.assertEqual({agents["live"]: "run"}, items["wi_boundary"]["turns"])
+            self.assertEqual({}, items["wi_pre_turn"]["turns"])
+            self.assertEqual({agents["multiple"]: "run"},
+                             items["wi_multiple"]["turns"])
+            self.assertEqual({agents["linked"]: "run"}, items["wi_direct"]["turns"])
+            self.assertEqual({}, items["wi_linked_attest"]["turns"])
+            self.assertEqual({}, items["wi_ended"]["turns"])
+            self.assertEqual({}, items["wi_null"]["turns"])
+            self.assertEqual({}, items["wi_non_integer"]["turns"])
+
     def test_emits_only_durable_evidence_and_canonical_merge_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

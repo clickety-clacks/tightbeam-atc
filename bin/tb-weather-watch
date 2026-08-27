@@ -12,7 +12,7 @@
 # Config (environment):
 #   TB_BASE_DIR       Tightbeam base dir (default ~/.tightbeam)
 #   TB_WEATHER_GEN    path to tb-weather-gen (default: alongside this script)
-#   TB_WEATHER_MINGAP minimum seconds between regenerations (default 2)
+#   TB_WEATHER_MINGAP minimum seconds between regenerations (default 10)
 #   TB_WEATHER_PULSE  seconds between change checks (default 0.5)
 #   TB_WEATHER_BEAT   seconds between heartbeats when nothing changes (default 30)
 set -u

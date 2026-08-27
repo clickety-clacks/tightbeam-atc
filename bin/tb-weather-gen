@@ -335,8 +335,13 @@ last_act = {}
 def _mark(key, ts):
     if key and ts and ts > last_act.get(key, 0):
         last_act[key] = ts
+# SQLite's non-STRICT timestamp columns can hold text or blobs. Only numeric
+# storage classes can participate in the wall-clock arithmetic below.
 for r in q("""SELECT sessionKey, max(coalesce(endedAt, startedAt, createdAt)) AS t
-              FROM turns GROUP BY sessionKey"""):
+              FROM turns
+              WHERE typeof(coalesce(endedAt, startedAt, createdAt))
+                    IN ('integer', 'real')
+              GROUP BY sessionKey"""):
     _mark(r["sessionKey"], r["t"])
 for r in q("SELECT bySession, max(ts) AS t FROM attests GROUP BY bySession"):
     _mark(r["bySession"], r["t"])
@@ -415,10 +420,12 @@ for r in q("""SELECT t.sessionKey, t.startedAt, a.workItemId FROM turns t
 # reads every attest and, for each, every turn its session ever took -- the
 # busiest session here has 200k turns, so a query returning THREE rows cost 54
 # of the pass's 80 seconds. Start from the handful of live turns instead, and
-# bound the attest read by the earliest of them.
+# bound the attest read by the earliest of them. Non-numeric start values never
+# match integer attest timestamps in the old SQL and cannot be ordered in Python.
 live_turns = q("""SELECT sessionKey, startedAt FROM turns
                   WHERE endedAt IS NULL AND startedAt IS NOT NULL
-                    AND assignmentId IS NULL""")
+                    AND assignmentId IS NULL
+                    AND typeof(startedAt) IN ('integer', 'real')""")
 if live_turns:
     started = {}
     for r in live_turns:
