@@ -411,14 +411,29 @@ for r in q("""SELECT t.sessionKey, t.startedAt, a.workItemId FROM turns t
 # PROVABLY touched this turn: attests it filed since the turn started. Rows,
 # not inference — a holder of several cards lights only the one its current
 # turn is writing to, and a turn that files nothing lights nothing.
-for r in q("""SELECT DISTINCT t.sessionKey, a.workItemId FROM turns t
-              JOIN attests att ON att.bySession = t.sessionKey
-                              AND att.ts >= t.startedAt
-              JOIN assignments a ON a.id = att.assignmentId
-              WHERE t.endedAt IS NULL AND t.startedAt IS NOT NULL
-                AND t.assignmentId IS NULL"""):
-    item_run.setdefault(r["workItemId"], set()).add(r["sessionKey"])
-    item_running.setdefault(r["workItemId"], set()).add(r["sessionKey"])
+# Ask this the cheap way round. Joining turns to attests on (session, ts)
+# reads every attest and, for each, every turn its session ever took -- the
+# busiest session here has 200k turns, so a query returning THREE rows cost 54
+# of the pass's 80 seconds. Start from the handful of live turns instead, and
+# bound the attest read by the earliest of them.
+live_turns = q("""SELECT sessionKey, startedAt FROM turns
+                  WHERE endedAt IS NULL AND startedAt IS NOT NULL
+                    AND assignmentId IS NULL""")
+if live_turns:
+    started = {}
+    for r in live_turns:
+        key = r["sessionKey"]
+        if key not in started or r["startedAt"] < started[key]:
+            started[key] = r["startedAt"]
+    for r in q("""SELECT att.bySession, att.ts, a.workItemId FROM attests att
+                  JOIN assignments a ON a.id = att.assignmentId
+                  WHERE att.ts >= ? AND att.bySession IS NOT NULL""",
+               min(started.values())):
+        since = started.get(r["bySession"])
+        if since is None or r["ts"] < since:
+            continue
+        item_run.setdefault(r["workItemId"], set()).add(r["bySession"])
+        item_running.setdefault(r["workItemId"], set()).add(r["bySession"])
 
 pending = {r["sessionKey"] for r in q(
     "SELECT DISTINCT sessionKey FROM wakes WHERE state='pending' AND dueAt <= ?",

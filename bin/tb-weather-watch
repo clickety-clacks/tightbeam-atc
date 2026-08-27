@@ -20,11 +20,10 @@ BASE="${TB_BASE_DIR:-$HOME/.tightbeam}"
 DB="$BASE/state.db"
 GEN="${TB_WEATHER_GEN:-$(dirname "$0")/tb-weather-gen}"
 # A COOLDOWN between runs, not between starts. Measured from the start, a gap
-# shorter than the run itself is no gap at all: a full pass over a live org
-# takes ~80s, the database changes constantly, so the generator simply ran
-# back-to-back and held a whole CPU core at 100% for a snapshot the page
-# already stamps "Ns ago". Wait this long AFTER a pass completes.
-MIN_GAP="${TB_WEATHER_MINGAP:-60}"
+# shorter than the pass is no gap at all: the database changes constantly, so
+# the generator simply ran back-to-back. A pass is ~6s now, so a short gap
+# keeps the board live while leaving the core mostly idle.
+MIN_GAP="${TB_WEATHER_MINGAP:-10}"
 
 last=0
 regen(){
