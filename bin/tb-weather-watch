@@ -12,21 +12,25 @@
 # Config (environment):
 #   TB_BASE_DIR       Tightbeam base dir (default ~/.tightbeam)
 #   TB_WEATHER_GEN    path to tb-weather-gen (default: alongside this script)
-#   TB_WEATHER_MINGAP minimum seconds between regenerations (default 2)
+#   TB_WEATHER_MINGAP minimum seconds between regenerations (default 10)
 #   TB_WEATHER_PULSE  seconds between change checks (default 0.5)
 #   TB_WEATHER_BEAT   seconds between heartbeats when nothing changes (default 30)
 set -u
 BASE="${TB_BASE_DIR:-$HOME/.tightbeam}"
 DB="$BASE/state.db"
 GEN="${TB_WEATHER_GEN:-$(dirname "$0")/tb-weather-gen}"
-MIN_GAP="${TB_WEATHER_MINGAP:-2}"
+# A COOLDOWN between runs, not between starts. Measured from the start, a gap
+# shorter than the pass is no gap at all: the database changes constantly, so
+# the generator simply ran back-to-back. A pass is ~6s now, so a short gap
+# keeps the board live while leaving the core mostly idle.
+MIN_GAP="${TB_WEATHER_MINGAP:-10}"
 
 last=0
 regen(){
   now=$(date +%s)
   [ $((now-last)) -lt "$MIN_GAP" ] && return
-  last=$now
   "$GEN" >/dev/null 2>&1
+  last=$(date +%s)                      # cooldown starts when the pass ENDS
 }
 
 regen                                   # publish something before waiting on anything

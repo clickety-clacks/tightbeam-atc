@@ -13,6 +13,14 @@
     font-family: ui-sans-serif,-apple-system,"Helvetica Neue",Arial,sans-serif; }
   body { position:relative; background:#101214; }
   canvas { display:block; position:absolute; inset:0; width:100%; height:100%; z-index:0; }
+  /* visionOS derives its privacy-preserving gaze highlight from interactive
+     DOM regions. These buttons track only lit canvas nodes and relay their
+     Pointer Events to the canvas, so they add no second activation path. */
+  #spatialtargets { display:none; position:fixed; inset:0; z-index:4; pointer-events:none; }
+  #spatialtargets .spatial-target { position:absolute; transform:translate(-50%,-50%);
+    margin:0; padding:0; border:0; border-radius:50%; background:#00000001;
+    color:transparent; pointer-events:auto; touch-action:none;
+    -webkit-appearance:none; appearance:none; cursor:pointer; }
   /* one top bar owns the top edge; children never position themselves */
   #topbar { position:fixed; top:0; left:0; right:0; z-index:6; display:flex;
     flex-wrap:wrap; align-items:flex-start; justify-content:space-between;
@@ -86,6 +94,9 @@
   #cards .card .who { color:#7c8188; text-transform:none; letter-spacing:.04em; }
   #cards .card .x { color:#7c8188; padding:0 2px; border-radius:3px; }
   #cards .card .x:hover { color:#e0685c; }
+  #cards .card button { border:0; background:transparent; color:inherit; font:inherit;
+    letter-spacing:inherit; text-transform:inherit; cursor:pointer; }
+  #cards .card .rename { display:none; }
   #cards .card .term { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:22ch; }
   #cards .card input.name { font:inherit; letter-spacing:inherit; text-transform:none;
     color:inherit; background:transparent; border:none; outline:none; width:20ch; }
@@ -140,6 +151,7 @@
     text-transform:uppercase; background:#101214e6; border:1px solid #2a2d31;
     border-radius:5px; padding:6px 10px; pointer-events:none; max-width:100%;
     box-sizing:border-box; overflow-wrap:anywhere; }
+  #inputavailability { color:#e0685c; }
   body.light { background:#f2eee2; }
   html:has(body.light) { background:#f2eee2; }
   body.light #hud { color:#5c6b78; background:#f2eee2e8; border-color:#c3cdd8; } body.light #hud b { color:#c23b22; }
@@ -302,13 +314,29 @@
   #selui b { color:#b08d57; }
   body.light #selui { background:#faf7eeee; border-color:#b8c7d9; color:#5c6b78; }
   body.light #selui b { color:#c23b22; }
+  #touchcontrols { display:none; }
+  @media (hover:none) and (pointer:coarse){
+    #spatialtargets { display:block; }
+    #touchcontrols { position:fixed; z-index:10; display:flex; flex-wrap:wrap;
+      justify-content:flex-end; gap:8px; right:calc(10px + env(safe-area-inset-right));
+      bottom:calc(10px + env(safe-area-inset-bottom)); max-width:min(370px, calc(100vw - 20px)); }
+    #touchcontrols button, #layercards button, #cards .card button, #searchclear,
+    #tagswatches button { min-width:60px; min-height:60px; box-sizing:border-box; }
+    #searchwrap, #search { min-height:60px; box-sizing:border-box; }
+    #touchcontrols button { color:#d8d6d1; background:#101214e6; border:1px solid #3a3d42;
+      border-radius:8px; padding:8px; font:600 11px/1.15 ui-sans-serif,-apple-system,
+      "Helvetica Neue",Arial,sans-serif; letter-spacing:.08em; text-transform:uppercase; }
+    body.light #touchcontrols button { color:#26323c; background:#f2eee2e8; border-color:#b8c7d9; }
+    #cards .card .rename { display:inline-block; }
+    #cards .card { min-height:60px; }
+  }
 </style>
 </head>
 <body>
 <div id="topbar">
   <div id="topleft">
     <div id="hud"><span class="title"><b>Tightbeam</b> · air traffic control · </span><span id="mode" class="sample">connecting…</span></div>
-    <div id="themehint">/ search · S select · T theme · L legend · C clear notes</div>
+    <div id="themehint">/ search · S select · T theme · L legend · C clear notes<span id="inputavailability"></span></div>
   </div>
   <div id="topright">
     <div id="searchwrap">
@@ -323,10 +351,18 @@
 </div>
 <div id="stack"></div>
 <div id="layercards" role="group" aria-label="Map layers"></div>
+<div id="touchcontrols" role="group" aria-label="Touch controls">
+  <button type="button" data-action="select" aria-pressed="false">Select</button>
+  <button type="button" data-action="fit">Fit</button>
+  <button type="button" data-action="clear">Clear selection</button>
+  <button type="button" data-action="theme">Theme</button>
+  <button type="button" data-action="legend">Legend</button>
+</div>
 <div id="legend"></div>
 <div id="tip"></div>
 <svg id="leaders"></svg>
 <div id="hovercards"></div>
+<div id="spatialtargets" aria-label="Interactive nodes"></div>
 <div id="detail"></div>
 <div id="tagbox">tag <span class="who"></span><input id="taginput" type="text"
   placeholder="type a note, enter to attach" maxlength="80"><div id="tagswatches"></div></div>
@@ -343,14 +379,13 @@ const edgeMats = new Set();
 let searchTimer = null;      /* declared here so setFilter, above the box, can cancel it */
 const TETHER_SEGS = 40;   /* subdivisions per tether, for the traveling wave */
 
-const STAGE_NAMES = ['specced','building','tests pass','reviewed','verdict clean','gate ready','merged'];
-const SEGS = ['spec bound','producer completion','tests + baselines','independent review','reviewed-clean verdict','merge attest'];
-const KIND_R = { main:1.7, po:1.25, patrol:1.15, orch:1.0, coder:.8, rev:.8, spec:.8 };
+const AGENT_R = .8;
 
 const THEMES = {
   dark: {
     name:'dark', bg:0x101214, fill:0x14171b, fogNear:70, fogFar:190,
     grid1:0x2a2d31, grid2:0x1c1f23,
+    itemOpen:0xc4453c, itemClosed:0x2c7a4b,
     stage:[0xc4453c,0xc97b35,0xc9a835,0xa3b23c,0x6fae4e,0x3f9d63,0x2c7a4b],
     kind:{main:0xb08d57,po:0xa58968,patrol:0xc9a835,orch:0x8a8f96,coder:0x7f8890,rev:0x6b7684,spec:0x91836b},
     liveHot:0x3d8fd6, liveCold:0x4e545c,
@@ -360,7 +395,8 @@ const THEMES = {
     tagHalo:'rgba(16,18,20,.93)',    /* but each glyph keeps its own backing */
     retired:0x33363a, arcA:0xb08d57, arcB:0x22252a,
     tetherRun:0x6fae4e, tetherWait:0xc9a835, tetherSched:0xb9bfc7, pulse:0xb08d57, pulseSub:0x5f6670, pulseUser:0x6f9ecf,
-    discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63, shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
+    discBlack:0x000000, discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63,
+    shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
     flashRun:0x6fae4e, flashWait:0xc9a835,
     metalness:.55, roughness:.3, agentMetal:.75, agentRough:.35, baseEmissive:.25, edges:false,
     amb:0x8a8a92, keyC:0xfff2dd, rimC:0x5b7285,
@@ -368,6 +404,7 @@ const THEMES = {
   light: { /* NASA documentation / plotter paper */
     name:'light', bg:0xf2eee2, fill:0xfaf7ee, fogNear:90, fogFar:230,
     grid1:0xa9bccf, grid2:0xd8dfe6,
+    itemOpen:0xc23b22, itemClosed:0x1f5e46,
     stage:[0xc23b22,0xd07a2a,0xc9a227,0x8a9a2e,0x4e8a4e,0x2e7d5b,0x1f5e46],
     kind:{main:0xc23b22,po:0xb06a3b,patrol:0xc9a227,orch:0x5c6b78,coder:0x6e7b87,rev:0x52616e,spec:0x7a6a4f},
     liveHot:0x2f6fb5, liveCold:0xaab3bc,
@@ -377,7 +414,8 @@ const THEMES = {
     tagHalo:'rgba(250,247,238,.96)',
     retired:0xcdc7b8, arcA:0x26323c, arcB:0xd8dfe6,
     tetherRun:0x2e7d4f, tetherWait:0xb8860b, tetherSched:0x1b232b, pulse:0xc23b22, pulseSub:0x8a97a3, pulseUser:0x3d6ea8,
-    discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3, shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
+    discBlack:0x000000, discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3,
+    shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
     flashRun:0x2e7d4f, flashWait:0xb8860b,
     metalness:.05, roughness:.85, agentMetal:.05, agentRough:.9, baseEmissive:.0, edges:true,
     amb:0xffffff, keyC:0xfff8ec, rimC:0xb8c7d9,
@@ -579,9 +617,46 @@ function homeTarget(){
   });
   return n ? c.multiplyScalar(1 / n) : HOME_TGT.clone();
 }
+
+/* The resting frame is SOLVED from the live org, not a fixed radius. The old
+   constant 66/34 had to be wide enough for the whole board, so the view opened
+   framed on everything — including retired agents and abandoned work parked off
+   to one side. Frame the same population homeTarget() centres on: every
+   non-retired agent and every item something still holds. */
+function livePoints(){
+  const pts = [];
+  selectables().forEach(m => {
+    const u = m.userData;
+    if (u.w && !(u.w.holders || []).length) return;   /* orphaned work */
+    if (u.a && u.a.retired) return;                   /* retired agents */
+    fitPoints(m, pts);
+  });
+  return pts;
+}
+function restingPose(ang){
+  const fallback = new THREE.Vector3(Math.sin(ang)*66, 34, Math.cos(ang)*66);
+  const pts = livePoints();
+  if (!pts.length) return {pos: fallback, target: homeTarget()};
+  const e = new THREE.Vector3(Math.sin(ang), 0, Math.cos(ang))
+    .multiplyScalar(Math.cos(.42)).setY(Math.sin(.42)).normalize();
+  const {camPos, target} = frameTo(pts, homeTarget(), e);
+  return {pos: camPos, target};
+}
 function flyTo(pos, target, after){
   flight = {p0:camera.position.clone(), p1:pos.clone(),
             t0:controls.target.clone(), t1:target.clone(), k:0, after};
+}
+/* End a superseded camera transaction at the pose currently on screen. The
+   orbit adopts that exact pose, so canceling a flight never jumps to either
+   endpoint and never leaves its completion callback able to restore stale
+   framing state. */
+function stopFlightHere(){
+  if (!flight) return;
+  flight = null;
+  const d = camera.position.clone().sub(controls.target);
+  orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+  orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(controls.target);
+  orbitUserOwned = false; userMoved = false;
 }
 let lastGen = 0, agentsHash = '', _rested = false;
 
@@ -1068,9 +1143,14 @@ function frameTo(pts, center, e, {margin = 1.15, floor = 6} = {}){
     if (x < x0) x0 = x; if (x > x1) x1 = x;
     if (y < y0) y0 = y; if (y > y1) y1 = y;
   }
+  /* Aim BELOW the middle of the subject so the subject renders above centre:
+     the chrome reserving the bottom is a legend read once, and centring in the
+     clear rectangle still left everything sitting low. A world-space aim keeps
+     projection, render, and picking in agreement. */
+  const AIM_LIFT = .16;                 /* fraction of the framed height */
   const aim = center.clone()
     .addScaledVector(right, (x0 + x1) / 2)
-    .addScaledVector(up,    (y0 + y1) / 2);
+    .addScaledVector(up,    (y0 + y1) / 2 - (y1 - y0) * AIM_LIFT);
 
   const dist = Math.max(floor, frameDistance(pts, aim, e, {
     margin, usableH: (b.right - b.left) / b.vw, usableV: (b.bottom - b.top) / b.vh }));
@@ -1097,10 +1177,17 @@ function commitChromeOffset(){
    which happens before the flight starts — snapped the whole image sideways
    and the zoom then appeared to begin somewhere else. Only the destination is
    set here; tickFrame eases toward it, so the pane opening reads as a pan. */
+/* Lifting the subject by displacing the PROJECTION was wrong: setViewOffset
+   moves the rendered image, but overlays and the click raycaster read the
+   camera through project()/unproject(), so leaders pointed ~60px off their
+   nodes and clicks landed where the node was not — worst on small distant
+   ones. The lift now moves the camera's AIM in world space (see frameTo), so
+   render, overlays, and picking cannot disagree. */
+const VIEW_LIFT = 0;
 function applyChromeOffset(immediate){
   const b = clearRect();
   chromeAim.x = (b.left + b.right) / 2 - b.vw / 2;
-  chromeAim.y = (b.top + b.bottom) / 2 - b.vh / 2;
+  chromeAim.y = (b.top + b.bottom) / 2 - b.vh / 2 - b.vh * VIEW_LIFT;
   if (immediate){ chromeOff.x = chromeAim.x; chromeOff.y = chromeAim.y; commitChromeOffset(); }
 }
 
@@ -1240,7 +1327,8 @@ function renderCards(){
          + ' title="' + esc(q.label ? q.label + ' — ' + (q.query || (q.ids||[]).length + ' picked') : term)
          + '\ndouble-click to name it">'
          + '<span class="term">' + esc(term) + '</span>' + who
-         + '<span class="x" data-x="' + q.searchId + '">×</span></span>';
+         + '<button type="button" class="rename" data-rename="' + q.searchId + '" aria-label="rename saved search">Rename</button>'
+         + '<button type="button" class="x" data-x="' + q.searchId + '" aria-label="delete saved search">×</button></span>';
   }).join('');
 }
 function esc(v){ return String(v ?? '').replace(/[&<>"]/g, c =>
@@ -1249,6 +1337,12 @@ function esc(v){ return String(v ?? '').replace(/[&<>"]/g, c =>
 function shq(v){ return "'" + String(v).replace(/'/g, "'\\''") + "'"; }
 
 document.getElementById('cards').addEventListener('click', ev => {
+  const rename = ev.target.closest('[data-rename]');
+  if (rename){
+    ev.stopPropagation();
+    beginRename(rename.closest('[data-id]'));
+    return;
+  }
   const kill = ev.target.closest('[data-x]');
   if (kill){
     ev.stopPropagation();
@@ -1272,10 +1366,8 @@ document.getElementById('cards').addEventListener('click', ev => {
 /* Naming a card. A search reads as its terms — "e2e", or "5 picked" — which
    says what was matched and not what it was FOR. A name carries the question:
    "everything blocking the 0.1.8 cut". Double-click to write one. */
-document.getElementById('cards').addEventListener('dblclick', ev => {
-  const card = ev.target.closest('[data-id]');
+function beginRename(card){
   if (!card) return;
-  ev.preventDefault(); ev.stopPropagation();
   const id = card.getAttribute('data-id');
   const q = searches.find(x => x.searchId === id);
   if (!q) return;
@@ -1304,12 +1396,25 @@ document.getElementById('cards').addEventListener('dblclick', ev => {
     if (e.key === 'Enter') done(true);
   });
   field.addEventListener('blur', () => done(true));
+}
+document.getElementById('cards').addEventListener('dblclick', ev => {
+  const card = ev.target.closest('[data-id]');
+  if (!card) return;
+  ev.preventDefault(); ev.stopPropagation();
+  beginRename(card);
 });
 
 /* Re-open a filed search: run it, and put its terms back in the box so they
    can be edited rather than retyped. */
 function openSearch(q){
   activeSearchId = typingCardId = q.searchId;   /* edits land on this card */
+  /* A saved card replaces the active view stack. It keeps the selection, but
+     no focus, fit bookmark, or camera transaction may survive underneath the
+     card and reappear when the filter is later dismissed. */
+  stopFlightHere();
+  camMark = null;
+  view.fit = false;
+  clearFocus();
   /* The terms go back in the box whenever the card has any, whoever filed it.
      An agent's card carries both a picked set and the words describing it, and
      showing an empty box there left no way to adjust the search — which is the
@@ -1317,15 +1422,19 @@ function openSearch(q){
      into a text search, which is what typing in that box has always meant. */
   searchEl.value = q.query || '';
   searchClearBtn.style.display = searchEl.value ? 'block' : 'none';
-  if ((q.ids || []).length) setFilter('agent', {ids: q.ids});
+  /* Before resultKind existed, a non-empty ids list was the fixed-set stamp.
+     Keep those durable cards working; only an EMPTY fixed set needs the new
+     explicit kind because its old shape was indistinguishable from text. */
+  const fixed = q.resultKind === 'ids' || (!q.resultKind && (q.ids || []).length);
+  if (fixed) setFilter('agent', {ids: q.ids || []});
   else setFilter('user', {query: q.query || ''});
   renderCards();
   /* Re-opening a search is applying it, so it belongs on the wire like any
      other filter — otherwise a second page, or an agent asking what is on
      screen, still believes the old one is running. */
   apiFetch('/filter', {method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify((q.ids || []).length
-      ? {ids: q.ids, query: q.query || undefined}
+    body: JSON.stringify(fixed
+      ? {ids: q.ids || [], query: q.query || undefined}
       : {query: q.query || ''})}).catch(()=>{});
 }
 
@@ -1440,20 +1549,21 @@ function measureLegend(){
 }
 
 function renderLegend(){
-  const c = i => '#'+T.stage[i].toString(16).padStart(6,'0');
   const hx = v => '#'+v.toString(16).padStart(6,'0');
   document.getElementById('legend').innerHTML =
-    STAGE_NAMES.map((n,i)=>`<span class="sw" style="background:${c(i)};${i?'margin-left:10px':''}"></span>${n}`).join('') +
+    `<span class="sw" style="background:${hx(T.itemOpen)}"></span>open item` +
+    `<span class="sw" style="background:${hx(T.itemClosed)};margin-left:10px"></span>closed item` +
     `<br><span style="color:${hx(T.tetherRun)}">━ green: turn executing now</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherSched)}">━ faint: holds an open card, no turn</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow: turn queued, not started</span>` +
     `<span style="margin-left:12px">hedron flashing = turn waiting · working ring = turn running (agents and work items)</span>` +
     `<br><span style="color:${hx(T.liveHot)}">● blue agent = acted just now</span>` +
     `<span style="margin-left:8px;color:${hx(T.liveCold)}">● grey = idle an hour or more</span>` +
-    `<span style="margin-left:10px">discs hang below the grid (main deepest, leaves at the surface) · floating solids = work items (altitude = evidence remaining)</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = reviewed, not merged yet</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = in the branch. we have landed</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = nothing to merge</span>` +
+    `<span style="margin-left:10px">discs hang below the grid · floating solids = work items (altitude = evidence remaining) · floor solids = landed</span>` +
+    `<span style="margin-left:10px"><span class="sw" style="background:${hx(T.discBlack)};border:1px solid currentColor"></span>black ring = canonical branch contains the code</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = explicit ready-to-merge verdict</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = durable non-code item</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = code merge state unknown</span>` +
     `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring around an item = orphaned, no live holder</span>` +
     `<span style="margin-left:10px;color:${hx(T.pulse)}">traveling dot = wake</span>` +
     `<span style="margin-left:8px;color:${hx(T.pulse)}">strobing line = message</span>` +
@@ -1486,7 +1596,7 @@ function buildGround(agents){
   roots.forEach((r,i)=>place(r.id, i*(Math.PI*2/roots.length), (i+1)*(Math.PI*2/roots.length), 0));
   agents.forEach(a=>{
     const d = DEPTH[a.id] ?? 2;
-    const r = (KIND_R[a.kind] || KIND_R.coder) * 1.9 * Math.pow(.72, d);
+    const r = AGENT_R * 1.9 * Math.pow(.72, d);
     /* colour is recency, not role: solid blue when it has just acted,
        fading to grey by an hour idle. A name is a guess; a timestamp is a fact. */
     const IDLE_FULL = 3600;
@@ -1569,32 +1679,37 @@ function buildItems(items){
     const anchor = new THREE.Vector3();
     if (active.length){ active.forEach(h=>anchor.add(APOS[h])); anchor.multiplyScalar(1/active.length); anchor.y = 0; }
     else { anchor.set(-55 + (idx%24)*4.6, 0, 62 + Math.floor(idx/24)*5); }
-    const col = T.stage[w.stage];
-    /* on the floor once the evidence is complete; the ring says whether it
-       actually reached the branch */
-    const landed = w.stage >= 5;
-    const j = (idx%5)-2;
+    const closed = w.state === 'closed';
+    /* Altitude IS evidence: items descend as attests accumulate and rest on
+       the floor once the evidence is complete (stage>=5) or the item closes.
+       This is the board's core metaphor (mike: its removal was a regression;
+       restored 2026-08-22). Color grades along the same stages. */
+    const stage = w.stage ?? (closed ? 6 : 0);
+    const landed = stage >= 5;
+    const col = (T.stage && T.stage[stage] != null) ? T.stage[stage]
+              : (closed ? T.itemClosed : T.itemOpen);
     const sc = scatter(w.short || w.id);
     const pos = landed
       ? new THREE.Vector3(anchor.x + sc.x, 1.05, anchor.z + 3.2 + sc.z)
       : new THREE.Vector3(anchor.x + sc.x,
-                          6 + (4 - w.stage)*4.2 + (idx%3)*.8,
+                          6 + (4 - Math.min(stage, 4))*4.2 + (idx%3)*.8,
                           anchor.z + sc.z);
-    const igeo = new THREE.IcosahedronGeometry(landed? .475 : .525, 0);
+    const igeo = new THREE.IcosahedronGeometry(landed ? .475 : .525, 0);
     const mesh = diagramMesh(igeo, col);
     mesh.position.copy(pos);
-    Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, landed, baseY: landed? null : pos.y});
+    Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, closed, landed, baseY: landed? null : pos.y});
     mesh.rotation.y = spin.get(w.id) || 0;
     itemGroup.add(mesh); itemMeshes.push(mesh);
-    if (landed){
-      /* green: the code is in. yellow: code that is not in yet.
-         neutral: nothing to merge, the item just needs closing. */
-      /* yellow is reserved for work proven to be off the branch; anything
-         unverifiable or non-code is neutral, not a pending merge */
-      /* green: in the branch. yellow: reviewed and ready, not merged yet.
-         grey: nothing to merge (a ruling, recon, guidance) */
-      const dcol = (w.stage>=6 || w.merged===true) ? T.discG
-                 : (w.code && w.merged===false)    ? T.discY : T.discN;
+    /* The merge ring is a statement about LANDED work. An open item that has
+       not claimed landing gets no ring: "merge unknown" is a tautology for
+       unfinished work, not an alarm. */
+    const landedRing = landed;
+    const dcol = w.merged === true ? T.discBlack
+               : w.readyToMerge === true ? T.discG
+               : w.code === false ? T.discN
+               : w.code === true && w.merged == null ? T.discY
+               : null;
+    if (landedRing && dcol != null){
       /* solid ring, not a wireframe: the named radius is the OUTER edge and
          the band runs inward from it */
       const R = .8, BAND = .18;
@@ -1608,11 +1723,11 @@ function buildItems(items){
     }
     const vals = Object.values(w.turns||{});
     const act = vals.includes('run') ? 'run' : vals.includes('wait') ? 'wait' : null;
-    if (act==='run' && w.stage<6){
+    if (act==='run' && w.state==='open'){
       mesh.userData.workingRing = true;
       mesh.userData.ringR = .78;
     }
-    if (act==='wait' && w.stage<6) mesh.userData.waitFlash = true;
+    if (act==='wait' && w.state==='open') mesh.userData.waitFlash = true;
     /* custody: an agent holding an open card on this item. Drawn for every
        holder that has no live turn — a turn tether supersedes it. */
     (w.holders||[]).forEach(hid=>{
@@ -1644,7 +1759,7 @@ function buildItems(items){
         new THREE.MeshBasicMaterial({color:T.halo, side:THREE.DoubleSide, transparent:true, opacity:.7}));
       halo.userData={pulse:true}; mesh.add(halo);
     }
-    if (!active.length){
+    if (w.state==='open' && !active.length){
       /* orphan mark: a billboard ring AROUND the item, so it never reads as a
          landing marker on the ground */
       const ring = new THREE.Mesh(new THREE.RingGeometry(.78,.9,48),
@@ -2050,8 +2165,8 @@ function applyCommand(c){
     focusNode(selKeyFor(c.id), c.mode === 'neighborhood' ? 'neighborhood' : 'single');
   } else if (c.kind === 'filter'){
     if (c.clear){ setFilter('none'); activeSearchId = typingCardId = null; renderCards(); }
-    else if ((c.ids || []).length){
-      setFilter('agent', {ids: c.ids});
+    else if (c.resultKind === 'ids' || (c.ids || []).length){
+      setFilter('agent', {ids: c.ids || []});
       if (c.searchId){ activeSearchId = c.searchId; renderCards(); }
     } else if (c.query){
       /* a text search on the wire — the same thing a human types */
@@ -2126,7 +2241,17 @@ async function refresh(){
       const rest = homeTarget();
       if (firstSnapshot || rest.distanceToSquared(orbitTgt) > .25){
         _rested = true;
-        orbitTgt.copy(rest);
+        /* The opening view is fitted to the live org, once. Later snapshots
+           only re-centre: refitting under a resting viewer would jolt the
+           distance every time a node appeared. */
+        if (firstSnapshot){
+          const pose = restingPose(Math.atan2(camera.position.x, camera.position.z));
+          camera.position.copy(pose.pos);
+          orbitTgt.copy(pose.target);
+          const d = pose.pos.clone().sub(pose.target);
+          orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+          orbitAngle = Math.atan2(d.x, d.z);
+        } else orbitTgt.copy(rest);
         controls.target.copy(orbitTgt);
       }
     }
@@ -2201,6 +2326,19 @@ refresh(); setInterval(refresh, 5000);
 /* the desk countdown must tick even when the org is quiet and data.json is
    not regenerating — driven by wall clock, independent of the data poll */
 setInterval(renderDesk, 30000);
+document.getElementById('touchcontrols').addEventListener('click', e => {
+  const action = e.target.closest('button[data-action]')?.dataset.action;
+  if (!action) return;
+  if (action === 'select') setInputMode(view.input === 'brush' ? 'navigate' : 'brush');
+  else if (action === 'fit') fitSelection();
+  else if (action === 'clear') clearSelection();
+  else if (action === 'theme'){ T = T.name === 'dark' ? THEMES.light : THEMES.dark; applyTheme(); }
+  else if (action === 'legend'){
+    legendUserSet = true;
+    document.getElementById('legend').classList.toggle('collapsed');
+    measureLegend();
+  }
+});
 /* a read-only window onto the page's state, for tests and for anything
    driving the view from a console */
 window.__atc = {
@@ -2246,25 +2384,56 @@ window.__atc = {
   get THREE(){ return THREE; },
   get scope(){ return {items: hiItems && [...hiItems], agents: hiAgents && [...hiAgents]}; },
   get relations(){ return hiRelations && [...hiRelations]; },
-  inScope,
+  inScope, setInputMode,
+  get spatialTargets(){ return [...document.querySelectorAll('.spatial-target')]; },
+  get gestureState(){ return {canvasPointers:[...canvasPointers],
+    tapPointer:tapGesture?.id ?? null,
+    touchHold:touchHold && {x:touchHold.x, y:touchHold.y,
+      keys:[...touchHold.keys], shown:touchHold.shown},
+    brushPointer, selecting}; },
   pull: apiPull,
 };
 apiLoop();
 setInterval(apiReportSelection, 2000);
 
-/* ---------- click: focus an item, background zooms out ---------- */
-let downXY = null;
+/* ---------- pointer activation: focus an item, background zooms out ---------- */
 /* Only the canvas drives the camera. Without this, clicking into the tag box
    or the search field also lands as a background click and clears the focus
    the box is attached to. */
 const onCanvas = e => e.target === renderer.domElement;
-addEventListener('pointerdown', e=>{ if (view.input==='brush' || !onCanvas(e)) return; downXY=[e.clientX,e.clientY]; });
-addEventListener('pointerup', e=>{
-  if (view.input==='brush' || !onCanvas(e)) return;
-  if (!downXY) return;
-  const moved = Math.hypot(e.clientX-downXY[0], e.clientY-downXY[1]); downXY=null;
-  if (moved > 6) return;                       /* it was a drag, not a click */
-  const hit = pickClick(e);
+const canvasPointers = new Set();
+let tapGesture = null;
+let touchHold = null;
+function cancelTouchHold(clear = true){
+  if (!touchHold) return;
+  clearTimeout(touchHold.timer);
+  if (clear && touchHold.shown) clearHover();
+  touchHold = null;
+}
+function touchHoldKeys(e){
+  return pickAllHover(e).map(selKey).filter(Boolean);
+}
+function startTouchHold(e){
+  if (e.pointerType !== 'touch') return;
+  /* Nodes keep bobbing during the 450 ms. Capture what the finger actually
+     pressed, then re-resolve those keys after a feed rebuild instead of
+     raycasting a later frame and losing a node that moved away underneath. */
+  const hold = {id:e.pointerId, x:e.clientX, y:e.clientY, shown:false,
+                keys:touchHoldKeys(e)};
+  hold.timer = setTimeout(() => {
+    if (touchHold !== hold || !tapGesture || tapGesture.multi || view.input === 'brush') return;
+    /* Holding is inspection even when the ray hits empty canvas. Consume the
+       release before resolving node content so a quiet hold can never pop a
+       focus layer. */
+    tapGesture.consumed = true;
+    const nodes = hold.keys.map(meshForKey).filter(Boolean);
+    if (!nodes.length) return;
+    hold.shown = true;
+    showHover(nodes, hold);
+  }, 450);
+  touchHold = hold;
+}
+function activateHit(hit){
   if (hit && hit.kind === 'arrow'){
     deskFocus = null;               /* a real scene click always wins over the desk pane */
     focusArrow(hit.obj);
@@ -2286,10 +2455,11 @@ addEventListener('pointerup', e=>{
     camMark = null;
     clearFocus();
     const ang = Math.atan2(camera.position.x, camera.position.z);
-    const home = new THREE.Vector3(Math.sin(ang)*66, 34, Math.cos(ang)*66);
-    const rest = homeTarget();
-    flyTo(home, rest, ()=>{
-      orbitAngle = ang; orbitR = 66; orbitH = 36; orbitTgt.copy(rest);
+    const pose = restingPose(ang);
+    flyTo(pose.pos, pose.target, ()=>{
+      const d = pose.pos.clone().sub(pose.target);
+      orbitAngle = ang; orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+      orbitTgt.copy(pose.target);
       orbitUserOwned = false; userMoved = false;
     });
   } else {
@@ -2302,6 +2472,103 @@ addEventListener('pointerup', e=>{
     orbitTgt.copy(controls.target);
     orbitUserOwned = true; userMoved = false;
   }
+}
+function activateAt(e){ activateHit(pickClick(e)); }
+addEventListener('pointerdown', e=>{
+  if (view.input === 'brush' || !onCanvas(e)) return;
+  canvasPointers.add(e.pointerId);
+  if (canvasPointers.size === 1){
+    tapGesture = {id:e.pointerId, x:e.clientX, y:e.clientY,
+                  multi:false, consumed:false, dragged:false,
+                  pointerType:e.pointerType, startedAt:e.timeStamp, holdMoved:false,
+                  targetKey:spatialPointerTargets.get(e.pointerId)?.key || null};
+    startTouchHold(e);
+  } else {
+    if (tapGesture) tapGesture.multi = true; /* a second contact belongs only to the camera */
+    cancelTouchHold();
+  }
+}, true);
+addEventListener('pointermove', e=>{
+  if (!tapGesture || e.pointerId !== tapGesture.id) return;
+  const moved = Math.hypot(e.clientX - tapGesture.x, e.clientY - tapGesture.y);
+  if (moved > 6) tapGesture.dragged = true; /* crossing is permanent, even after returning */
+  if (moved > 10){ tapGesture.holdMoved = true; cancelTouchHold(); }
+});
+function finishTapGesture(e, cancelled){
+  if (!canvasPointers.has(e.pointerId)) return;
+  canvasPointers.delete(e.pointerId);
+  const tap = tapGesture && tapGesture.id === e.pointerId ? tapGesture : null;
+  if (tap){
+    const moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y);
+    /* A busy render frame can delay the 450 ms timer until after pointerup.
+       Elapsed event time still makes a stationary touch a hold, never a tap. */
+    if (tap.pointerType === 'touch' && !tap.holdMoved
+        && e.timeStamp - tap.startedAt >= 450) tap.consumed = true;
+    const activate = !cancelled && !tap.multi && !tap.consumed
+      && !tap.dragged && moved <= 6;
+    cancelTouchHold();
+    tapGesture = null;
+    if (activate && tap.targetKey){
+      const target = meshForKey(tap.targetKey);
+      if (target && nodeLayerOn(target) && inScope(target))
+        activateHit({kind:'node', obj:target});
+    } else if (activate) activateAt(e);
+  }
+  if (!canvasPointers.size) tapGesture = null;
+}
+addEventListener('pointerup', e=>{
+  if (view.input !== 'brush' && onCanvas(e)) finishTapGesture(e, false);
+});
+addEventListener('pointercancel', e=>finishTapGesture(e, true));
+addEventListener('lostpointercapture', e=>finishTapGesture(e, true));
+
+/* A projected button is the interaction region Safari can highlight before a
+   pinch. Relay its real Pointer Event to the canvas; OrbitControls then takes
+   capture and every activation still passes through activateAt()/pickClick(). */
+const spatialLayer = document.getElementById('spatialtargets');
+const spatialMedia = matchMedia('(hover:none) and (pointer:coarse)');
+const hoverMedia = matchMedia('(hover:hover)');
+function updateInputAvailability(){
+  document.getElementById('inputavailability').textContent =
+    !hoverMedia.matches && !spatialMedia.matches ? ' · node inspection unavailable' : '';
+}
+spatialMedia.addEventListener('change', updateInputAvailability);
+hoverMedia.addEventListener('change', updateInputAvailability);
+updateInputAvailability();
+function relaySpatialPointer(e){
+  const button = e.target.closest('.spatial-target');
+  if (!button) return;
+  e.preventDefault();
+  const expected = meshForKey(button.dataset.key);
+  const hit = pickClick(e);
+  if (e.type === 'pointerdown'){
+    if (!expected || !hit || hit.kind !== 'node' || hit.obj !== expected) return;
+    spatialPointerTargets.set(e.pointerId, {key:button.dataset.key});
+    try { button.setPointerCapture(e.pointerId); } catch(err){}
+  } else if (!spatialPointerTargets.has(e.pointerId)) return;
+  let type = e.type;
+  let finished = false;
+  if (e.type === 'pointerup'){
+    finished = true;
+    try { button.releasePointerCapture(e.pointerId); } catch(err){}
+  } else if (e.type === 'pointercancel' || e.type === 'lostpointercapture'){
+    type = 'pointercancel'; finished = true;
+  }
+  const forwarded = new PointerEvent(type, {
+    bubbles:true, cancelable:true, pointerId:e.pointerId, pointerType:e.pointerType,
+    isPrimary:e.isPrimary, clientX:e.clientX, clientY:e.clientY,
+    screenX:e.screenX, screenY:e.screenY, button:e.button, buttons:e.buttons,
+    pressure:e.pressure, width:e.width, height:e.height,
+    altKey:e.altKey, ctrlKey:e.ctrlKey, metaKey:e.metaKey, shiftKey:e.shiftKey
+  });
+  renderer.domElement.dispatchEvent(forwarded);
+  if (finished) spatialPointerTargets.delete(e.pointerId);
+}
+const spatialPointerTargets = new Map();
+['pointerdown','pointermove','pointerup','pointercancel','lostpointercapture'].forEach(type =>
+  spatialLayer.addEventListener(type, relaySpatialPointer));
+spatialLayer.addEventListener('click', e => {
+  if (e.target.closest('.spatial-target')){ e.preventDefault(); e.stopPropagation(); }
 });
 
 /* A tag, a name label, an orphan ring and a turn shell are all children of the
@@ -2327,6 +2594,27 @@ function pickTagOwner(ev){
   const owner = ownerOf(tagHit.object);
   return (owner && nodeLayerOn(owner) && inScope(owner)) ? owner : null;
 }
+/* A node far from the camera projects to two or three pixels, so an exact ray
+   through its geometry is a coin flip — the orphan row parked at the edge of
+   the org is the worst case, and a click that misses reads as the view being
+   broken rather than as a near miss. When nothing is hit exactly, accept the
+   nearest eligible node within a small SCREEN radius, so the tolerance stays
+   constant to the eye instead of shrinking with distance. */
+const PICK_SLOP = 13;
+const _pk = new THREE.Vector3();
+function nodeNearPointer(ev, eligible){
+  let best = null, bestD = PICK_SLOP;
+  for (const m of selectables()){
+    if (!eligible(m)) continue;
+    m.getWorldPosition(_pk).project(camera);
+    if (_pk.z > 1) continue;                       /* behind the camera */
+    const d = Math.hypot((_pk.x + 1) / 2 * innerWidth - ev.clientX,
+                         (1 - _pk.y) / 2 * innerHeight - ev.clientY);
+    if (d < bestD){ bestD = d; best = m; }
+  }
+  return best;
+}
+
 function pickPlainNode(ev){
   mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(mouse, camera);
@@ -2339,7 +2627,7 @@ function pickPlainNode(ev){
     const owner = ownerOf(h.object);
     if (owner && nodeLayerOn(owner) && inScope(owner)) return owner;
   }
-  return null;
+  return nodeNearPointer(ev, m => nodeLayerOn(m) && inScope(m));
 }
 function pickNode(ev){
   return pickTagOwner(ev) || pickPlainNode(ev);
@@ -2399,23 +2687,33 @@ function pickClick(ev){
 function nodeContent(u, clamp){
   if (u.type === 'item'){
     const w = u.w;
-    const segs = SEGS.map((x,i)=>(i<w.stage?'●':'○')+' '+x).join('<br>');
+    const attestKinds = (w.attestKinds||[]).map(esc);
+    const verdictKinds = (w.verdictKinds||[]).map(esc);
+    const evidence = [
+      'attests: ' + (attestKinds.join(', ') || 'none'),
+      'verdicts: ' + (verdictKinds.join(', ') || 'none'),
+      'assignments: ' + (w.assignments?.open || 0) + ' open · '
+        + (w.assignments?.terminal || 0) + ' terminal',
+    ].join('<br>');
     const acts = Object.entries(w.turns||{}).map(([h,st])=>
       (st==='run'?'▶ ':'⏸ ')+(byId[h]?agentLabel(byId[h]):h)).join('<br>') || 'no turns active';
     const merged = w.merged === true ? 'in the branch'
                  : w.merged === false ? 'NOT in the branch'
-                 : (w.code ? 'branch state unknown' : 'nothing to merge');
+                 : w.code === true ? 'branch state unknown'
+                 : w.code === false ? 'nothing to merge'
+                 : 'code classification unknown';
     return '<span class="t">' + (w.short || w.id) + '</span>'
       + '<div' + (clamp ? ' class="clamp5"' : '') + '>' + w.title + '</div>'
-      + '<span class="k">state</span>' + STAGE_NAMES[w.stage] + ' · ' + merged
-      + ((w.holders||[]).length ? '' : ' · ORPHANED')
-      + '<span class="k">evidence</span><span class="seg">' + segs + '</span>'
+      + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · ' + merged
+      + (w.readyToMerge ? ' · ready-to-merge verdict filed' : '')
+      + (w.state!=='open' || (w.holders||[]).length ? '' : ' · no open holder')
+      + '<span class="k">evidence</span><span class="seg">' + evidence + '</span>'
       + '<span class="k">turns</span><span class="seg">' + acts + '</span>'
       /* the pane has room, and this is the id the CLI will accept */
       + (clamp ? '' : '<span class="k">id</span><span class="seg">' + w.id + '</span>');
   }
   const a = u.a;
-  const held = ((DATA&&DATA.items)||[]).filter(w=>(w.holders||[]).includes(a.id) && w.stage<6).length;
+  const held = ((DATA&&DATA.items)||[]).filter(w=>(w.holders||[]).includes(a.id) && w.state==='open').length;
   const idle = a.idleFor == null ? 'never acted'
     : a.idleFor < 90 ? 'acting now'
     : a.idleFor < 3600 ? Math.round(a.idleFor/60) + ' min idle'
@@ -2709,6 +3007,18 @@ function renderDetail(){
   if (!m){ detailEl.style.display = 'none'; return; }
   detailEl.innerHTML = nodeContent(m.userData, false);
   detailEl.style.display = 'block';
+  /* On a wide screen the detail pane shares the saved-card edge. Begin it
+     below the pile so every card remains a reachable control while a node is
+     focused. Portrait owns the bottom edge and keeps its CSS layout. */
+  if (!matchMedia('(max-aspect-ratio: 1/1)').matches){
+    const pile = document.getElementById('cards').getBoundingClientRect();
+    const top = Math.max(76, pile.bottom + 10);
+    detailEl.style.top = top + 'px';
+    detailEl.style.maxHeight = Math.max(80, innerHeight - top - 18) + 'px';
+  } else {
+    detailEl.style.top = '';
+    detailEl.style.maxHeight = '';
+  }
 }
 
 /* ---------- tooltip ---------- */
@@ -2726,7 +3036,11 @@ function pickAllHover(ev, max = 4){
   selectables().forEach(m => (m.userData.tagSprites || []).forEach(sp => { if (sp.visible) sprites.push(sp); }));
   const consider = o => {
     const owner = ownerOf(o);
-    if (!owner || !owner.userData.type || !nodeLayerOn(owner)) return;
+    /* A ghosted node is out of play: it must not raise a card either. While a
+       focus or filter narrows the view, only what is lit answers the pointer,
+       so the cards on screen describe the set being examined and nothing
+       behind it. Same predicate the click uses, so hover and click agree. */
+    if (!owner || !owner.userData.type || !nodeLayerOn(owner) || !inScope(owner)) return;
     const k = selKey(owner);
     if (!k || seen.has(k)) return;
     seen.add(k); out.push(owner);
@@ -2734,6 +3048,11 @@ function pickAllHover(ev, max = 4){
   ray.intersectObjects(sprites, false).forEach(h => consider(h.object));
   ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], true)
      .forEach(h => { if (out.length < max) consider(h.object); });
+  /* same near-miss tolerance the click uses, so hover and click agree */
+  if (!out.length){
+    const near = nodeNearPointer(ev, m => nodeLayerOn(m) && inScope(m) && m.userData.type);
+    if (near) consider(near);
+  }
   return out.slice(0, max);
 }
 
@@ -2849,6 +3168,7 @@ function aimLeaders(){
 
 let hoverGrace = null;
 addEventListener('pointermove', e => {
+  if (e.pointerType === 'touch') return;
   if (!onCanvas(e)){ clearTimeout(hoverGrace); hoverGrace = null; return clearHover(); }
   const nodes = pickAllHover(e);
   if (!nodes.length){
@@ -2900,6 +3220,119 @@ function screenXY(o){
   _sv.copy(o.position); _sv.project(camera);
   return [(_sv.x*.5+.5)*innerWidth, (-_sv.y*.5+.5)*innerHeight, _sv.z];
 }
+const spatialButtons = new Map();
+const _spatialWorld = new THREE.Vector3(), _spatialScale = new THREE.Vector3();
+let spatialTruthAfter = 0;
+function clearSpatialTargets(){
+  spatialButtons.clear();
+  if (spatialLayer.childElementCount) spatialLayer.textContent = '';
+}
+function invalidateSpatialTargets(){
+  spatialTruthAfter = 0;
+  clearSpatialTargets();
+}
+function spatialHitIs(m, x, y){
+  const hit = pickClick({clientX:x, clientY:y});
+  if (hit?.kind !== 'node' || hit.obj !== m) return false;
+  /* Rings, labels, and pulses can grow or disappear. They keep normal canvas
+     ownership, but only the stable node body defines a persistent system
+     region. */
+  mouse.set((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  return !!ray.intersectObject(m, false)[0];
+}
+function truthfulSpatialShape(m, x, y, radius){
+  /* Use one inscribed circle, never a polygon joining rays with different
+     valid lengths. The old chords filled untested pixels between spokes. */
+  const count = 48, limit = Math.min(radius, 8);
+  let edge = limit;
+  for (let i = 0; i < count; i++){
+    const a = i * Math.PI * 2 / count, dx = Math.cos(a), dy = Math.sin(a);
+    for (let r = 1; r <= limit; r++){
+      if (spatialHitIs(m, x + dx*r, y + dy*r)) continue;
+      edge = Math.min(edge, r - 1.5); /* angular and subpixel safety margin */
+      break;
+    }
+  }
+  edge = Math.max(.25, edge);
+  /* Match the browser review boundary exactly: every integer CSS-pixel centre
+     that the clipped circle can own must resolve through the normal picker to
+     this same stable node body. Shrinking cannot add a new owned pixel. */
+  for (let py = Math.ceil(y-edge); py < Math.floor(y+edge); py++){
+    for (let px = Math.ceil(x-edge); px < Math.floor(x+edge); px++){
+      const sx = px + .5, sy = py + .5;
+      const d = Math.hypot(sx-x, sy-y);
+      if (d > edge || spatialHitIs(m, sx, sy)) continue;
+      edge = Math.max(.25, d - .75);
+    }
+  }
+  return 'circle(' + edge.toFixed(3) + 'px at 50% 50%)';
+}
+function updateSpatialTargets(){
+  /* A coarse non-hovering pointer is the capability Safari exposes for
+     eye-and-hand input. Desktop never receives this extra hit surface. */
+  if (!spatialMedia.matches || view.input === 'brush') return clearSpatialTargets();
+  const keep = new Set();
+  const now = performance.now();
+  const refreshTruth = now >= spatialTruthAfter;
+  /* This runs before renderer.render(). Synchronize every world transform now;
+     otherwise the first target set can be validated against last frame's
+     matrices and remain falsely advertised until the quiet refresh. */
+  scene.updateMatrixWorld(true);
+  camera.updateMatrixWorld(true);
+  selectables().forEach(m => {
+    if (!nodeLayerOn(m) || !inScope(m)) return;       /* ghosted means no false highlight */
+    const key = selKey(m); if (!key) return;
+    m.getWorldPosition(_spatialWorld);
+    const projected = _spatialWorld.clone().project(camera);
+    if (projected.z < -1 || projected.z > 1 || Math.abs(projected.x) > 1.08 || Math.abs(projected.y) > 1.08) return;
+    /* Layout snaps CSS positions to 1/64 px. Validate and publish that same
+       coordinate; a raw floating-point center can straddle a depth edge that
+       the snapped DOM center lands on the other side of. */
+    const x = Math.round((projected.x * .5 + .5) * innerWidth * 64) / 64;
+    const y = Math.round((-projected.y * .5 + .5) * innerHeight * 64) / 64;
+    if (!spatialHitIs(m, x, y)) return;       /* keep visible hit precedence truthful */
+    m.geometry.computeBoundingSphere();
+    const geometryRadius = m.geometry.boundingSphere?.radius || 1;
+    m.getWorldScale(_spatialScale);
+    const depth = Math.max(.1, -_spatialWorld.clone().applyMatrix4(camera.matrixWorldInverse).z);
+    const px = geometryRadius * Math.max(_spatialScale.x, _spatialScale.y, _spatialScale.z)
+      * innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * depth);
+    const radius = Math.max(10, Math.min(24, Math.ceil(px * 1.2)));
+    let button = spatialButtons.get(key);
+    let shape = button?._spatialShape || '';
+    const shifted = !button || Math.hypot(x - button._spatialTruthX,
+                                          y - button._spatialTruthY) > 1
+                              || button._spatialBoxRadius !== radius;
+    if (refreshTruth || shifted){
+      shape = truthfulSpatialShape(m, x, y, radius);
+      if (button){ button._spatialTruthX = x; button._spatialTruthY = y; }
+    }
+    keep.add(key);
+    if (!button){
+      button = document.createElement('button');
+      button.type = 'button'; button.className = 'spatial-target'; button.dataset.key = key;
+      spatialButtons.set(key, button); spatialLayer.appendChild(button);
+    }
+    button._spatialShape = shape; button._spatialBoxRadius = radius;
+    if (button._spatialTruthX == null){ button._spatialTruthX = x; button._spatialTruthY = y; }
+    const u = m.userData;
+    button.setAttribute('aria-label', u.w
+      ? 'Work item ' + (u.w.short || u.w.id) + ': ' + u.w.title
+      : 'Agent ' + u.a.name);
+    const size = Math.round(radius * 2);
+    button.style.left = x + 'px'; button.style.top = y + 'px';
+    button.style.width = button.style.height = size + 'px';
+    button.style.clipPath = shape;
+  });
+  spatialButtons.forEach((button, key) => {
+    if (keep.has(key)) return;
+    button.remove(); spatialButtons.delete(key);
+  });
+  /* Start the quiet interval after the scan finishes. A long scan must not
+     make every following frame immediately run another one. */
+  if (refreshTruth) spatialTruthAfter = performance.now() + 2000;
+}
 function shadeSelected(mesh, on){
   const u = mesh.userData;
   u.selected = on;
@@ -2926,6 +3359,9 @@ function shadeSelected(mesh, on){
    applied per frame in tickFrame() because they animate. Both stay consistent
    because every rebuild ends in applyView(). */
 function buildTags(){
+  /* Tags win normal hit precedence. Never leave a pre-tag node region
+     advertised during an asynchronous API or data refresh. */
+  invalidateSpatialTargets();
   /* tags live as children of the node they name, so they inherit its motion */
   selectables().forEach(m => {
     (m.userData.tagSprites || []).forEach(sp => {
@@ -3040,6 +3476,9 @@ function meshForKey(k){
 }
 
 function buildArrows(){
+  /* Arrows also win node hit precedence. Clear the old node regions before
+     changing that surface; the next frame republishes post-arrow truth. */
+  invalidateSpatialTargets();
   while (arrowGroup.children.length){
     const g = arrowGroup.children.pop();
     g.traverse(o => {
@@ -3312,8 +3751,9 @@ function setInputMode(mode){
   controls.enabled = !brushing;
   selUI.classList.toggle('off', !brushing);
   selCursor.style.display = brushing ? 'block' : 'none';
-  if (!brushing){ selecting = false; selOp = null; selCursor.classList.remove('unsel');
-                  flushHeldCommands(); }
+  if (!brushing) finishBrush(brushPointer, true);
+  document.querySelector('#touchcontrols [data-action="select"]')
+    ?.setAttribute('aria-pressed', String(brushing));
   renderStack();                     /* the strip names the input mode too */
 }
 /* Unconditional hard reset of the focus transaction: no layer, camera released
@@ -3340,21 +3780,41 @@ function setRadius(px){
 setRadius(selRadius);
 selRad.addEventListener('input', e => setRadius(+e.target.value));
 
+let brushPointer = null;
+const brushContacts = new Set();
+function finishBrush(pointerId, cancelled = false){
+  if (brushPointer == null || (pointerId != null && pointerId !== brushPointer)) return;
+  const id = brushPointer;
+  brushPointer = null; selecting = false; selOp = null;
+  selCursor.classList.remove('unsel');
+  try { renderer.domElement.releasePointerCapture(id); } catch(e){}
+  flushHeldCommands();                 /* every end path releases held commands once */
+}
 addEventListener('pointermove', e => {
-  if (view.input !== 'brush') return;
+  if (view.input !== 'brush' || e.pointerId !== brushPointer) return;
   selCursor.style.left = e.clientX + 'px';
   selCursor.style.top  = e.clientY + 'px';
   if (selecting) paintAt(e.clientX, e.clientY);
 }, true);
 addEventListener('pointerdown', e => {
   if (view.input !== 'brush' || e.target !== renderer.domElement) return;
-  selecting = true; selOp = null;
+  brushContacts.add(e.pointerId);
+  if (brushContacts.size > 1){ finishBrush(brushPointer, true); return; }
+  brushPointer = e.pointerId; selecting = true; selOp = null;
+  try { renderer.domElement.setPointerCapture(e.pointerId); } catch(err){}
   paintAt(e.clientX, e.clientY);
 }, true);
-addEventListener('pointerup', () => {
-  if (view.input !== 'brush') return;
-  selecting = false; selOp = null; selCursor.classList.remove('unsel');
-  flushHeldCommands();                 /* the stroke is committed; agents may act now */
+addEventListener('pointerup', e => {
+  brushContacts.delete(e.pointerId);
+  if (view.input === 'brush') finishBrush(e.pointerId);
+}, true);
+addEventListener('pointercancel', e => {
+  brushContacts.delete(e.pointerId);
+  finishBrush(e.pointerId, true);
+}, true);
+addEventListener('lostpointercapture', e => {
+  brushContacts.delete(e.pointerId);
+  finishBrush(e.pointerId, true);
 }, true);
 
 /* f/space is a round trip: the first press remembers exactly where the camera
@@ -3793,7 +4253,8 @@ function tickFrame(){
     camera.position.lerpVectors(flight.p0, flight.p1, e);
     controls.target.lerpVectors(flight.t0, flight.t1, e);
     if (flight.k >= 1){ flight.after?.(); flight = null; }
-  } else if (!userMoved && view.framing!=='restoring' && view.input!=='brush'){
+  } else if (!userMoved && view.framing!=='restoring' && view.input!=='brush'
+             && !spatialMedia.matches){
     orbitAngle += .00057;          /* the ambient turntable, at two thirds */
     camera.position.set(orbitTgt.x + Math.sin(orbitAngle)*orbitR,
                         orbitTgt.y + orbitH,
@@ -3913,13 +4374,15 @@ function tickFrame(){
     /* A FOCUSED item holds still: the tag and composer anchored to it would
        otherwise jitter, which is hard to read and hard to click. Selection is
        not inspection — a brushed item keeps whatever motion it had. */
-    const heldStill = u.w && view.focus.key === 'i:' + u.w.id;
+    /* Coarse non-hover input needs a stable semantic region long enough for
+       the system to acquire it. Keep decorative item bob/rotation on desktop,
+       but hold items still while projected spatial targets are active. */
+    const heldStill = u.w && (view.focus.key === 'i:' + u.w.id || spatialMedia.matches);
     if (u.baseY){
       m.position.y = heldStill ? u.baseY : u.baseY + Math.sin(t*1.2+u.phase)*.25;
-      if (!heldStill) m.rotation.y += .004;
     }
-    if (u.landed && !heldStill){ m.rotation.y += .0015; }
-    if (u.w && (u.baseY || u.landed)) spin.set(u.w.id, m.rotation.y);
+    if (u.w && !heldStill) m.rotation.y += .003;
+    if (u.w) spin.set(u.w.id, m.rotation.y);
     if (u.workingRing) updateRings(m, t);
     if (u.waitFlash && u.lineMat){ u.lineMat.opacity = (.15 + (0.5+0.5*Math.sin(t*2.6+u.phase))*.6) * (u.dim ?? 1); }
     m.children.forEach(ch=>{
@@ -3998,6 +4461,7 @@ function tickFrame(){
   }
   positionTagBox();
   controls.update();
+  updateSpatialTargets();
   if (hoverLeaders.length) aimLeaders();   /* the nodes just moved */
   if (strobe){
     selectables().forEach(m => {

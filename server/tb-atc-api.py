@@ -220,6 +220,15 @@ text match a human types. Every search is FILED as a card the human can click
 to run again, so a filter is not a fleeting command — it leaves something
 behind.
 
+**Every call files a card. Nothing here deduplicates for you.** Filing twice
+leaves two cards, even when they are identical: this service will not decide
+that your call was really somebody else's card, because that is state you
+cannot see from the outside. Keeping the pile tidy is YOUR job. Read
+`GET /api/searches` first, and when you are updating something you filed
+before, pass its `searchId` to `POST /api/searches` — that edits the card in
+place instead of minting a twin. Re-running the same question on a schedule
+means reusing one `searchId`, not filing sixty cards.
+
 **Naming is required, not encouraged.** A filter carrying `ids` is REFUSED
 without a `query` or a `label`, and so is a new card through /api/searches. The
 refusal carries this guidance. Name it for WHAT WAS ASKED, not what matched:
@@ -899,22 +908,21 @@ class Handler(BaseHTTPRequestHandler):
 
             if u.path == "/api/filter":
                 # Applying a search also files it, so it can be re-opened after
-                # it is dismissed. Identical searches are refreshed rather than
-                # piled up: a patrol re-running the same query every minute
-                # should leave one card, not sixty.
-                def _file_search(query, ids, author, source):
-                    key = (query or "", tuple(ids or ()))
-                    for rec in state["searches"].values():
-                        if (rec.get("query") or "", tuple(rec.get("ids") or ())) == key:
-                            rec["at"] = int(time.time() * 1000)
-                            state["searchesRev"] += 1
-                            return rec
+                # it is dismissed. This never collapses a new card into an
+                # existing one: silently returning somebody else's card is
+                # state the caller cannot see, and it left agents believing
+                # they had filed something they had not. Deduplicating is the
+                # CALLER's job -- pass `searchId` to update a card you filed
+                # (POST /api/searches), and the pile stays honest about what
+                # was actually asked for.
+                def _file_search(query, ids, author, source, result_kind):
                     if len(state["searches"]) >= MAX_SEARCHES:
                         oldest = min(state["searches"].values(), key=lambda x: x.get("at") or 0)
                         del state["searches"][oldest["searchId"]]
                     state["searchSeq"] += 1
                     rec = {"searchId": f"q{state['searchSeq']}", "query": query or "",
                            "ids": list(ids or []), "label": None,
+                           "resultKind": result_kind,
                            "source": source, "author": clip(author, MAX_AUTHOR) or None,
                            "at": int(time.time() * 1000)}
                     state["searches"][rec["searchId"]] = rec
@@ -927,32 +935,35 @@ class Handler(BaseHTTPRequestHandler):
                     out = (push("filter", ids=[], clear=True), 200)
                 else:
                     ids = id_list(b.get("ids"))
+                    result_kind = "ids" if "ids" in b else "query"
                     query = clip(b.get("query"), MAX_SEARCH_LABEL)
                     label = clip(b.get("label"), MAX_SEARCH_LABEL)
                     # A filter is filed as a card the human can re-open, so an
                     # unnamed one is a row of numbers nobody can act on later.
                     # Refusing is kinder than accepting and being useless.
-                    if ids and not (query or label):
+                    if result_kind == "ids" and not (query or label):
                         out = ({"error": "name this search",
                                 "guidance": NAME_GUIDANCE}, 400)
-                    elif not ids and query:
+                    elif result_kind == "query" and query:
                         # a text search, the same thing a human types: the page
                         # matches it against titles and ids. Without this the
                         # only way to express a filter on the wire was a picked
                         # set, so re-running a typed search had to be sent as a
                         # clear — which cleared it.
-                        rec = _file_search(query, [], b.get("author"), "agent")
+                        rec = _file_search(query, [], b.get("author"), "agent", "query")
                         save_tags()
                         out = (push("filter", ids=[], clear=False, query=query,
+                                    resultKind="query",
                                     searchId=rec["searchId"]), 200)
-                    elif not ids:
+                    elif result_kind == "query":
                         out = ({"error": "ids or query required"}, 400)
                     else:
-                        rec = _file_search(query, ids, b.get("author"), "agent")
+                        rec = _file_search(query, ids, b.get("author"), "agent", "ids")
                         if label:
                             rec["label"] = label
                         save_tags()
                         out = (push("filter", ids=ids, clear=False,
+                                    resultKind="ids",
                                     query=query or label,
                                     searchId=rec["searchId"]), 200)
 
@@ -1075,6 +1086,7 @@ class Handler(BaseHTTPRequestHandler):
                         del state["searches"][oldest["searchId"]]
                     query = (q.get("query") or "").strip()[:MAX_SEARCH_LABEL]
                     ids = id_list(q.get("ids"))
+                    result_kind = "ids" if "ids" in q else "query"
                     if not query and not ids and not prev:
                         continue
                     # a NEW card must arrive named; editing one by id need not
@@ -1083,14 +1095,16 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     if prev:
                         rec = dict(prev)
-                        if query or ids:
+                        if query or ids or "ids" in q:
                             rec["query"], rec["ids"] = query, ids
+                            rec["resultKind"] = result_kind
                         if q.get("label") is not None:
                             rec["label"] = clip(q.get("label"), MAX_SEARCH_LABEL)
                     else:
                         state["searchSeq"] += 1
                         rec = {"searchId": f"q{state['searchSeq']}",
                                "query": query, "ids": ids,
+                               "resultKind": result_kind,
                                "label": clip(q.get("label"), MAX_SEARCH_LABEL) or None,
                                "source": "user" if q.get("source") == "user" else "agent",
                                "author": clip(q.get("author"), MAX_AUTHOR) or None}

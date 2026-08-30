@@ -10,12 +10,6 @@ Configuration (environment variables):
                    If unset, the snapshot is only written to TB_WEATHER_OUT —
                    use that when the web root is on the same machine.
   TB_WEATHER_KEY   Optional ssh identity file for the scp push.
-  TB_WEATHER_REPO  Optional path to a clone of the code repo. When set, each
-                   item's recorded commits are tested for ancestry in
-                   TB_WEATHER_BRANCH, which is the only reliable way to know
-                   whether work actually landed — review verdicts say the
-                   gate passed, not that code reached the branch.
-  TB_WEATHER_BRANCH  Branch to test against. Default: origin/main
   TB_ATC_API       Optional base URL of this install's own ATC API
                    (e.g. http://127.0.0.1:8899/api). When set, the generator
                    mirrors open operator decision requests onto the board as
@@ -23,16 +17,16 @@ Configuration (environment variables):
                    `decisions` feed field is still populated (it only reads
                    state.db), the board sync is simply skipped.
 
-Every signal is derived from durable rows: stages from attest kinds and
-verdicts, running turns from open rows in `turns`, queued turns from pending
-`wakes`, pulses from recently fired wakes. Nothing is estimated. Decisions are
+Every signal is derived from durable rows: evidence inventories from attests,
+running turns from open rows in `turns`, queued turns from pending `wakes`,
+pulses from recently fired wakes. Nothing is estimated. Decisions are
 no different: the desk layer reads `decision_requests` straight out of
 state.db (mode=ro), the same connection everything else here uses — it never
 shells out to the `tightbeam` CLI. CLI reads append to `events` on a cadence,
 which is exactly what grew state.db to 4.9GB and cascaded into a VM crash
 (clickety-clacks/tightbeam#10).
 """
-import hashlib, json, os, re, sqlite3, subprocess, time, urllib.error, urllib.request
+import hashlib, json, os, re, shlex, socket, sqlite3, subprocess, time, urllib.error, urllib.request
 from pathlib import Path
 
 BASE = Path(os.environ.get("TB_BASE_DIR", str(Path.home() / ".tightbeam")))
@@ -40,87 +34,311 @@ DB = f"file:{BASE}/state.db?mode=ro"
 OUT = os.environ.get("TB_WEATHER_OUT", "/tmp/tb-weather.json")
 DEST = os.environ.get("TB_WEATHER_DEST")
 KEY = os.environ.get("TB_WEATHER_KEY")
-REPO = os.environ.get("TB_WEATHER_REPO")            # optional git clone
-BRANCH = os.environ.get("TB_WEATHER_BRANCH", "origin/main")
 ATC_API = os.environ.get("TB_ATC_API")              # optional, e.g. http://127.0.0.1:8899/api
 DESK_AUTHOR = "atc:desk"
+REMOTE_TIMEOUT = 4                 # leave one second to publish within a 5s refresh
+# One budget PER REMOTE, not one for the whole run: a single deadline computed
+# at import gave four registered repositories four seconds between them, so a
+# cold start silently degraded every item to unknown.
+_deadlines = {}
+def remote_deadline(remote):
+    return _deadlines.setdefault(remote, time.monotonic() + REMOTE_TIMEOUT)
+UNKNOWN_TTL = 300
 
-def kind_of(name):
-    n = name.lower()
-    if n == "main": return "main"
-    if "product owner" in n: return "po"
-    if "patrol" in n or "watchdog" in n: return "patrol"
-    if "orchestrator" in n: return "orch"
-    if "coder" in n: return "coder"
-    if "review" in n: return "rev"
-    if "spec" in n: return "spec"
-    return "coder"
+# Product-owned canonical integration refs. A commitRef names the checkout that
+# produced the commit, never the branch that integrates it. Resolve that
+# checkout's origin, then consult only this registry: arbitrary remote branches
+# include producer branches and are not landing proof.
+CANONICAL_REFS = {
+    "git@github.com:clickety-clacks/tightbeam-atc.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam-specs.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/lachesis.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam.git":
+        ("refs/heads/main", "refs/heads/0.1.8"),
+}
+CACHE_ROOT = BASE / "atc-canonical"
+
+def kind_of(archetype, roles):
+    """Return only role classes backed by durable role or archetype rows."""
+    if "main" in roles:
+        return "main"
+    return {
+        "product-owner": "po",
+        "orchestrator": "orch",
+        "coder": "coder",
+        "reviewer": "rev",
+        "spec-writer": "spec",
+        "recon": "recon",
+    }.get(archetype, "agent")
 
 con = sqlite3.connect(DB, uri=True)
 con.row_factory = sqlite3.Row
+con.execute("BEGIN")             # every projected fact comes from one snapshot
 q = lambda sql, *a: con.execute(sql, a).fetchall()
 
-# ---- ground truth for "merged": ancestry in the real branch.
+# ---- ground truth for "merged": ancestry in registered canonical branches.
 # No attest kind carries this. An item can hold completion, reviewed-clean,
-# AND verified and still not be on the branch, so the branch is the only
-# authority. Without a configured repo, merge state is simply unknown.
-branch_shas, branch_pfx = set(), set()
-if REPO and Path(REPO, ".git").exists():
-    git = lambda *a: subprocess.run(["git", "-C", REPO, *a],
-                                    capture_output=True, text=True)
-    stamp = Path(OUT + ".fetch")                    # refresh at most every 5m
+# AND verified and still not be on an integration branch. The caches are
+# service-owned, one per canonical repository, and survive session workdirs.
+def canonical_remote(value):
+    if not isinstance(value, str):
+        return None
+    remote = value.strip().rstrip("/")
+    if remote.startswith("https://github.com/"):
+        remote = "git@github.com:" + remote[len("https://github.com/"):]
+    if remote.startswith("git@github.com:") and not remote.endswith(".git"):
+        remote += ".git"
+    return remote if remote in CANONICAL_REFS else None
+
+def cache_for(remote):
+    name = remote.rsplit("/", 1)[-1].removesuffix(".git")
+    return CACHE_ROOT / f"{name}.git"
+
+def cache_ref(branch):
+    digest = hashlib.blake2b(branch.encode(), digest_size=8).hexdigest()
+    return f"refs/tb-atc/{digest}"
+
+def cache_git(remote, *args, **kwargs):
+    return subprocess.run(["git", "--git-dir", str(cache_for(remote)), *args],
+                          capture_output=True, text=True, **kwargs)
+
+def remote_fetch(remote, *args):
+    remaining = remote_deadline(remote) - time.monotonic()
+    if remaining <= 0:
+        return None
+    try:
+        return cache_git(remote, "fetch", *args, timeout=remaining)
+    except subprocess.TimeoutExpired:
+        return None
+
+try:
+    host_ssh = {r["name"]: r["ssh"] for r in q("SELECT name, ssh FROM hosts")}
+except sqlite3.Error:
+    host_ssh = {}
+local_hosts = {socket.gethostname(), socket.gethostname().split(".", 1)[0]}
+repo_remotes = {}
+
+def checkout_remote(repo):
+    """Resolve a durable host:path checkout to its canonical origin.
+
+    Returns the registered remote, False when the origin was READ and is not a
+    registered repository, or None when the checkout could not be consulted at
+    all (deleted, unreachable host, no path). The two failures are different:
+    a foreign origin tells us this commit is not ours to land, while a deleted
+    workdir tells us nothing except which repository to ask first."""
+    if repo in repo_remotes:
+        return repo_remotes[repo]
+    resolved = None
+    if isinstance(repo, str) and ":" in repo:
+        host, path = repo.split(":", 1)
+        if host and Path(path).is_absolute():
+            try:
+                if host in local_hosts:
+                    found = subprocess.run(
+                        ["git", "-C", path, "remote", "get-url", "origin"],
+                        capture_output=True, text=True, timeout=REMOTE_TIMEOUT)
+                elif host_ssh.get(host):
+                    command = f"git -C {shlex.quote(path)} remote get-url origin"
+                    remaining = min(1, remote_deadline("ssh:" + host) - time.monotonic())
+                    if remaining <= 0:
+                        found = None
+                    else:
+                        found = subprocess.run(
+                            ["ssh", "-o", "BatchMode=yes", "-o",
+                             "ConnectTimeout=1", host_ssh[host], command],
+                            capture_output=True, text=True, timeout=remaining)
+                else:
+                    found = None
+                if found is not None and found.returncode == 0:
+                    resolved = canonical_remote(found.stdout.strip()) or False
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    repo_remotes[repo] = resolved
+    return resolved
+
+branches = {}
+
+def load_branch(remote, branch):
+    key = (remote, branch)
+    if key in branches:
+        return branches[key]
+    cache = cache_for(remote)
+    cached = cache_ref(branch)
+    if not cache.exists():
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        made = subprocess.run(["git", "init", "--bare", "--quiet", str(cache)],
+                              capture_output=True, text=True)
+        if made.returncode != 0:
+            branches[key] = None
+            return None
+    elif cache_git(remote, "rev-parse", "--is-bare-repository").stdout.strip() != "true":
+        branches[key] = None
+        return None
+
+    stamp = cache / ("tb-atc-fetch-" + cached.rsplit("/", 1)[-1])
     try: stale = time.time() - stamp.stat().st_mtime > 300
     except OSError: stale = True
-    if stale:
-        git("fetch", "--quiet", "--all")
+    ref_exists = cache_git(remote, "show-ref", "--verify", "--quiet", cached).returncode == 0
+    if stale or not ref_exists:
+        fetched = remote_fetch(remote, "--quiet", "--force", remote,
+                               f"{branch}:{cached}")
+        if fetched is None or fetched.returncode != 0:
+            branches[key] = None
+            return None
+    listed = cache_git(remote, "rev-list", cached)
+    if listed.returncode != 0:
+        branches[key] = None
+        return None
+    shas = set(listed.stdout.split())
+    if not shas:
+        branches[key] = None
+        return None
+    if stale or not ref_exists:
         stamp.touch()
-    out = git("rev-list", BRANCH).stdout.split()
-    branch_shas = set(out)
-    branch_pfx = {s[:12] for s in out}
+    branches[key] = (shas, cached)
+    return branches[key]
 
-# which items ever produced code? a ruling or a recon has nothing to merge,
-# so it must not read as a pending merge. assignment_effects is optional.
+# Which items produced code? A positive code effect is sufficient, but the
+# absence of one is not: assignment_effects has partial live coverage. Non-code
+# is proven only when every assignment on the item has an explicit non-code
+# effect. The table itself is optional on older ledgers.
+CODE_EFFECTS = {"code", "release", "live_mutation"}
 try:
-    code_items = {r["workItemId"] for r in q(
-        """SELECT DISTINCT a.workItemId FROM assignment_effects e
-           JOIN assignments a ON a.id = e.assignmentId
-           WHERE e.effectKind IN ('code','release','live_mutation')""")}
+    effects_by_item = {}
+    for effect in q("""SELECT a.workItemId, e.effectKind
+                       FROM assignments a
+                       LEFT JOIN assignment_effects e ON e.assignmentId=a.id"""):
+        effects_by_item.setdefault(effect["workItemId"], []).append(effect["effectKind"])
 except sqlite3.Error:
-    code_items = None                       # unavailable: treat every item as code
+    effects_by_item = {}
 
-# cherry-picked and rebased work lands under a different sha, so ancestry
-# alone reports false "not merged". Fall back to patch equivalence, cached
-# per branch tip because it costs a subprocess per commit.
-EQUIV = Path(OUT + ".equiv.json")
-PROBE_V = 2                       # bump when probe semantics change
-_tip = git("rev-parse", BRANCH).stdout.strip() if branch_shas else ""
-try:
-    _c = json.load(open(EQUIV))
-    equiv_cache = (_c["map"] if _c.get("tip") == _tip
-                   and _c.get("v") == PROBE_V else {})
-except Exception:
-    equiv_cache = {}
+def code_state(work_item_id, producer_refs):
+    """True/False only from durable positive or complete explicit evidence."""
+    if producer_refs:
+        return True
+    effects = effects_by_item.get(work_item_id, ())
+    if any(effect in CODE_EFFECTS for effect in effects):
+        return True
+    if effects and all(effect is not None for effect in effects):
+        return False
+    return None
 
-def probe(c):
+# Cherry-picked and rebased work lands under a different sha, so ancestry
+# alone can report false absence. Fall back to sanctioned patch equivalence,
+# cached per canonical repository, registered branch, and branch tip.
+PROBE_V = 5                       # bump when probe semantics change
+equiv = {}
+
+def equiv_state(remote, branch, tip):
+    key = (remote, branch)
+    if key in equiv:
+        return equiv[key]
+    try:
+        saved = json.load(open(cache_for(remote) / "tb-atc-equiv.json"))
+        record = saved.get("branches", {}).get(branch, {})
+        state = ({"map": record.get("map", {}),
+                  "unknown": record.get("unknown", {})}
+                 if saved.get("v") == PROBE_V and record.get("tip") == tip
+                 else {"map": {}, "unknown": {}})
+    except Exception:
+        state = {"map": {}, "unknown": {}}
+    equiv[key] = state
+    return state
+
+def probe(remote, branch, cached, tip, c):
     """True: equivalent content is on the branch. False: it is not.
-    None: the commit is not in this clone, so nothing can be concluded."""
-    if c in equiv_cache: return equiv_cache[c]
-    if git("cat-file", "-e", c + "^{commit}").returncode != 0:
-        r = None
+    None: the commit or lookup is unavailable, so nothing can be concluded."""
+    state = equiv_state(remote, branch, tip)
+    values, unknown = state["map"], state["unknown"]
+    if c in values: return values[c]
+    last_unknown = unknown.get(c)
+    if isinstance(last_unknown, (int, float)) \
+            and time.time() - last_unknown < UNKNOWN_TTL:
+        return None
+    unknown.pop(c, None)
+
+    def unavailable():
+        unknown[c] = time.time()
+        return None
+
+    if cache_git(remote, "cat-file", "-e", c + "^{commit}").returncode != 0:
+        fetched = remote_fetch(remote, "--quiet", remote, c)
+        if (fetched is None or fetched.returncode != 0
+                or cache_git(remote, "cat-file", "-e", c + "^{commit}").returncode != 0):
+            return unavailable()
+    checked = cache_git(remote, "cherry", cached, c, c + "~1")
+    if checked.returncode != 0:
+        return unavailable()
+    result = checked.stdout.strip()
+    if result.startswith("-"):
+        r = True
+    elif result.startswith("+"):
+        r = False
     else:
-        r = git("cherry", BRANCH, c, c + "~1").stdout.strip().startswith("-")
-    equiv_cache[c] = r
+        return unavailable()
+    values[c] = r
+    unknown.pop(c, None)
     return r
 
+def branch_probe(remote, branch, commit, cheap=False):
+    loaded = load_branch(remote, branch)
+    if loaded is None:
+        return None
+    shas, cached = loaded
+    if commit in shas:
+        return True
+    if len(commit) < 40:
+        matches = [sha for sha in shas if sha.startswith(commit)]
+        if len(matches) == 1:
+            return True
+        if len(matches) > 1:
+            return None
+    if cheap:
+        # Registry-wide search: ancestry only. Patch equivalence costs a
+        # subprocess per commit per repository, and we are asking every
+        # repository — pay it only where the checkout named one.
+        return None
+    tip = cache_git(remote, "rev-parse", cached).stdout.strip()
+    if not tip:
+        return None
+    return probe(remote, branch, cached, tip, commit)
+
 def merged_in_branch(refs):
-    if not branch_shas or not refs: return None     # detection unavailable
-    for c in refs:
-        if c in branch_shas or c[:12] in branch_pfx: return True
-        if len(c) < 12 and any(s.startswith(c) for s in branch_shas): return True
-    seen = [probe(c) for c in refs]
+    if not refs:
+        return None
+    seen = []
+    for repo, commit in refs:
+        if not isinstance(commit, str) \
+                or re.fullmatch(r"[0-9a-f]{7,40}", commit) is None:
+            seen.append(None)
+            continue
+        remote = checkout_remote(repo)
+        # The checkout that produced a commit is usually GONE — deleted when its
+        # session retired, which is the custody defect this projection exists to
+        # expose. Resolving it only narrows the search; it is never the proof.
+        # Ancestry on a registered canonical ref is landing proof whichever
+        # workdir produced the commit, so when the checkout cannot be resolved,
+        # ask every registered repository instead of giving up.
+        if remote is False:          # origin read, and it is not one of ours
+            seen.append(None)
+            continue
+        targets = ([(remote, branch) for branch in CANONICAL_REFS[remote]]
+                   if remote else
+                   [(r, branch) for r, branches in CANONICAL_REFS.items()
+                    for branch in branches])
+        probes = [branch_probe(r, branch, commit, cheap=not remote)
+                  for r, branch in targets]
+        if not remote:
+            # A miss across every repository is not proof of absence: one of
+            # them may simply have been unreachable this run.
+            seen.append(True if any(v is True for v in probes)
+                        else (False if probes and all(v is False for v in probes)
+                              else None))
+        else:
+            seen.extend(probes)
     if any(v is True for v in seen): return True
-    if all(v is None for v in seen): return None    # unverifiable, not absent
-    return False
+    if seen and all(v is False for v in seen): return False
+    return None                                     # unverifiable, not absent
 
 NOW = int(time.time() * 1000)
 
@@ -131,8 +349,13 @@ last_act = {}
 def _mark(key, ts):
     if key and ts and ts > last_act.get(key, 0):
         last_act[key] = ts
+# SQLite's non-STRICT timestamp columns can hold text or blobs. Only numeric
+# storage classes can participate in the wall-clock arithmetic below.
 for r in q("""SELECT sessionKey, max(coalesce(endedAt, startedAt, createdAt)) AS t
-              FROM turns GROUP BY sessionKey"""):
+              FROM turns
+              WHERE typeof(coalesce(endedAt, startedAt, createdAt))
+                    IN ('integer', 'real')
+              GROUP BY sessionKey"""):
     _mark(r["sessionKey"], r["t"])
 for r in q("SELECT bySession, max(ts) AS t FROM attests GROUP BY bySession"):
     _mark(r["bySession"], r["t"])
@@ -143,6 +366,11 @@ for r in q("SELECT bySession, max(ts) AS t FROM attests GROUP BY bySession"):
 # both were a CLI round trip away until now.
 rows = q("""SELECT sessionKey, displayName, state, spawnedBy,
                    archetype, harness, model FROM sessions""")
+role_rows = q("SELECT name, boundSessionKey FROM roles "
+              "WHERE boundSessionKey IS NOT NULL")
+roles_by_session = {}
+for role in role_rows:
+    roles_by_session.setdefault(role["boundSessionKey"], set()).add(role["name"])
 holders_open = {r["holderKey"] for r in q(
     "SELECT DISTINCT holderKey FROM assignments WHERE state='open'")}
 sess = {r["sessionKey"]: r for r in rows
@@ -161,11 +389,7 @@ def _agent_id(session_key):
 ids = {k: _agent_id(k) for k in sess}
 agents = []
 for k, r in sess.items():
-    kind = kind_of(r["displayName"] or "")
-    # a top-of-tree session whose name classifies as nothing else is an
-    # owner-level mind (e.g. a PO named after its product), not a worker
-    if kind == "coder" and not r["spawnedBy"]:
-        kind = "po"
+    kind = kind_of(r["archetype"], roles_by_session.get(k, set()))
     agents.append({
         "id": ids[k],
         "name": (r["displayName"] or k)[:120],
@@ -201,6 +425,36 @@ for r in q("""SELECT t.sessionKey, t.startedAt, a.workItemId FROM turns t
               WHERE t.endedAt IS NULL"""):
     bucket = item_run if r["startedAt"] else item_queue
     bucket.setdefault(r["workItemId"], set()).add(r["sessionKey"])
+
+# A turn born without an assignment link is attributed to the cards it has
+# PROVABLY touched this turn: attests it filed since the turn started. Rows,
+# not inference — a holder of several cards lights only the one its current
+# turn is writing to, and a turn that files nothing lights nothing.
+# Ask this the cheap way round. Joining turns to attests on (session, ts)
+# reads every attest and, for each, every turn its session ever took -- the
+# busiest session here has 200k turns, so a query returning THREE rows cost 54
+# of the pass's 80 seconds. Start from the handful of live turns instead, and
+# bound the attest read by the earliest of them. Non-numeric start values never
+# match integer attest timestamps in the old SQL and cannot be ordered in Python.
+live_turns = q("""SELECT sessionKey, startedAt FROM turns
+                  WHERE endedAt IS NULL AND startedAt IS NOT NULL
+                    AND assignmentId IS NULL
+                    AND typeof(startedAt) IN ('integer', 'real')""")
+if live_turns:
+    started = {}
+    for r in live_turns:
+        key = r["sessionKey"]
+        if key not in started or r["startedAt"] < started[key]:
+            started[key] = r["startedAt"]
+    for r in q("""SELECT att.bySession, att.ts, a.workItemId FROM attests att
+                  JOIN assignments a ON a.id = att.assignmentId
+                  WHERE att.ts >= ? AND att.bySession IS NOT NULL""",
+               min(started.values())):
+        since = started.get(r["bySession"])
+        if since is None or r["ts"] < since:
+            continue
+        item_run.setdefault(r["workItemId"], set()).add(r["bySession"])
+        item_running.setdefault(r["workItemId"], set()).add(r["bySession"])
 
 pending = {r["sessionKey"] for r in q(
     "SELECT DISTINCT sessionKey FROM wakes WHERE state='pending' AND dueAt <= ?",
@@ -251,10 +505,90 @@ ev_by = by_item("""SELECT a.workItemId, t.kind, t.verdictKind, t.commitRefs, t.t
                    WHERE a.workItemId IN ({IN})""")
 closed_by = by_item("""SELECT workItemId, max(closedAt) AS m FROM assignments
                        WHERE workItemId IN ({IN}) GROUP BY workItemId""")
+assignment_counts_by = by_item(
+    """SELECT workItemId,
+              sum(CASE WHEN state='open' THEN 1 ELSE 0 END) AS openCount,
+              sum(CASE WHEN state='open' THEN 0 ELSE 1 END) AS terminalCount
+       FROM assignments WHERE workItemId IN ({IN}) GROUP BY workItemId""")
 # ordered by dueAt so the first row per item is the imminent one
 wake_by = by_item("""SELECT work_item_id, sessionKey FROM wakes
                      WHERE state='pending' AND work_item_id IN ({IN})
                      ORDER BY dueAt""")
+
+def parse_commit_refs(raw):
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return {(None, None)}
+    if not isinstance(decoded, list):
+        return {(None, None)}
+    refs = set()
+    for ref in decoded:
+        if not isinstance(ref, dict):
+            refs.add((None, None))
+            continue
+        repo, commit = ref.get("repo"), ref.get("commit")
+        refs.add((repo if isinstance(repo, str) else None,
+                  commit if isinstance(commit, str) else None))
+    return refs
+
+def prime_checkout_remotes():
+    """Resolve every needed remote-host checkout with one SSH call per host."""
+    repos = set()
+    for evidence in ev_by.values():
+        for row in evidence:
+            if row["commitRefs"]:
+                repos.update(repo for repo, _commit
+                             in parse_commit_refs(row["commitRefs"]) if repo)
+
+    remote_paths = {}
+    for repo in repos:
+        if ":" not in repo:
+            repo_remotes[repo] = None
+            continue
+        host, path = repo.split(":", 1)
+        if not host or not Path(path).is_absolute():
+            repo_remotes[repo] = None
+        elif host in local_hosts:
+            checkout_remote(repo)
+        else:
+            remote_paths.setdefault(host, []).append((repo, path))
+
+    for host, entries in remote_paths.items():
+        ssh = host_ssh.get(host)
+        if not ssh:
+            repo_remotes.update((repo, None) for repo, _path in entries)
+            continue
+        tokens = {}
+        commands = []
+        for index, (repo, path) in enumerate(entries):
+            token = f"p{index}"
+            tokens[token] = repo
+            commands.append(
+                f"printf '%s\\t' {shlex.quote(token)}; "
+                f"git -C {shlex.quote(path)} remote get-url origin 2>/dev/null || true; "
+                "printf '\\n'")
+        remaining = min(1, remote_deadline("ssh:" + host) - time.monotonic())
+        try:
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("ssh", 0)
+            found = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o",
+                 "ConnectTimeout=1", ssh, "; ".join(commands)],
+                capture_output=True, text=True, timeout=remaining)
+        except (OSError, subprocess.TimeoutExpired):
+            found = None
+        resolved = {}
+        if found is not None and found.returncode == 0:
+            for line in found.stdout.splitlines():
+                if "\t" in line:
+                    token, remote = line.split("\t", 1)
+                    if token in tokens:
+                        resolved[tokens[token]] = canonical_remote(remote)
+        for repo, _path in entries:
+            repo_remotes[repo] = resolved.get(repo)
+
+prime_checkout_remotes()
 
 for r in rows:
     wid = r["id"]
@@ -272,13 +606,17 @@ for r in rows:
     for e in ev:
         if not e["commitRefs"]:
             continue
-        found = re.findall(r'"commit"\s*:\s*"([0-9a-f]{7,40})"', e["commitRefs"])
+        found = parse_commit_refs(e["commitRefs"])
         refs.update(found)
         if e["reviews"] is None:
-            prod_refs.update(found)     # a producer citing a commit means code
+            prod_refs.update(commit for _repo, commit in found if commit)
+                                            # a producer citing a commit means code
     kinds = {e["kind"] for e in ev}
     verd = {e["verdictKind"] for e in ev if e["verdictKind"]}
     closed_at = None
+    # Evidence stage drives the page's core metaphor: items DESCEND as
+    # evidence accumulates and land on the floor when it is complete. The
+    # snapshot rewrite dropped this; restored 2026-08-22 (mike: regression).
     if r["state"] == "closed" and not has_open_assignment:
         stage = 6
         lc = closed_by.get(wid)
@@ -289,14 +627,10 @@ for r in rows:
         if "tests-passed" in verd: stage = 2
         if "completion" in kinds: stage = 3
         if verd & {"reviewed-clean", "spec-reviewed", "verified"}: stage = 4
-        # A review only clears the work it actually saw. If the producer filed
-        # again after the last reviewed-clean, that verdict is stale and the
-        # item is back in review, not ready to merge.
-        last_clean = max((e["ts"] for e in ev if e["verdictKind"] == "reviewed-clean"),
-                         default=None)
-        # Completion AFTER a review is the normal sequence — the completion rail
-        # requires a linked review, so it always lands just after the verdict.
-        # What makes a review stale is new code TESTED after it.
+        # A review only clears the work it actually saw: new code TESTED after
+        # the last reviewed-clean puts the item back in review.
+        last_clean = max((e["ts"] for e in ev
+                          if e["verdictKind"] == "reviewed-clean"), default=None)
         last_tested = max((e["ts"] for e in ev
                            if e["verdictKind"] == "tests-passed"), default=None)
         stale_review = (last_clean is not None and last_tested is not None
@@ -319,31 +653,43 @@ for r in rows:
     tgt = imminent[0]["sessionKey"] if imminent else None
     flow = {aid: ("in" if (tgt is None or sk == tgt) else "out")
             for aid, sk in turn_sk.items()}
-    is_code = True if code_items is None else (wid in code_items or bool(prod_refs))
+    is_code = code_state(wid, prod_refs)
+    counts = assignment_counts_by.get(wid)
+    assignment_counts = {
+        "open": counts[0]["openCount"] if counts else 0,
+        "terminal": counts[0]["terminalCount"] if counts else 0,
+    }
     # the page decides how much of a title to show; truncating here threw the
     # rest away before anything could ask for it
     # The FULL id, because anything reading this view has to be able to act on
     # it: `tightbeam work-item-get` refuses a short id with unknown_work_item.
     # `short` is for display only.
     items.append({"id": wid, "short": wid[:11], "title": (r["title"] or "")[:2000],
-                  "stage": stage, "holders": holders, "turns": turns, "flow": flow,
-                  # nothing to merge means no merge state, not a green ring
+                  "state": r["state"], "stage": stage,
+                  "holders": holders, "turns": turns,
+                  "flow": flow, "attestKinds": sorted(kinds),
+                  "verdictKinds": sorted(verd),
+                  "assignments": assignment_counts,
+                  # Ready = completed code review (completion + reviewed-clean,
+                  # stale-review-checked, no open card) awaiting canonical
+                  # landing. 01b1381 narrowed this to a literal 'ready-to-merge'
+                  # verdict no rail files, extinguishing the state; restored
+                  # 2026-08-22 (mike). The explicit verdict still counts too.
+                  "readyToMerge": ("ready-to-merge" in verd) or stage >= 5,
                   "closedAt": closed_at,
-                  "merged": merged_in_branch(refs) if is_code else None,
+                  "merged": merged_in_branch(refs) if is_code is True else None,
                   # effect tags are advisory and often incomplete, so a commit
                   # filed BY A PRODUCER also proves code
                   "code": is_code})
 # show the whole open sky so drainage is visible; landings by closure recency
-open_items = [w for w in items if w["stage"] < 6][:240]
-landed = sorted((w for w in items if w["stage"] >= 6),
+open_items = [w for w in items if w["state"] == "open"][:240]
+closed_items = sorted((w for w in items if w["state"] == "closed"),
                 key=lambda w: w["closedAt"] or 0, reverse=True)[:16]
 
 # ---- traffic: every delivered message, not just wakes. Wakes are a small
 # subset; the messages table is where the conversation actually lives.
 # Senders are role paths, resolved through the roles table's binding.
-role_of = {"agent:" + r["name"]: r["boundSessionKey"]
-           for r in q("SELECT name, boundSessionKey FROM roles "
-                      "WHERE boundSessionKey IS NOT NULL")}
+role_of = {"agent:" + r["name"]: r["boundSessionKey"] for r in role_rows}
 msgs = []
 for r in q("""SELECT id, sessionKey, sender FROM messages
               WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 400""",
@@ -513,17 +859,33 @@ if ATC_API:
     sync_desk(decisions)
 
 snap = {"generatedAt": NOW, "agents": agents, "links": links,
-        "items": open_items + landed, "messages": msgs, "wakes": wakes_out,
+        "items": open_items + closed_items, "messages": msgs, "wakes": wakes_out,
+        "mergeSources": [
+            {"remote": remote, "branches": list(branches)}
+            for remote, branches in CANONICAL_REFS.items()
+        ],
         "decisions": decisions}
 json.dump(snap, open(OUT, "w"))
-if branch_shas:
-    json.dump({"tip": _tip, "v": PROBE_V, "map": equiv_cache}, open(EQUIV, "w"))
+for remote in CANONICAL_REFS:
+    saved = {}
+    for branch in CANONICAL_REFS[remote]:
+        state = equiv.get((remote, branch))
+        loaded = branches.get((remote, branch))
+        if state is None or loaded is None:
+            continue
+        tip = cache_git(remote, "rev-parse", loaded[1]).stdout.strip()
+        if tip:
+            saved[branch] = {"tip": tip, "map": state["map"],
+                             "unknown": state["unknown"]}
+    if saved:
+        json.dump({"v": PROBE_V, "branches": saved},
+                  open(cache_for(remote) / "tb-atc-equiv.json", "w"))
 if DEST:
     cmd = ["scp", "-q"]
     if KEY: cmd += ["-i", KEY, "-o", "IdentitiesOnly=yes"]
     subprocess.run(cmd + [OUT, DEST], check=True)
 pending = [w for w in open_items
-           if w["stage"] >= 5 and w["code"] and w["merged"] is False]
+           if w["readyToMerge"] and w["code"] and w["merged"] is not True]
 print(f"snapshot: {len(agents)} agents, {len(open_items)} open, "
-      f"{len(landed)} landed, {len(msgs)} msgs, "
-      f"{len(pending)} awaiting a real merge")
+      f"{len(closed_items)} closed, {len(msgs)} msgs, "
+      f"{len(pending)} explicitly ready but not merged")

@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # the generator tests build throwaway git repositories to stand in for
+      # canonical remotes, so the runner needs an identity to commit with
+      - name: Give git an identity
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "ATC CI"
+          git config --global init.defaultBranch main
+      - name: Run the suite
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test -v

@@ -102,8 +102,7 @@ for something you typed. Emptying the box releases either kind.
 - A Tightbeam installation. The view reads `state.db` read-only.
 - Python 3. Nothing else: no build step, no package manager, no CDN. three.js is
   vendored.
-- Optional: `inotify-tools` for event-driven updates, and a clone of your code
-  repository if you want merge state checked against a real branch.
+- Optional: `inotify-tools` for event-driven updates.
 
 ## Install
 
@@ -154,15 +153,24 @@ The generator can also push the snapshot to another machine over ssh; see
 | `TB_WEATHER_OUT` | where the snapshot is written | `/tmp/tb-weather.json` |
 | `TB_WEATHER_DEST` | optional `scp` target when the web root is another machine | unset |
 | `TB_WEATHER_KEY` | ssh identity for that push | unset |
-| `TB_WEATHER_REPO` | clone of the code repo, enabling merged-vs-pending detection | unset |
-| `TB_WEATHER_BRANCH` | branch to test commits against | `origin/main` |
 
 **On merge detection.** No attest kind means "merged" — an item can hold a
 completion, a clean review *and* a verified verdict while its code is still off
-the branch. With `TB_WEATHER_REPO` set, each item's recorded commits are tested
-for ancestry and patch identity against `TB_WEATHER_BRANCH`, so work that landed
-as a cherry-pick under a rewritten SHA is recognised. Leave it unset and merge
-state reports unknown rather than guessing.
+the branch. Each recorded `host:path` checkout is used only to read its `origin`;
+the generator then resolves the commit through a service-owned cache for that
+canonical repository. Arbitrary remote branches are never landing proof. The
+product-owned integration-ref registry is:
+
+- `clickety-clacks/tightbeam-atc`: `main`
+- `clickety-clacks/tightbeam-specs`: `main`
+- `clickety-clacks/lachesis`: `main`
+- `clickety-clacks/tightbeam`: `main` and `0.1.8`
+
+SSH and HTTPS GitHub origins normalize to the same registered identity. A commit
+is merged when any registered ref proves ancestry or patch identity. It is not
+merged only when every registered ref was fetched and every probe proves
+absence. A missing checkout, unregistered origin, missing commit, or failed
+lookup reports unknown rather than guessing.
 
 ## Control API
 
