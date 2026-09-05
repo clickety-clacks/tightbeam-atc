@@ -10,11 +10,23 @@ Configuration (environment variables):
                    If unset, the snapshot is only written to TB_WEATHER_OUT —
                    use that when the web root is on the same machine.
   TB_WEATHER_KEY   Optional ssh identity file for the scp push.
+  TB_ATC_API       Optional base URL of this install's own ATC API
+                   (e.g. http://127.0.0.1:8899/api). When set, the generator
+                   mirrors open operator decision requests onto the board as
+                   author=atc:desk arrows/tags/one search. Unset: the
+                   `decisions` feed field is still populated (it only reads
+                   state.db), the board sync is simply skipped.
+
 Every signal is derived from durable rows: evidence inventories from attests,
 running turns from open rows in `turns`, queued turns from pending `wakes`,
-pulses from recently fired wakes. Nothing is estimated.
+pulses from recently fired wakes. Nothing is estimated. Decisions are
+no different: the desk layer reads `decision_requests` straight out of
+state.db (mode=ro), the same connection everything else here uses — it never
+shells out to the `tightbeam` CLI. CLI reads append to `events` on a cadence,
+which is exactly what grew state.db to 4.9GB and cascaded into a VM crash
+(clickety-clacks/tightbeam#10).
 """
-import hashlib, json, os, re, shlex, socket, sqlite3, subprocess, time
+import hashlib, json, os, re, shlex, socket, sqlite3, subprocess, time, urllib.error, urllib.request
 from pathlib import Path
 
 BASE = Path(os.environ.get("TB_BASE_DIR", str(Path.home() / ".tightbeam")))
@@ -22,6 +34,8 @@ DB = f"file:{BASE}/state.db?mode=ro"
 OUT = os.environ.get("TB_WEATHER_OUT", "/tmp/tb-weather.json")
 DEST = os.environ.get("TB_WEATHER_DEST")
 KEY = os.environ.get("TB_WEATHER_KEY")
+ATC_API = os.environ.get("TB_ATC_API")              # optional, e.g. http://127.0.0.1:8899/api
+DESK_AUTHOR = "atc:desk"
 REMOTE_TIMEOUT = 4                 # leave one second to publish within a 5s refresh
 # One budget PER REMOTE, not one for the whole run: a single deadline computed
 # at import gave four registered repositories four seconds between them, so a
@@ -446,6 +460,16 @@ pending = {r["sessionKey"] for r in q(
     "SELECT DISTINCT sessionKey FROM wakes WHERE state='pending' AND dueAt <= ?",
     NOW + 60_000)}
 
+# ---- engaged: a non-retired agent holding at least one open assignment, or
+# the target of a pending wake — both facts already computed above (holders_
+# open, pending). "45 agents" reads as 45 working; this is the count that is
+# actually true.
+agent_by_id = {a["id"]: a for a in agents}
+for k in sess:
+    a = agent_by_id.get(ids[k])
+    if a is not None:
+        a["engaged"] = (not a["retired"]) and (k in holders_open or k in pending)
+
 # ---- work items with evidence stages
 items = []
 # open items, plus items that landed recently (their cards are all closed by
@@ -715,12 +739,134 @@ for r in q("""SELECT t.wakeId, w.creatorSessionKey, t.sessionKey, t.startedAt
         links.append({"id": r["wakeId"], "from": src, "to": dst,
                       "state": "run" if r["startedAt"] else "wait"})
 
+# ---- desk: open operator decision requests, straight out of state.db.
+# Effort-kind requests are machine-ruled by process:tightbeam and are not
+# desk items; the kind='operator' filter already excludes them (the table's
+# own CHECK constraint ties kind='effort' to raiserId='process:tightbeam').
+# decision_requests is a Tightbeam 0.1.8+ table: an older gateway, or a test
+# fixture that predates it, simply has no desk data — not a reason to fail
+# every other signal this snapshot carries.
+decisions = []
+try:
+    decision_rows = q("""SELECT id, raiserId, raiserSessionKey, ownerUserId, assignmentId,
+                                raisedAt, deadlineAt, question, options, context
+                         FROM decision_requests WHERE kind='operator' AND status='open'""")
+except sqlite3.OperationalError:
+    decision_rows = []
+for r in decision_rows:
+    try:
+        opts = [o["label"] for o in json.loads(r["options"] or "[]")
+                if isinstance(o, dict) and o.get("label")]
+    except (TypeError, ValueError):
+        opts = []
+    try:
+        ctx = json.loads(r["context"] or "{}")
+        if not isinstance(ctx, dict): ctx = {}
+    except (TypeError, ValueError):
+        ctx = {}
+    wid = None
+    if r["assignmentId"]:
+        arow = q("SELECT workItemId FROM assignments WHERE id=?", r["assignmentId"])
+        wid = arow[0]["workItemId"] if arow else None
+    decisions.append({
+        "id": r["id"], "question": r["question"], "options": opts,
+        "note": ctx.get("note"), "supersedes": ctx.get("supersedes"),
+        "raiserId": r["raiserId"], "raiserAgentId": ids.get(r["raiserSessionKey"]),
+        "assignmentId": r["assignmentId"], "workItemId": wid,
+        "ownerUserId": r["ownerUserId"],
+        "raisedAt": r["raisedAt"], "deadlineAt": r["deadlineAt"],
+    })
+
+def _atc_http(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"} if data is not None else {}
+    req = urllib.request.Request(ATC_API + path, data=data, method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=3) as resp:
+        raw = resp.read()
+        return json.loads(raw) if raw else {}
+
+def sync_desk(decisions):
+    """Mirror open, not-yet-expired decisions onto the board as author=
+    atc:desk arrows/tags/one search. This is the ONLY writer of that author,
+    so an author-scoped diff can never touch anything another author wrote.
+    A request past its deadline but still status='open' drops its arrow/tag
+    here (spec: ruled/withdrawn/expired all clear the annotation) — the desk
+    strip itself, driven by the `decisions` feed field, keeps showing it,
+    greyed, from the raw row regardless."""
+    active = [d for d in decisions if d["deadlineAt"] > NOW]
+    try:
+        state = _atc_http("GET", "/state")
+    except (urllib.error.URLError, OSError, ValueError):
+        return   # a display sync must never fail the primary snapshot
+
+    cur_arrows = {(a["from"], a["to"]): a["arrowId"]
+                  for a in state.get("arrows", []) if a.get("author") == DESK_AUTHOR}
+    cur_tags = {t["target"]: (t["tagId"], t["text"])
+                for t in state.get("tags", []) if t.get("author") == DESK_AUTHOR}
+    cur_search = next((s for s in state.get("searches", [])
+                        if s.get("author") == DESK_AUTHOR), None)
+
+    want_arrows, want_ids, best_ms, best_owner = set(), set(), {}, {}
+    for d in active:
+        raiser = d["raiserAgentId"]
+        if not raiser:
+            continue
+        want_ids.add(raiser)
+        if d["workItemId"]:
+            want_arrows.add((raiser, d["workItemId"]))
+            want_ids.add(d["workItemId"])
+        ms = d["deadlineAt"] - NOW
+        if raiser not in best_ms or ms < best_ms[raiser]:
+            best_ms[raiser] = ms
+            best_owner[raiser] = d.get("ownerUserId") or "operator"
+    want_tags = {}
+    for raiser, ms in best_ms.items():
+        hours = max(0, ms) // 3_600_000
+        owner = best_owner[raiser]
+        want_tags[raiser] = (f"needs {owner} · {hours}h" if hours >= 1
+                              else f"needs {owner} · <1h")
+
+    try:
+        for key, arrow_id in cur_arrows.items():
+            if key not in want_arrows:
+                _atc_http("DELETE", "/arrows/" + arrow_id)
+        new_arrows = [{"from": f, "to": t, "text": "awaiting ruling", "color": "red",
+                       "source": "agent", "author": DESK_AUTHOR}
+                      for (f, t) in want_arrows if (f, t) not in cur_arrows]
+        if new_arrows:
+            _atc_http("POST", "/arrows", {"arrows": new_arrows})
+
+        for raiser, (tag_id, text) in cur_tags.items():
+            if want_tags.get(raiser) != text:
+                _atc_http("DELETE", "/tags/" + tag_id)
+        new_tags = [{"target": raiser, "text": text, "color": "red",
+                     "source": "agent", "author": DESK_AUTHOR}
+                    for raiser, text in want_tags.items()
+                    if raiser not in cur_tags or cur_tags[raiser][1] != text]
+        if new_tags:
+            _atc_http("POST", "/tags", {"tags": new_tags})
+
+        if want_ids:
+            body = {"ids": sorted(want_ids), "label": "awaiting operator ruling",
+                    "author": DESK_AUTHOR, "source": "agent"}
+            if cur_search:
+                body["searchId"] = cur_search["searchId"]
+            _atc_http("POST", "/searches", {"searches": [body]})
+        elif cur_search:
+            _atc_http("DELETE", "/searches/" + cur_search["searchId"])
+    except (urllib.error.URLError, OSError, ValueError):
+        pass   # best-effort; the next tick re-diffs from scratch and retries
+
+if ATC_API:
+    sync_desk(decisions)
+
 snap = {"generatedAt": NOW, "agents": agents, "links": links,
         "items": open_items + closed_items, "messages": msgs, "wakes": wakes_out,
         "mergeSources": [
             {"remote": remote, "branches": list(branches)}
             for remote, branches in CANONICAL_REFS.items()
-        ]}
+        ],
+        "decisions": decisions}
 json.dump(snap, open(OUT, "w"))
 for remote in CANONICAL_REFS:
     saved = {}

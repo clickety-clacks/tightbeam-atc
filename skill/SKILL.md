@@ -51,6 +51,33 @@ a relation — blocks, owns, caused by. Both carry your name and a colour.
 harness and model — and every work item, with its evidence stage and whether
 its code actually reached the branch.
 
+**Show or hide agent names.** `POST /api/names {"on":false}` hides the
+agent-name field everywhere it appears on the view (label, hover, focus pane,
+tag/arrow authorship, a work item's turn list); `{"on":true}` shows it again.
+Role/archetype, id and everything else about an agent stay as they are — this
+toggles one display field, not the underlying data. `GET /api/state` carries
+the current `namesVisible` value; check it before flipping if you are not
+sure which way it is set, and say what you changed.
+
+**Show or hide annotations.** `POST /api/annotations {"on":false}` hides every
+tag and arrow (geometry, heads, labels); the data stays, new ones are still
+accepted, `{"on":true}` restores rendering. `GET /api/state` carries
+`annotationsVisible`.
+
+**Read the Desk.** `data.json`'s `decisions[]` is every OPEN operator decision
+request — an agent asked, only the owning operator can answer, it expires on a deadline.
+It comes straight from `state.db` (read-only), never from polling the
+`tightbeam` CLI on a cadence (that grew state.db to 4.9GB and crashed a VM —
+clickety-clacks/tightbeam#10 — do not reintroduce that pattern here or
+anywhere else in this repo). The generator, not you, owns `author=atc:desk`
+arrows and tags mirroring each open, not-yet-expired request onto the board;
+you can read them like any other, but don't author your own under that name.
+**Agents never rule.** The operator rules from the page itself now (`POST
+/api/decisions/<dr_id>/rule`) or asks a follow-up first (`POST
+/api/decisions/<dr_id>/ask`) — both require the `X-ATC-Operator` token only
+the operator holds, so neither is something you can do. Roci Desk stays the other
+control surface; ATC is a second one, not a replacement.
+
 ## The three rules that matter
 
 **Say who you are.** Every tag, arrow and search takes an `author`. It renders

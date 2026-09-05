@@ -238,6 +238,73 @@
     box-shadow:0 0 0 1px rgba(0,0,0,.25) inset; }
   #selcursor.unsel { border-color:#c4453c; border-style:dashed; }
   body.light #selcursor { border-color:#c23b22; }
+  /* Desk: open operator decisions, waiting on the operator. Bottom right, so it
+     never collides with the search/legend/layer chrome that already owns
+     the top and the left. */
+  #desk { position:fixed; z-index:6; right:calc(18px + env(safe-area-inset-right));
+    bottom:calc(14px + env(safe-area-inset-bottom));
+    display:flex; flex-direction:column; align-items:flex-end; gap:5px;
+    max-width:min(360px, calc(100vw - 36px)); }
+  #desk:empty { display:none; }
+  #desk .deskhead { pointer-events:auto; cursor:pointer; font-size:10.5px;
+    letter-spacing:.12em; text-transform:uppercase; color:#7c8188;
+    background:#101214e6; border:1px solid #2a2d31; border-radius:5px;
+    padding:5px 9px; white-space:nowrap; }
+  #desk.collapsed .chip { display:none; }
+  #desk .chip { pointer-events:auto; cursor:pointer; display:flex; flex-direction:column;
+    gap:2px; font-size:11px; color:#d8d6d1; background:#101214e6;
+    border:1px solid #c4453c; border-left:3px solid #c4453c; border-radius:5px;
+    padding:6px 9px; max-width:100%; box-sizing:border-box; }
+  #desk .chip:hover { border-color:#e0685c; }
+  #desk .chip.amber { border-color:#c9a835; border-left-color:#c9a835; }
+  #desk .chip.amber:hover { border-color:#ddb84a; }
+  #desk .chip.expired { border-color:#4c5158; border-left-color:#4c5158; color:#9a9ea6; }
+  #desk .chip .q { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:34ch; }
+  #desk .chip.expired .q { text-decoration:line-through; }
+  #desk .chip .meta { font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:#9a9ea6; }
+  body.light #desk .deskhead { background:#f2eee2e8; border-color:#c3cdd8; color:#5c6b78; }
+  body.light #desk .chip { background:#f2eee2e8; color:#26323c; }
+  body.light #desk .chip .meta { color:#5c6b78; }
+  body.light #desk .chip.expired { color:#8a97a3; }
+  /* the decision detail reuses #detail's shell; only its own bits need rules */
+  .deskopts { display:flex; flex-wrap:wrap; gap:5px; margin-top:4px; }
+  .deskopts button { cursor:pointer; color:#9a9ea6; background:#101214;
+    border:1px solid #3a3d42; border-radius:4px; padding:4px 8px;
+    font:600 10.5px/1.2 inherit; letter-spacing:.04em; text-transform:none; }
+  .deskopts button:hover, .deskopts button.on { color:#d8d6d1; border-color:#b08d57; }
+  body.light .deskopts button { color:#5c6b78; background:#fff; border-color:#b8c7d9; }
+  body.light .deskopts button:hover, body.light .deskopts button.on { color:#26323c; border-color:#c23b22; }
+  /* the follow-up thread — question, the operator's ask, answer (or "waiting") */
+  .deskthread { margin:6px 0; padding:5px 8px; border-left:2px solid #3a3d42;
+    display:flex; flex-direction:column; gap:2px; }
+  .deskthread .tline { font-size:10.5px; line-height:1.4; color:#9a9ea6; }
+  .deskthread .tline b { color:#b08d57; font-weight:600; text-transform:none;
+    letter-spacing:0; margin-right:4px; }
+  /* the same thread, compacted onto a strip chip once a follow-up is in play */
+  #desk .chip .deskthread { border-left-color:currentColor; margin:2px 0 0; padding:3px 0 0 7px; }
+  #desk .chip .deskthread .tline { color:inherit; opacity:.85;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:34ch; }
+  .deskmuted { color:#7c8188; font-size:11px; font-style:italic; }
+  .desklink { cursor:pointer; color:#4bb8b8; font-size:11px; text-decoration:underline;
+    text-underline-offset:2px; }
+  .desklink:hover { color:#6fd0d0; }
+  #deskaskbox { margin-top:6px; display:flex; flex-direction:column; gap:5px; }
+  #deskask textarea, #deskresponse, #deskrationale { display:block; width:100%;
+    box-sizing:border-box; background:#101214; border:1px solid #3a3d42; border-radius:3px;
+    color:#d8d6d1; padding:6px 8px; font:12px/1.4 inherit; resize:vertical; min-height:44px; }
+  #deskresponse, #deskrationale { margin-top:6px; }
+  #deskaskq { min-height:36px; }
+  #deskasksend, #deskrulebtn { align-self:flex-start; cursor:pointer; color:#101214;
+    background:#b08d57; border:1px solid #b08d57; border-radius:4px; padding:6px 12px;
+    font:700 11px/1.2 inherit; letter-spacing:.04em; margin-top:8px; }
+  #deskrulebtn:disabled { cursor:not-allowed; opacity:.4; }
+  #deskrulebtn:not(:disabled):hover, #deskasksend:hover { background:#c4a06a; }
+  #deskerr { color:#e0685c; font-size:11px; margin-top:5px; min-height:1em; }
+  body.light .deskthread { border-left-color:#c3cdd8; }
+  body.light .deskthread .tline { color:#5c6b78; }
+  body.light .deskmuted { color:#8a97a3; }
+  body.light #deskask textarea, body.light #deskresponse, body.light #deskrationale {
+    background:#fff; border-color:#b8c7d9; color:#26323c; }
   #selui { pointer-events:none; box-sizing:border-box; max-width:100%;
     background:#1b1e22dd; border:1px solid #3a3d42; border-radius:5px;
     padding:8px 11px; color:#9a9ea6; font-size:11px; letter-spacing:.08em;
@@ -300,6 +367,7 @@
 <div id="tagbox">tag <span class="who"></span><input id="taginput" type="text"
   placeholder="type a note, enter to attach" maxlength="80"><div id="tagswatches"></div></div>
 <div id="selcursor"></div>
+<div id="desk" role="group" aria-label="Desk — decisions awaiting ruling"></div>
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
@@ -405,6 +473,11 @@ renderLayerCards();
 
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
 let flight = null, orbitAngle = 0, arrowFrame = 0;
+/* Desk: which open decision (if any) owns #detail right now, and whether the
+   strip is collapsed. Not part of `view` — a decision is not a scene node,
+   has no mesh, and the focus transaction it drives is a side effect of
+   opening one, not the other way around. */
+let deskFocus = null, deskCollapsed = false;
 
 /* ---------- view state ----------
    Two independent things, plus one input mode. Nothing else may hold view
@@ -442,6 +515,12 @@ const view = {
   filter: { kind: 'none', query: '', ids: null },
   framing: 'none',               /* 'none' | 'focus' | 'selection' — camera intent */
   fitTarget: 'selection',        /* which framing f/space lands on next */
+  /* the agent-name display field, on or off; everything else about an agent
+     (role/archetype, id, idle, workload) stays visible either way */
+  namesVisible: true,
+  /* Tags and arrows are annotations, not data: hiding them does not stop the
+     poller from receiving or retaining them. Defaults shown after a restart. */
+  annotationsVisible: true,
 };
 /* THE focus transaction — one owner for subject, depth, the camera pose below
    the layer, and the return policy. `null` carries NONE of them, so a stale
@@ -485,6 +564,21 @@ function assertFocusInvariant(){
     console.assert((s.depth === 'narrow' || s.depth === 'neighborhood') && !!s.arrowId, 'focus: bad arrow subject');
   console.assert(L.returnPolicy === 'reframe-parent' || L.returnPolicy === 'restore-exact', 'focus: bad return policy');
   console.assert(L.returnPolicy !== 'restore-exact' || !!L.lowerPose, 'focus: restore-exact without lower pose');
+}
+/* the one seam every display of an agent's name goes through, so the toggle
+   cannot miss a spot: hidden means blank, not a placeholder word */
+const agentLabel = a => view.namesVisible ? a.name : '';
+function setNamesVisible(on){
+  view.namesVisible = on;
+  renderDetail();                /* an open detail pane must not show stale text */
+}
+function setAnnotationsVisible(on){
+  view.annotationsVisible = on;
+  /* Keep hidden annotations out of hit-testing immediately, before the next frame. */
+  arrowGroup.visible = on;
+  selectables().forEach(m => (m.userData.tagSprites || []).forEach(sp => {
+    sp.visible = on && (m.userData.dim ?? 1) > .9;
+  }));
 }
 function focusMesh(){
   if (!view.focus.key) return null;
@@ -1239,6 +1333,8 @@ function renderCards(){
 }
 function esc(v){ return String(v ?? '').replace(/[&<>"]/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+/* single-quote a value for a copy-pasted shell command */
+function shq(v){ return "'" + String(v).replace(/'/g, "'\\''") + "'"; }
 
 document.getElementById('cards').addEventListener('click', ev => {
   const rename = ev.target.closest('[data-rename]');
@@ -1518,7 +1614,8 @@ function buildGround(agents){
        the leaf-worker crowd stays tooltip-only */
     if (!a.retired && ['main','po','patrol','orch'].includes(a.kind)){
       const sp = labelSprite(a.name.length>28 ? a.name.slice(0,27)+'…' : a.name);
-      sp.position.set(0, 1.15, 0); m.add(sp);
+      sp.position.set(0, 1.15, 0); sp.visible = view.namesVisible;
+      m.add(sp);
     }
     groundGroup.add(m); agentMeshes[a.id]=m;
   });
@@ -1776,7 +1873,7 @@ function showTagBox(){
   if (view.focus.stage !== 1 || !view.focus.key){ hideTagBox(); return; }
   const m = focusMesh();
   const label = m?.userData.w ? (m.userData.w.short || m.userData.w.id)
-                              : (m?.userData.a ? m.userData.a.name : '');
+                              : (m?.userData.a ? agentLabel(m.userData.a) : '');
   tagBox.querySelector('.who').textContent = label ? '· ' + String(label).slice(0, 26) : '';
   tagBox.style.display = 'block';
   tagInput.value = '';
@@ -1857,6 +1954,28 @@ const API = './api';
 const CLIENT_ID = Math.random().toString(36).slice(2, 10);
 let apiSeq = 0, apiTagsRev = -1, apiGen = null, apiUp = false, apiJoined = false;
 let tags = [];                                   /* [{tagId,target,text,source}] */
+let followups = [], followupsRev = -1;           /* dr_id -> {question, askedAt, ...} */
+/* /rule and /ask are gated by an HttpOnly, SameSite=Strict cookie the
+   server sets on every page load (Path=/api) — not a security boundary,
+   just a speed bump against a stray curl or a careless agent. There is
+   nothing for the human to type or store, and nothing here can read the
+   cookie's value even if it wanted to. A 403 means the cookie is missing
+   or stale (e.g. the service restarted since this tab was opened, minting
+   a new token) — reload the page to pick up the current one. */
+async function apiDecisionAction(drId, action, body){
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 25000);   /* the one gateway call can take real time */
+  try {
+    const r = await fetch(API + '/decisions/' + encodeURIComponent(drId) + '/' + action, {
+      method: 'POST', signal: ctl.signal, cache: 'no-store',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify(body)});
+    const data = await r.json().catch(() => ({}));
+    if (r.status === 403) throw new Error('operator cookie missing or stale — reload the page');
+    if (!r.ok) throw new Error(data.error || ('http ' + r.status));
+    return data;
+  } finally { clearTimeout(t); }
+}
 
 /* every request is bounded and checked: a hung fetch must not stall the loop,
    and a 500 must not read as success */
@@ -1902,6 +2021,19 @@ async function apiPull(){
       searchesRev = d.searchesRev;
       searches = Array.isArray(d.searches) ? d.searches : [];
       renderCards();
+    }
+    /* a page that joins mid-session must not wait for the next toggle to learn
+       the current state — /api/pull always carries it, like tags/arrows do */
+    if (typeof d.namesVisible === 'boolean' && d.namesVisible !== view.namesVisible){
+      setNamesVisible(d.namesVisible);
+    }
+    if (typeof d.annotationsVisible === 'boolean' && d.annotationsVisible !== view.annotationsVisible){
+      setAnnotationsVisible(d.annotationsVisible);
+    }
+    if (d.followupsRev !== followupsRev){
+      followupsRev = d.followupsRev;
+      followups = Array.isArray(d.followups) ? d.followups : [];
+      renderDesk();
     }
     if (typeof d.seq === 'number' && d.seq >= apiSeq) apiSeq = d.seq;
     apiUp = true;
@@ -1955,11 +2087,23 @@ async function apiReportSelection(){
   })() : null;
   if (focArrow) foc.push({id: focArrow.arrowId, type: 'arrow',
     title: (arrowById(focArrow.arrowId)?.text) || (focArrow.from + ' → ' + focArrow.to)});
+  /* read-before-write for the Desk: which chip (if any) is open, reported
+     the same way a node focus is — set the instant it opens or closes, so
+     an agent asked "which decision do I have selected?" does not have to
+     infer it from the focus neighbourhood. */
+  const deskEntry = deskFocus ? deskFocusEntry() : null;
+  const decision = deskEntry ? {
+    id: deskEntry.shown.id, question: deskEntry.shown.question,
+    raiserAgentId: deskEntry.shown.raiserAgentId || null,
+    workItemId: deskEntry.shown.workItemId || null,
+    deadlineAt: deskEntry.deadlineAt,
+  } : null;
   const body = JSON.stringify({clientId: CLIENT_ID, selection: sel,
                                focused: foc, focusMode: mode, focusedArrow: focArrow,
                                camera: {position: camera.position.toArray(),
                                         target: controls.target.toArray(),
-                                        framing: view.framing, inFlight: !!flight}});
+                                        framing: view.framing, inFlight: !!flight},
+                               decision});
   /* Re-assert periodically even when unchanged so the report timestamp says
      this viewer is still connected. Other viewers have separate records. */
   if (body === lastReport && ++reportSkips < 5) return;
@@ -2033,6 +2177,8 @@ function applyCommand(c){
     } else { setFilter('none'); activeSearchId = typingCardId = null; renderCards(); }
   } else if (c.kind === 'fit'){
     if (c.on) fitSelection(); else if (camMark) restoreCamera();
+  } else if (c.kind === 'names'){
+    setNamesVisible(!!c.on);
   }
 }
 
@@ -2110,9 +2256,15 @@ async function refresh(){
       }
     }
     spawnWakes(); spawnMessages();
+    renderDesk();
     const age = Math.round((Date.now()-d.generatedAt)/1000);
     const el = document.getElementById('mode');
-    el.textContent = 'live · '+d.agents.length+' agents · '+d.items.length+' items · '+age+'s ago';
+    /* engaged: a non-retired agent holding an open card or targeted by a
+       pending wake — the generator already excludes retired agents from
+       this flag, so counting it here is the whole rule */
+    const engaged = d.agents.filter(a => a.engaged).length;
+    el.textContent = 'live · '+d.agents.length+' agents · '+engaged+' engaged · '
+      +d.items.length+' items · '+age+'s ago';
     el.className = 'live';
   } catch(e){
     if (!DATA){
@@ -2126,7 +2278,17 @@ async function refresh(){
 
 /* ---------- theme toggle ---------- */
 addEventListener('keydown', e=>{
-  if (e.target && e.target.tagName === 'INPUT') return;
+  /* the desk rule/rationale/follow-up boxes are textareas, not inputs — a
+     single-letter shortcut firing while typing "a note" would be a real bug */
+  const typing = e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
+  if (deskFocus && e.key === 'Escape'){ e.preventDefault(); deskFocus = null; endFocus('background'); return; }
+  if (deskFocus && (e.metaKey || e.ctrlKey) && e.key === 'Enter'){
+    e.preventDefault();
+    const entry = deskFocusEntry();
+    if (entry && deskRuleReady()) submitDeskRule(entry);
+    return;
+  }
+  if (typing) return;
   if (e.key === '/'){ e.preventDefault(); searchEl.focus(); searchEl.select(); return; }
   if (e.key==='c' || e.key==='C'){ apiClearTags(); }
   else if (e.key==='t' || e.key==='T'){ T = T.name==='dark' ? THEMES.light : THEMES.dark; applyTheme(); }
@@ -2140,6 +2302,18 @@ addEventListener('keydown', e=>{
     document.getElementById('legend').classList.toggle('collapsed');
     measureLegend();          /* the mode strip rides on it; let it drop */
   }
+  else if (e.key==='n' || e.key==='N'){
+    const on = !view.namesVisible;
+    setNamesVisible(on);           /* apply locally now; the pull loop reconciles if it fails */
+    apiFetch('/names', {method:'POST', headers:{'content-type':'application/json'},
+                        body: JSON.stringify({on})}).catch(()=>{});
+  }
+  else if (e.key==='a' || e.key==='A'){
+    const on = !view.annotationsVisible;
+    setAnnotationsVisible(on);    /* apply locally now; the pull loop reconciles */
+    apiFetch('/annotations', {method:'POST', headers:{'content-type':'application/json'},
+                              body: JSON.stringify({on})}).catch(()=>{});
+  }
   else if (e.key==='['){ setRadius(selRadius - Math.max(4, selRadius*.15)); }
   else if (e.key===']'){ setRadius(selRadius + Math.max(4, selRadius*.15)); }
 });
@@ -2149,6 +2323,9 @@ matchMedia('(prefers-color-scheme: light)').addEventListener('change', ev=>{
 
 applyTheme();
 refresh(); setInterval(refresh, 5000);
+/* the desk countdown must tick even when the org is quiet and data.json is
+   not regenerating — driven by wall clock, independent of the data poll */
+setInterval(renderDesk, 30000);
 document.getElementById('touchcontrols').addEventListener('click', e => {
   const action = e.target.closest('button[data-action]')?.dataset.action;
   if (!action) return;
@@ -2258,6 +2435,7 @@ function startTouchHold(e){
 }
 function activateHit(hit){
   if (hit && hit.kind === 'arrow'){
+    deskFocus = null;               /* a real scene click always wins over the desk pane */
     focusArrow(hit.obj);
   } else if (hit && hit.kind === 'node'){
     const o = hit.obj;
@@ -2266,6 +2444,7 @@ function activateHit(hit){
        put the camera back on the fit it came from. Re-clicking the same node
        toggles single<->neighbourhood; any other node (or an arrow subject)
        replaces it at single. focusNode owns the layer and the camera. */
+    deskFocus = null;
     const k = selKey(o);
     const sub = focusLayer && focusLayer.subject;
     const cur = sub && sub.kind === 'node' && sub.key === k ? sub.depth : null;
@@ -2517,7 +2696,7 @@ function nodeContent(u, clamp){
         + (w.assignments?.terminal || 0) + ' terminal',
     ].join('<br>');
     const acts = Object.entries(w.turns||{}).map(([h,st])=>
-      (st==='run'?'▶ ':'⏸ ')+(byId[h]?byId[h].name:h)).join('<br>') || 'no turns active';
+      (st==='run'?'▶ ':'⏸ ')+(byId[h]?agentLabel(byId[h]):h)).join('<br>') || 'no turns active';
     const merged = w.merged === true ? 'in the branch'
                  : w.merged === false ? 'NOT in the branch'
                  : w.code === true ? 'branch state unknown'
@@ -2544,15 +2723,288 @@ function nodeContent(u, clamp){
      were a CLI round trip away before the feed carried them */
   const kit = [a.archetype, a.model && (a.harness ? a.harness + ' · ' + a.model : a.model)]
     .filter(Boolean).join('  ·  ');
-  return '<span class="t">' + a.name + '</span>'
+  return '<span class="t">' + agentLabel(a) + '</span>'
     + (kit ? '<span class="k">is</span>' + kit : '')
     + '<span class="k">state</span>' + (a.retired?'retired (holds open cards)':'active') + ' · ' + idle
     + (a.turn==='run'?' · turn running':a.turn==='wait'?' · turn queued':'')
     + '<span class="k">workload</span>' + held + ' open item' + (held===1?'':'s')
     + '<span class="k">id</span><span class="seg">' + a.id + '</span>';
 }
+/* ---------- desk: operator decisions waiting on the operator ---------- */
+function deskCountdown(deadlineAt){
+  const ms = deadlineAt - Date.now(), expired = ms <= 0, abs = Math.abs(ms);
+  const h = Math.floor(abs / 3600000), m = Math.floor((abs % 3600000) / 60000);
+  const txt = h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+  return {expired, txt: expired ? 'expired ' + txt + ' ago' : txt + ' left'};
+}
+function deskClass(ms){
+  if (ms <= 0) return 'expired';
+  if (ms <= 4 * 3600000) return 'amber';
+  return 'red';
+}
+function deskAgo(at){
+  const m = Math.max(0, Math.floor((Date.now() - at) / 60000));
+  return m < 1 ? 'just now' : m + 'm ago';
+}
+/* A decision that the operator asked a follow-up on gets superseded by a fresh
+   row once the raiser answers. Fold that pair into ONE entry so the chip
+   swaps in place rather than the original vanishing and a new one landing
+   somewhere else in the list — this is the only place that pairing happens;
+   everything downstream (chip, pane, focus) just reads `entry`. */
+function deskDisplayList(){
+  const decisions = (DATA && DATA.decisions) || [];
+  const followupByDr = {}; followups.forEach(f => followupByDr[f.drId] = f);
+  const decisionsById = {}; decisions.forEach(d => decisionsById[d.id] = d);
+  const answerFor = {}; decisions.forEach(d => { if (d.supersedes) answerFor[d.supersedes] = d; });
+  const list = [];
+  decisions.forEach(d => {
+    // d is the answer to a followed-up original that is STILL in the feed —
+    // skip here, it folds in below when we reach that original.
+    if (d.supersedes && followupByDr[d.supersedes] && decisionsById[d.supersedes]) return;
+    // d is the answer to a followed-up original that has already dropped out
+    // of the feed (superseded rows aren't status=open) — nothing will ever
+    // visit that original id, so anchor the fold on d itself, keyed by the
+    // original id so the chip's identity/position doesn't move.
+    if (d.supersedes && followupByDr[d.supersedes]){
+      const followup = followupByDr[d.supersedes];
+      list.push({key: d.supersedes, shown: d, followup, answered: true,
+                 ownerUserId: d.ownerUserId,
+                 deadlineAt: Math.min(followup.deadlineAt, d.deadlineAt),
+                 sortAt: followup.raisedAt});
+      return;
+    }
+    const followup = followupByDr[d.id];
+    const answer = followup ? answerFor[d.id] : null;
+    const shown = answer || d;
+    const deadlineAt = followup ? Math.min(followup.deadlineAt, shown.deadlineAt) : shown.deadlineAt;
+    list.push({key: d.id, shown, followup, answered: !!answer, deadlineAt,
+               ownerUserId: shown.ownerUserId,
+               sortAt: followup ? followup.raisedAt : d.raisedAt});
+  });
+  list.sort((a, b) => a.sortAt - b.sortAt);
+  return list;
+}
+function deskThreadHtml(entry){
+  if (!entry.followup) return '';
+  const rows = [['asked', entry.followup.originalQuestion], [(entry.ownerUserId || 'operator'), entry.followup.question]];
+  rows.push(entry.answered ? ['answer', entry.shown.note || '(no note)']
+                            : ['status', 'waiting for the PO’s answer']);
+  return '<div class="deskthread">' + rows.map(([who, txt]) =>
+    '<div class="tline"><b>' + esc(who) + ':</b> ' + esc(txt) + '</div>').join('') + '</div>';
+}
+const deskEl = document.getElementById('desk');
+function renderDesk(){
+  const list = deskDisplayList();
+  document.title = (list.length ? '(' + list.length + ') ' : '') + 'ATC';
+  if (!list.length){
+    deskEl.className = '';
+    deskEl.innerHTML = '<div class="deskhead">desk clear</div>';
+    return;
+  }
+  deskEl.className = deskCollapsed ? 'collapsed' : '';
+  const n = list.length;
+  deskEl.innerHTML =
+    '<div class="deskhead" id="deskhead">' + n + ' awaiting ruling'
+      + (deskCollapsed ? ' ▸' : ' ▾') + '</div>'
+    + list.map(entry => {
+        const cd = deskCountdown(entry.deadlineAt);
+        return '<div class="chip ' + deskClass(entry.deadlineAt - Date.now())
+          + '" data-dr="' + esc(entry.key) + '">'
+          + '<span class="q">' + esc(entry.shown.question) + '</span>'
+          + deskThreadHtml(entry)
+          + '<span class="meta">' + esc(entry.shown.raiserId) + ' · ' + cd.txt + '</span>'
+          + '</div>';
+      }).join('');
+}
+/* Delegated, not per-chip: the strip is rebuilt from scratch on every render
+   (data poll or the 30s countdown tick), so per-element listeners would leak
+   and re-leak. One listener on the container outlives every rebuild. */
+deskEl.addEventListener('click', ev => {
+  if (ev.target.closest('#deskhead')){ deskCollapsed = !deskCollapsed; renderDesk(); return; }
+  const chip = ev.target.closest('.chip');
+  if (chip) openDeskDetail(chip.dataset.dr);
+});
+
 const detailEl = document.getElementById('detail');
+function deskFocusEntry(){
+  if (!deskFocus) return null;
+  return deskDisplayList().find(e => e.key === deskFocus) || null;
+}
+function deskRuleReady(){
+  const opt = detailEl.querySelector('.deskopt.on');
+  const response = (document.getElementById('deskresponse')?.value || '').trim();
+  const rationale = (document.getElementById('deskrationale')?.value || '').trim();
+  const looksLikeSentence = t => t.length >= 8 && t.includes(' ');
+  const hasChoice = !!opt || response.length > 0;
+  const rationaleOk = looksLikeSentence(rationale) || (!opt && looksLikeSentence(response));
+  return hasChoice && rationaleOk;
+}
+function deskSyncRuleButton(){
+  const btn = document.getElementById('deskrulebtn');
+  if (btn) btn.disabled = !deskRuleReady();
+}
+function deskContent(entry){
+  const d = entry.shown;
+  const cd = deskCountdown(entry.deadlineAt);
+  const opts = (d.options || []).map(o =>
+    '<button type="button" class="deskopt" data-label="' + esc(o) + '">' + esc(o) + '</button>').join('');
+  const askBlocked = entry.followup && !entry.answered;
+  return '<span class="t">operator decision · ' + esc(d.raiserId) + '</span>'
+    + '<div>' + esc(d.question) + '</div>'
+    + deskThreadHtml(entry)
+    + (!entry.followup && d.note ? '<span class="k">PO note</span><div>' + esc(d.note) + '</div>' : '')
+    + '<span class="k">deadline</span>' + new Date(entry.deadlineAt).toLocaleString() + ' · ' + cd.txt
+    + '<span class="k">ask a follow-up</span>'
+    + (askBlocked
+        ? '<div class="deskmuted">asked ' + deskAgo(entry.followup.askedAt) + ' — waiting</div>'
+        : ('<div id="deskask"><span id="deskasktoggle" class="desklink">ask a follow-up</span>'
+          + '<div id="deskaskbox" style="display:none">'
+          + '<textarea id="deskaskq" placeholder="e.g. give me the ELI5 version" maxlength="2000"></textarea>'
+          + '<button type="button" id="deskasksend">Send</button></div></div>'))
+    + '<span class="k">rule it</span>'
+    + '<div class="deskopts">' + opts + '</div>'
+    + '<textarea id="deskresponse" placeholder="Respond in text instead…" maxlength="4000"></textarea>'
+    + '<textarea id="deskrationale" placeholder="Because … / Next: …" maxlength="4000"></textarea>'
+    + '<button type="button" id="deskrulebtn" disabled>Rule (⌘/Ctrl+Enter)</button>'
+    + '<div id="deskerr"></div>'
+    + '<span class="k">id</span><span class="seg">' + esc(d.id) + '</span>';
+}
+async function submitDeskRule(entry){
+  const btn = document.getElementById('deskrulebtn'), errEl = document.getElementById('deskerr');
+  const opt = detailEl.querySelector('.deskopt.on');
+  const response = (document.getElementById('deskresponse')?.value || '').trim();
+  const rationale = (document.getElementById('deskrationale')?.value || '').trim();
+  const body = opt ? {decision: opt.dataset.label, rationale} : {response, rationale};
+  if (btn){ btn.disabled = true; btn.textContent = 'ruling…'; }
+  if (errEl) errEl.textContent = '';
+  try {
+    await apiDecisionAction(entry.shown.id, 'rule', body);
+    /* success: the chip/tag/arrow/search clear on the generator's next tick
+       once the row reads ruled (phase 1 cleanup, unchanged). Close the pane
+       now rather than leave the human staring at a form for a decision
+       that is already made. */
+    deskFocus = null; endFocus('background');
+  } catch(e){
+    if (btn){ btn.disabled = false; btn.textContent = 'Rule (⌘/Ctrl+Enter)'; }
+    if (errEl) errEl.textContent = String(e.message || e);
+  }
+}
+async function submitDeskAsk(entry){
+  const q = (document.getElementById('deskaskq')?.value || '').trim();
+  if (!q) return;
+  const sendBtn = document.getElementById('deskasksend');
+  if (sendBtn){ sendBtn.disabled = true; sendBtn.textContent = 'sending…'; }
+  try {
+    await apiDecisionAction(entry.shown.id, 'ask', {question: q});
+    /* the server has recorded the follow-up; the next /api/pull tick brings
+       followupsRev forward and re-renders this pane in the waiting state */
+  } catch(e){
+    if (sendBtn){ sendBtn.disabled = false; sendBtn.textContent = 'Send'; }
+    alert('Could not send the follow-up: ' + (e.message || e));
+  }
+}
+/* Delegated on #detail since its content is rebuilt on every render — a
+   per-render listener would leak, and re-querying live elements each time
+   keeps this correct across rebuilds without any extra bookkeeping. */
+detailEl.addEventListener('click', ev => {
+  const opt = ev.target.closest('.deskopt');
+  if (opt){
+    detailEl.querySelectorAll('.deskopt').forEach(b => b.classList.toggle('on', b === opt));
+    const response = document.getElementById('deskresponse');
+    if (response) response.value = '';         /* picking an option and typing a response are exclusive */
+    deskSyncRuleButton();
+    return;
+  }
+  if (ev.target.id === 'deskasktoggle'){
+    const box = document.getElementById('deskaskbox');
+    if (box){ box.style.display = 'flex'; document.getElementById('deskaskq')?.focus(); }
+    ev.target.style.display = 'none';
+    return;
+  }
+  if (ev.target.id === 'deskasksend'){
+    const entry = deskFocusEntry();
+    if (entry) submitDeskAsk(entry);
+    return;
+  }
+  if (ev.target.id === 'deskrulebtn'){
+    const entry = deskFocusEntry();
+    if (entry && deskRuleReady()) submitDeskRule(entry);
+  }
+});
+detailEl.addEventListener('input', ev => {
+  if (ev.target.id === 'deskresponse'){
+    if (ev.target.value.trim()){
+      detailEl.querySelectorAll('.deskopt.on').forEach(b => b.classList.remove('on'));
+    }
+    deskSyncRuleButton();
+  } else if (ev.target.id === 'deskrationale'){
+    deskSyncRuleButton();
+  }
+});
+function openDeskDetail(key){
+  const list = deskDisplayList();
+  const entry = list.find(e => e.key === key);
+  if (!entry) return;
+  deskFocus = key;
+  if (entry.shown.raiserAgentId) focusNode(selKeyFor(entry.shown.raiserAgentId), 'neighborhood');
+  else renderDetail();
+}
+/* The desk pane is rebuilt from scratch by every renderDetail() — and that
+   runs on each data poll and view change — so without this the human's
+   picked option, half-typed rationale and open follow-up box vanished every
+   few seconds. Capture the live form before the rebuild, restore it after,
+   but only while the pane still shows the SAME decision: a different entry
+   starts clean. */
+const DESK_FIELDS = ['deskresponse', 'deskrationale', 'deskaskq'];
+function deskFormState(){
+  const key = detailEl.dataset.deskKey;
+  if (!key) return null;
+  const on = detailEl.querySelector('.deskopt.on');
+  const ae = document.activeElement;
+  const vals = {};
+  DESK_FIELDS.forEach(id => { const el = document.getElementById(id); if (el) vals[id] = el.value; });
+  return {
+    key,
+    opt: on ? on.dataset.label : null,
+    vals,
+    askOpen: document.getElementById('deskaskbox')?.style.display === 'flex',
+    focus: ae && DESK_FIELDS.includes(ae.id) ? {id: ae.id, s: ae.selectionStart, e: ae.selectionEnd} : null,
+    ruling: document.getElementById('deskrulebtn')?.textContent === 'ruling…',
+    err: document.getElementById('deskerr')?.textContent || ''
+  };
+}
+function deskRestoreForm(st){
+  if (st.opt) detailEl.querySelectorAll('.deskopt').forEach(b => b.classList.toggle('on', b.dataset.label === st.opt));
+  Object.entries(st.vals).forEach(([id, v]) => { const el = document.getElementById(id); if (el) el.value = v; });
+  if (st.askOpen){
+    const box = document.getElementById('deskaskbox'), tog = document.getElementById('deskasktoggle');
+    if (box) box.style.display = 'flex';
+    if (tog) tog.style.display = 'none';
+  }
+  const err = document.getElementById('deskerr');
+  if (err && st.err) err.textContent = st.err;
+  deskSyncRuleButton();
+  const btn = document.getElementById('deskrulebtn');
+  if (btn && st.ruling){ btn.disabled = true; btn.textContent = 'ruling…'; }
+  if (st.focus){
+    const el = document.getElementById(st.focus.id);
+    if (el){ el.focus(); try { el.setSelectionRange(st.focus.s, st.focus.e); } catch(_){} }
+  }
+}
 function renderDetail(){
+  if (deskFocus){
+    const entry = deskFocusEntry();
+    if (entry){
+      const st = deskFormState();
+      detailEl.innerHTML = deskContent(entry);
+      detailEl.dataset.deskKey = entry.key;
+      detailEl.style.display = 'block';
+      if (st && st.key === entry.key) deskRestoreForm(st);
+      return;
+    }
+    deskFocus = null;   /* vanished — ruled/withdrawn elsewhere; fall through below */
+  }
+  delete detailEl.dataset.deskKey;
   const m = view.focus.stage === 1 ? focusMesh() : null;
   if (!m){ detailEl.style.display = 'none'; return; }
   detailEl.innerHTML = nodeContent(m.userData, false);
@@ -3212,8 +3664,8 @@ function applyLayerVisibility(){
     if (u.lineMat) u.lineMat.visible = layerState.agents && !u.selected;
     o.children.forEach(ch => {
       if (ch.isSprite){
-        if (ch.userData.isTag) ch.visible = layerState.annotations && (u.dim ?? 1) > .9;
-        else if (ch.userData.isAgentLabel) ch.visible = layerState.agentLabels && (u.dim ?? 1) > .9;
+        if (ch.userData.isTag) ch.visible = layerState.annotations && view.annotationsVisible && (u.dim ?? 1) > .9;
+        else if (ch.userData.isAgentLabel) ch.visible = layerState.agentLabels && view.namesVisible && (u.dim ?? 1) > .9;
       } else ch.visible = layerState.agents;
     });
   });
@@ -3223,7 +3675,7 @@ function applyLayerVisibility(){
     o.material.visible = layerState.workItems;
     if (u.lineMat) u.lineMat.visible = layerState.workItems && !u.selected;
     o.children.forEach(ch => {
-      if (ch.isSprite) ch.visible = layerState.annotations && (u.dim ?? 1) > .9;
+      if (ch.isSprite) ch.visible = layerState.annotations && view.annotationsVisible && (u.dim ?? 1) > .9;
       else ch.visible = layerState.workItems;
     });
   });
@@ -3312,6 +3764,7 @@ function setInputMode(mode){
    policy camera action; clearFocus() is the plain reset used where there is
    provably nothing to pop. */
 function clearFocus(){
+  deskFocus = null;
   focusLayer = null;
   projectFocus();
   assertFocusInvariant();
@@ -3515,6 +3968,7 @@ function focusArrow(g){
 function endFocus(reason){
   const L = focusLayer;
   if (!L) return false;
+  deskFocus = null;
   focusLayer = null;
   projectFocus();
   assertFocusInvariant();
@@ -3882,7 +4336,12 @@ function tickFrame(){
           if (!ch.userData.ringWave) ch.visible = layerState.agents;
           return;
         }
-        ch.visible = (ch.userData.isTag ? layerState.annotations : layerState.agentLabels) && f > .9;
+        /* two independent gates, both must pass: the local per-browser layer
+           panel (layerState) and the shared/API-driven toggle (view.*) that
+           an agent or another viewer can flip for everyone */
+        ch.visible = f > .9 && (ch.userData.isTag
+          ? (layerState.annotations && view.annotationsVisible)
+          : (layerState.agentLabels && view.namesVisible));
         ch.material.opacity = (ch.userData.isTag ? 1 : .85) * f;
       });
     }
@@ -3936,7 +4395,7 @@ function tickFrame(){
          unfaded next to its own node — ghosted tags drop out entirely. */
       if (ch.isSprite){
         const f = u.dim ?? 1;
-        ch.visible = layerState.annotations && f > .9;
+        ch.visible = layerState.annotations && view.annotationsVisible && f > .9;
         ch.material.opacity = f;
         return;
       }
