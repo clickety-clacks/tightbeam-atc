@@ -806,7 +806,7 @@ def sync_desk(decisions):
     cur_search = next((s for s in state.get("searches", [])
                         if s.get("author") == DESK_AUTHOR), None)
 
-    want_arrows, want_ids, best_ms = set(), set(), {}
+    want_arrows, want_ids, best_ms, best_owner = set(), set(), {}, {}
     for d in active:
         raiser = d["raiserAgentId"]
         if not raiser:
@@ -818,11 +818,13 @@ def sync_desk(decisions):
         ms = d["deadlineAt"] - NOW
         if raiser not in best_ms or ms < best_ms[raiser]:
             best_ms[raiser] = ms
+            best_owner[raiser] = d.get("ownerUserId") or "operator"
     want_tags = {}
     for raiser, ms in best_ms.items():
         hours = max(0, ms) // 3_600_000
-        want_tags[raiser] = (f"needs George · {hours}h" if hours >= 1
-                              else "needs George · <1h")
+        owner = best_owner[raiser]
+        want_tags[raiser] = (f"needs {owner} · {hours}h" if hours >= 1
+                              else f"needs {owner} · <1h")
 
     try:
         for key, arrow_id in cur_arrows.items():
@@ -845,7 +847,7 @@ def sync_desk(decisions):
             _atc_http("POST", "/tags", {"tags": new_tags})
 
         if want_ids:
-            body = {"ids": sorted(want_ids), "label": "where George is needed",
+            body = {"ids": sorted(want_ids), "label": "awaiting operator ruling",
                     "author": DESK_AUTHOR, "source": "agent"}
             if cur_search:
                 body["searchId"] = cur_search["searchId"]

@@ -238,7 +238,7 @@
     box-shadow:0 0 0 1px rgba(0,0,0,.25) inset; }
   #selcursor.unsel { border-color:#c4453c; border-style:dashed; }
   body.light #selcursor { border-color:#c23b22; }
-  /* Desk: open operator decisions, waiting on George. Bottom right, so it
+  /* Desk: open operator decisions, waiting on the operator. Bottom right, so it
      never collides with the search/legend/layer chrome that already owns
      the top and the left. */
   #desk { position:fixed; z-index:6; right:calc(18px + env(safe-area-inset-right));
@@ -274,7 +274,7 @@
   .deskopts button:hover, .deskopts button.on { color:#d8d6d1; border-color:#b08d57; }
   body.light .deskopts button { color:#5c6b78; background:#fff; border-color:#b8c7d9; }
   body.light .deskopts button:hover, body.light .deskopts button.on { color:#26323c; border-color:#c23b22; }
-  /* the follow-up thread — question, George's ask, answer (or "waiting") */
+  /* the follow-up thread — question, the operator's ask, answer (or "waiting") */
   .deskthread { margin:6px 0; padding:5px 8px; border-left:2px solid #3a3d42;
     display:flex; flex-direction:column; gap:2px; }
   .deskthread .tline { font-size:10.5px; line-height:1.4; color:#9a9ea6; }
@@ -367,7 +367,7 @@
 <div id="tagbox">tag <span class="who"></span><input id="taginput" type="text"
   placeholder="type a note, enter to attach" maxlength="80"><div id="tagswatches"></div></div>
 <div id="selcursor"></div>
-<div id="desk" role="group" aria-label="Desk — waiting on George"></div>
+<div id="desk" role="group" aria-label="Desk — decisions awaiting ruling"></div>
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
@@ -2730,7 +2730,7 @@ function nodeContent(u, clamp){
     + '<span class="k">workload</span>' + held + ' open item' + (held===1?'':'s')
     + '<span class="k">id</span><span class="seg">' + a.id + '</span>';
 }
-/* ---------- desk: operator decisions waiting on George ---------- */
+/* ---------- desk: operator decisions waiting on the operator ---------- */
 function deskCountdown(deadlineAt){
   const ms = deadlineAt - Date.now(), expired = ms <= 0, abs = Math.abs(ms);
   const h = Math.floor(abs / 3600000), m = Math.floor((abs % 3600000) / 60000);
@@ -2746,7 +2746,7 @@ function deskAgo(at){
   const m = Math.max(0, Math.floor((Date.now() - at) / 60000));
   return m < 1 ? 'just now' : m + 'm ago';
 }
-/* A decision that George asked a follow-up on gets superseded by a fresh
+/* A decision that the operator asked a follow-up on gets superseded by a fresh
    row once the raiser answers. Fold that pair into ONE entry so the chip
    swaps in place rather than the original vanishing and a new one landing
    somewhere else in the list — this is the only place that pairing happens;
@@ -2768,6 +2768,7 @@ function deskDisplayList(){
     if (d.supersedes && followupByDr[d.supersedes]){
       const followup = followupByDr[d.supersedes];
       list.push({key: d.supersedes, shown: d, followup, answered: true,
+                 ownerUserId: d.ownerUserId,
                  deadlineAt: Math.min(followup.deadlineAt, d.deadlineAt),
                  sortAt: followup.raisedAt});
       return;
@@ -2777,6 +2778,7 @@ function deskDisplayList(){
     const shown = answer || d;
     const deadlineAt = followup ? Math.min(followup.deadlineAt, shown.deadlineAt) : shown.deadlineAt;
     list.push({key: d.id, shown, followup, answered: !!answer, deadlineAt,
+               ownerUserId: shown.ownerUserId,
                sortAt: followup ? followup.raisedAt : d.raisedAt});
   });
   list.sort((a, b) => a.sortAt - b.sortAt);
@@ -2784,7 +2786,7 @@ function deskDisplayList(){
 }
 function deskThreadHtml(entry){
   if (!entry.followup) return '';
-  const rows = [['asked', entry.followup.originalQuestion], ['George', entry.followup.question]];
+  const rows = [['asked', entry.followup.originalQuestion], [(entry.ownerUserId || 'operator'), entry.followup.question]];
   rows.push(entry.answered ? ['answer', entry.shown.note || '(no note)']
                             : ['status', 'waiting for the PO’s answer']);
   return '<div class="deskthread">' + rows.map(([who, txt]) =>
@@ -2802,8 +2804,8 @@ function renderDesk(){
   deskEl.className = deskCollapsed ? 'collapsed' : '';
   const n = list.length;
   deskEl.innerHTML =
-    '<div class="deskhead" id="deskhead">' + n + ' need' + (n === 1 ? 's' : '')
-      + ' George' + (deskCollapsed ? ' ▸' : ' ▾') + '</div>'
+    '<div class="deskhead" id="deskhead">' + n + ' awaiting ruling'
+      + (deskCollapsed ? ' ▸' : ' ▾') + '</div>'
     + list.map(entry => {
         const cd = deskCountdown(entry.deadlineAt);
         return '<div class="chip ' + deskClass(entry.deadlineAt - Date.now())

@@ -110,11 +110,11 @@ class AtcApiDecisionsTest(unittest.TestCase):
         """)
         now = int(time.time() * 1000)
         con.execute("INSERT INTO decision_requests VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("dr_open01", "operator", "agent:tester", "s_raiser01", "george", None,
+            ("dr_open01", "operator", "agent:tester", "s_raiser01", "op1", None,
              now, now + 22 * 3600_000, "ship it?", '[{"label":"yes"},{"label":"no"}]',
              '{"note":null,"supersedes":null}', "open"))
         con.execute("INSERT INTO decision_requests VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("dr_ruled01", "operator", "agent:tester", "s_raiser01", "george", None,
+            ("dr_ruled01", "operator", "agent:tester", "s_raiser01", "op1", None,
              now, now + 3600_000, "already done", '[{"label":"yes"}]', '{}', "ruled"))
         con.commit()
         con.close()
@@ -239,7 +239,7 @@ class AtcApiDecisionsTest(unittest.TestCase):
         calls = self._stub_calls()
         self.assertEqual(1, len(calls))
         args = calls[0]
-        self.assertEqual(["--as-user", "george", "operator-rule", "dr_open01",
+        self.assertEqual(["--as-user", "op1", "operator-rule", "dr_open01",
                            "--decision", "yes",
                            "--rationale", "Because the tests pass and it is ready."], args)
         audit = (self.base / "atc-rulings.log").read_text()
@@ -252,7 +252,7 @@ class AtcApiDecisionsTest(unittest.TestCase):
         calls = self._stub_calls()
         self.assertEqual(1, len(calls))
         args = calls[0]
-        self.assertEqual(["--as-user", "george", "operator-rule", "dr_open01",
+        self.assertEqual(["--as-user", "op1", "operator-rule", "dr_open01",
                            "--response", "Let's hold off until the migration lands next week.",
                            "--rationale", "Let's hold off until the migration lands next week."], args)
 
@@ -273,7 +273,7 @@ class AtcApiDecisionsTest(unittest.TestCase):
         calls = self._stub_calls()
         self.assertEqual(1, len(calls))
         args = calls[0]
-        self.assertEqual(["--as-user", "george", "wake", "--session", "s_raiser01",
+        self.assertEqual(["--as-user", "op1", "wake", "--session", "s_raiser01",
                           "--prompt"], args[:6])
         prompt = args[6]
         self.assertIn("dr_open01", prompt)

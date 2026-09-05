@@ -65,17 +65,17 @@ accepted, `{"on":true}` restores rendering. `GET /api/state` carries
 `annotationsVisible`.
 
 **Read the Desk.** `data.json`'s `decisions[]` is every OPEN operator decision
-request — an agent asked, only George can answer, it expires on a deadline.
+request — an agent asked, only the owning operator can answer, it expires on a deadline.
 It comes straight from `state.db` (read-only), never from polling the
 `tightbeam` CLI on a cadence (that grew state.db to 4.9GB and crashed a VM —
 clickety-clacks/tightbeam#10 — do not reintroduce that pattern here or
 anywhere else in this repo). The generator, not you, owns `author=atc:desk`
 arrows and tags mirroring each open, not-yet-expired request onto the board;
 you can read them like any other, but don't author your own under that name.
-**Agents never rule.** George rules from the page itself now (`POST
+**Agents never rule.** The operator rules from the page itself now (`POST
 /api/decisions/<dr_id>/rule`) or asks a follow-up first (`POST
-/api/decisions/<dr_id>/ask`) — both require the `X-ATC-Operator` token he
-alone holds, so neither is something you can do. Roci Desk stays the other
+/api/decisions/<dr_id>/ask`) — both require the `X-ATC-Operator` token only
+the operator holds, so neither is something you can do. Roci Desk stays the other
 control surface; ATC is a second one, not a replacement.
 
 ## The three rules that matter

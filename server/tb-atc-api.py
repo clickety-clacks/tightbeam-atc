@@ -147,7 +147,7 @@ state = {
     "searches": {},         # searchId -> search
     "searchSeq": 0,
     "searchesRev": 0,
-    # A follow-up George asked on a decision, captured at ask-time so the
+    # A follow-up the operator asked on a decision, captured at ask-time so the
     # chip can still show the original question and countdown clock even
     # after the row itself is superseded and drops out of decisions[].
     "followups": {},        # drId -> {drId, question, askedAt, originalQuestion, raisedAt, deadlineAt}
@@ -171,7 +171,7 @@ about provenance and cleanup is about not trampling each other.
   read what viewers are looking at    GET  /api/selection
   read everything at once             GET  /api/state
   read the population                 GET  /data.json
-  read what is waiting on George      GET  /data.json  (its `decisions` array)
+  read what is waiting on the owning operator GET  /data.json  (its `decisions` array)
   narrow the view to a set            POST /api/filter   {ids:[...], query|label}
   narrow the view by words            POST /api/filter   {query:"..."}
   point at one node                   POST /api/focus    {id, mode}
@@ -288,12 +288,12 @@ the board, not for you.
 Short arrow labels ride the curve; long ones fall back to a card. Keep them to
 two or three words and put the explanation in a tag.
 
-## The Desk — operator decisions waiting on George
+## The Desk — operator decisions waiting on the owning operator
 
 `GET /data.json`'s `decisions` array carries every OPEN `kind='operator'`
-decision request — an agent asked (`operator-ask`), only George can answer
-(`operator-rule`), and it expires on a deadline. Each entry: `id`, `question`,
-`options` (label strings), `note` (the raiser's own PO-note context, if any),
+decision request — an agent asked (`operator-ask`), only the owning operator
+can answer (`operator-rule`), and it expires on a deadline. Each entry: `id`,
+`question`, `options` (label strings), `note` (the raiser's own PO-note context, if any),
 `raiserId` (a readable identity string) and `raiserAgentId` (the board's own
 short id for that session, if resolvable), `assignmentId`/`workItemId` (if the
 request is tied to one), `ownerUserId`, `raisedAt`, `deadlineAt`. It is
@@ -304,15 +304,15 @@ to 4.9GB and crashed the VM (clickety-clacks/tightbeam#10).
 The generator (not the page, and not you) is the sole author of `atc:desk`:
 while a request is open and short of its deadline, it owns one red arrow
 raiser → work item (`awaiting ruling`) and one red tag on the raiser
-(`needs George · Nh`), both cleared the moment the row is ruled, withdrawn, or
+(`needs <owner> · Nh`), both cleared the moment the row is ruled, withdrawn, or
 past its deadline, and re-created if the same situation recurs. It also files
-one search, `where George is needed`, over every open raiser and its work
+one search, `awaiting operator ruling`, over every open raiser and its work
 item. Because it is the only writer of that author, `DELETE ...?author=atc:desk`
 is always safe to run yourself if you want the board clear regardless — the
 next generator tick simply re-files whatever is still actually open.
 
 Agents never rule — only the two endpoints below do, and both require the
-operator token George alone holds. Roci Desk is the other control surface;
+operator token only the operator holds. Roci Desk is the other control surface;
 ATC is a second one, not a replacement.
 
 ## Ruling and follow-ups (operator-token only)
@@ -853,11 +853,12 @@ class Handler(BaseHTTPRequestHandler):
         raiser_key = row.get("raiserSessionKey")
         if not raiser_key:
             return ({"error": "this row has no raiser session to wake"}, 409)
+        owner = str(row.get("ownerUserId") or "operator")
         prompt = (
-            "George has a follow-up on your decision request " + dr_id + " before he rules:\n"
+            "The owning operator (" + owner + ") has a follow-up on your decision request " + dr_id + " before ruling:\n"
             "\"" + question + "\"\n"
             "Answer by re-asking with `operator-ask … --supersedes " + dr_id + "` and put your "
-            "answer in context.note (keep the original note; add a section headed by George's "
+            "answer in context.note (keep the original note; add a section headed by the operator's "
             "question). Same options unless the answer changes them. Do not wait for the deadline."
         )
         ok, out_text, err_text = run_cli(["--as-user", str(row.get("ownerUserId") or ""),

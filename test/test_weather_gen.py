@@ -492,16 +492,16 @@ class WeatherGeneratorDeskTest(unittest.TestCase):
                     ("asg_linked", "wi_linked", "s_raiser", "open", None, None))
         now = int(time.time() * 1000)
         rows = [
-            ("dr_open", "operator", "agent:tester", "s_raiser", "george", "asg_linked",
+            ("dr_open", "operator", "agent:tester", "s_raiser", "op1", "asg_linked",
              now, now + 22 * 3600_000, "should we ship it?",
              '[{"label":"yes"},{"label":"no"}]', '{"note":"a note","supersedes":null}', "open"),
-            ("dr_expired", "operator", "agent:tester", "s_raiser", "george", None,
+            ("dr_expired", "operator", "agent:tester", "s_raiser", "op1", None,
              now - 100_000, now - 1_000, "expired but still open",
              '[{"label":"ok"}]', '{}', "open"),
-            ("dr_ruled", "operator", "agent:tester", "s_raiser", "george", None,
+            ("dr_ruled", "operator", "agent:tester", "s_raiser", "op1", None,
              now, now + 3600_000, "already ruled",
              '[{"label":"ok"}]', '{}', "ruled"),
-            ("dr_effort", "effort", "process:tightbeam", None, "george", "asg_linked",
+            ("dr_effort", "effort", "process:tightbeam", None, "op1", "asg_linked",
              now, now + 3600_000, "effort check-in", None, '{}', "open"),
         ]
         con.executemany("INSERT INTO decision_requests VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
@@ -619,7 +619,7 @@ class WeatherGeneratorDeskSyncTest(unittest.TestCase):
                     ("asg_linked", "wi_linked", "s_raiser", "open", None, None))
         now = int(time.time() * 1000)
         con.execute("INSERT INTO decision_requests VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("dr_sync01", "operator", "agent:tester", "s_raiser", "george", "asg_linked",
+            ("dr_sync01", "operator", "agent:tester", "s_raiser", "op1", "asg_linked",
              now, deadline_ms, "ship it?", '[{"label":"yes"},{"label":"no"}]',
              '{"note":null,"supersedes":null}', status))
         con.commit()
@@ -651,9 +651,9 @@ class WeatherGeneratorDeskSyncTest(unittest.TestCase):
         self.assertEqual("wi_linked", desk["arrows"][0]["to"])
         self.assertEqual(1, len(desk["tags"]))
         self.assertEqual("s_raiser", desk["tags"][0]["target"])
-        self.assertIn("needs George", desk["tags"][0]["text"])
+        self.assertIn("needs op1", desk["tags"][0]["text"])
         self.assertEqual(1, len(desk["searches"]))
-        self.assertEqual("where George is needed", desk["searches"][0]["label"])
+        self.assertEqual("awaiting operator ruling", desk["searches"][0]["label"])
         arrow_id = desk["arrows"][0]["arrowId"]
         tag_id = desk["tags"][0]["tagId"]
         search_id = desk["searches"][0]["searchId"]
@@ -679,6 +679,13 @@ class WeatherGeneratorDeskSyncTest(unittest.TestCase):
         # the search edits in place: same id even though the tag churned
         self.assertEqual(1, len(desk["searches"]))
         self.assertEqual(search_id, desk["searches"][0]["searchId"])
+
+        # 3b. empty ownerUserId falls back to the literal "operator"
+        self._set_decision(base, ownerUserId="")
+        self._run_gen(base)
+        desk = self._desk(self._api_get("/state"))
+        self.assertEqual(1, len(desk["tags"]))
+        self.assertTrue(desk["tags"][0]["text"].startswith("needs operator"))
 
         # 4. ruled: every atc:desk-authored thing is removed
         self._set_decision(base, status="ruled")
