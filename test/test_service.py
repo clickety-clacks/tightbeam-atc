@@ -327,6 +327,8 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual("Newer", self.item()["title"])
 
     def test_partial_rotating_read_retains_rows_and_does_not_certify_sweep(self):
+        # Open assignments use the active refresh deadline, not terminal rotation.
+        self.gateway.rows[("assignments", None)][0]["state"] = "closed"
         self.gateway.partial.add(("attests", "assignment"))
         self.gateway.rows[("attests", "assignment")] = []
         before = self.service.last_sweep
