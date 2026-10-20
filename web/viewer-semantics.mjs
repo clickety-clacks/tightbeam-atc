@@ -311,3 +311,171 @@ export function evidenceCounts(model) {
   }
   return counts;
 }
+
+function cloneViewerValue(value) {
+  if (value && typeof value.clone === 'function') return value.clone();
+  if (Array.isArray(value)) return value.map(cloneViewerValue);
+  if (value && typeof value === 'object')
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneViewerValue(child)]));
+  return value;
+}
+
+/* Snapshot the user-owned view before scene objects are replaced. Focus uses
+   stable IDs, and the pose contains cloned camera vectors from the caller. */
+export function captureViewerState(view, focusLayer, cameraPose) {
+  const filter = view.filter || {};
+  return {
+    selection: [...view.selection],
+    filter: {
+      kind: filter.kind,
+      query: filter.query,
+      ids: filter.ids ? [...filter.ids] : null,
+    },
+    focusLayer: cloneViewerValue(focusLayer),
+    fit: view.fit,
+    input: view.input,
+    framing: view.framing,
+    fitTarget: view.fitTarget,
+    cameraPose: cloneViewerValue(cameraPose),
+  };
+}
+
+/* Restore stable view choices after a scene rebuild, then let the page resolve
+   IDs and derive its highlighted scope against the newly applied model. */
+export function restoreViewerState(view, saved, {setFocusLayer, projectFocus, restoreCameraPose}) {
+  if (view.selection instanceof Set) {
+    view.selection.clear();
+    saved.selection.forEach(key => view.selection.add(key));
+  } else view.selection = new Set(saved.selection);
+
+  if (!view.filter) view.filter = {};
+  view.filter.kind = saved.filter.kind;
+  view.filter.query = saved.filter.query;
+  view.filter.ids = saved.filter.ids ? new Set(saved.filter.ids) : null;
+  view.fit = saved.fit;
+  view.input = saved.input;
+  view.framing = saved.framing;
+  view.fitTarget = saved.fitTarget;
+  setFocusLayer?.(cloneViewerValue(saved.focusLayer));
+  projectFocus?.();
+  restoreCameraPose?.(saved.cameraPose);
+  return true;
+}
+
+/* Scene builders replace meshes, never the human's camera or scope. Keep this
+   boundary explicit so a failed builder also restores the prior view. */
+export function rebuildWithViewerState(saved, rebuild, restore) {
+  try {
+    return rebuild();
+  } finally {
+    restore(saved);
+  }
+}
+
+function durationLabel(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return 'unknown';
+  if (milliseconds < 60_000) return Math.round(milliseconds / 1000) + 's';
+  if (milliseconds < 3_600_000) return Math.round(milliseconds / 60_000) + 'm';
+  const hours = milliseconds / 3_600_000;
+  if (hours < 48) return hours < 10 ? hours.toFixed(1) + 'h' : Math.round(hours) + 'h';
+  return Math.round(milliseconds / 86_400_000) + 'd';
+}
+
+/* This writes the same user-facing fields that the HUD displays. Keeping the
+   presentation at a small DOM seam lets mock models verify visible wording. */
+export function renderModelStatusElement(element, {model, streamState, streamError}, now = Date.now()) {
+  if (!model) {
+    element.textContent = streamState === 'stale'
+      ? 'stale · live model unavailable' : 'connecting to live model…';
+    element.className = streamState === 'stale' ? 'stale' : 'sample';
+    element.title = streamError || 'Waiting for the service model event stream.';
+    return element;
+  }
+
+  const freshness = model.freshness || {};
+  const backstop = reconciliationFreshness(freshness.reconciliation, now);
+  const state = streamState === 'stale' || backstop?.announcedChanges === 'stale'
+    || backstop?.active.stale ? 'stale' : (freshness.state || 'unknown');
+  const counts = evidenceCounts(model);
+  const age = factAge(model.generatedAt, now);
+  element.textContent = `${state} · ${model.agents.length} agents · ${model.items.length} items · `
+    + `${counts.stale} stale · ${counts.rebuilding} rebuilding · ${counts.unknown} unknown · snapshot age ${age}`;
+  element.className = state === 'live' ? 'live' : state === 'stale' ? 'stale'
+    : state === 'rebuilding' ? 'rebuilding' : 'unknown';
+
+  const sweepAge = freshness.reconciliation && typeof freshness.reconciliation === 'object'
+    ? factAge(freshness.reconciliation.lastSweepAt, now) : 'unknown';
+  const groupDetails = (label, group) => {
+    if (!group) return `${label}: unknown (service metadata unavailable)`;
+    if (group.scopeCount === 0) return `${label}: no scopes`;
+    const confirmationAge = group.ageMs === null ? 'oldest known confirmation age unknown'
+      : `oldest known confirmation age ${durationLabel(group.ageMs)}`;
+    return `${label}: ${group.scopeCount} scopes · ${group.unconfirmedScopes} with unknown age · ${confirmationAge}`;
+  };
+  const activeBudgetDetail = backstop
+    ? `${backstop.active.overBudgetScopes} reported over-budget scopes`
+      + (backstop.active.agePastBudget && backstop.active.overBudgetScopes === 0
+        ? ' · oldest confirmation age also exceeds the budget' : '')
+    : '';
+  const activeBackstop = backstop
+    ? `Active backstop: ${backstop.active.stale ? 'stale' : 'within budget'} · `
+      + `${activeBudgetDetail} · `
+      + `confirmation budget ${durationLabel(backstop.activeBudgetMs)} · `
+      + `refresh target ${durationLabel(backstop.activeRefreshMs)} · `
+      + `recent-activity window ${durationLabel(backstop.recentWindowMs)} · `
+      + groupDetails('active', backstop.active)
+    : 'Active backstop: unknown (service metadata unavailable)';
+  const historyBackstop = backstop
+    ? groupDetails('Terminal-history backstop', backstop.history)
+      + ` · estimated rotation ${durationLabel(freshness.reconciliation?.estimatedSweepMs)}`
+    : 'Terminal-history backstop: unknown (service metadata unavailable)';
+  const reconciliation = freshness.reconciliation && typeof freshness.reconciliation === 'object'
+    ? `Reconciliation: ${freshness.reconciliation.mode || 'unknown'} · `
+      + `${Number.isFinite(freshness.reconciliation.pendingScopes) ? freshness.reconciliation.pendingScopes : 'unknown'} pending / `
+      + `${Number.isFinite(freshness.reconciliation.totalScopes) ? freshness.reconciliation.totalScopes : 'unknown'} cycle scopes · `
+      + `budget ${Number.isFinite(freshness.reconciliation.scopeBudget) ? freshness.reconciliation.scopeBudget : 'unknown'} · `
+      + `maintained scopes ${Number.isFinite(freshness.reconciliation.historyScopes) ? freshness.reconciliation.historyScopes : 'unknown'} · `
+      + `last sweep ${sweepAge === 'unknown' ? 'unknown' : sweepAge + ' ago'}`
+    : 'Reconciliation: unknown';
+  element.title = [
+    `Gateway version: ${model.gatewayVersion || 'unknown'}`,
+    `Service freshness: ${freshness.state || 'unknown'}`,
+    `Announced changes: ${backstop?.announcedChanges || 'unknown'} at the latest service publication (feed delivery, not proof that unannounced changes are absent)`,
+    `Unannounced changes: ${backstop?.unannouncedChanges || 'unknown'} by background confirmation sweeps`,
+    activeBackstop,
+    historyBackstop,
+    `Freshness since: ${factAge(freshness.since, now)} ago`,
+    `Last complete read: ${factAge(freshness.lastCompleteAt, now)} ago`,
+    Number.isFinite(freshness.rebuildIntervalMs) ? `Rebuild interval: ${Math.round(freshness.rebuildIntervalMs / 1000)}s` : 'Rebuild interval: unknown',
+    reconciliation,
+    freshness.reason ? `Reason: ${freshness.reason}` : null,
+    streamError ? `Connection: ${streamError}` : 'Connection: event stream open',
+    'Input: pointer and touch events; no separate gaze signal is exposed to this page.',
+  ].filter(Boolean).join('\n');
+  return element;
+}
+
+const escapeMarkup = value => String(value).replace(/[&<>"']/g, character => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+})[character]);
+
+/* Per-fact freshness and age labels used by hover and detail cards. */
+export function renderEvidenceMarkup(entity, now = Date.now()) {
+  const entries = entity?.evidence && typeof entity.evidence === 'object'
+    ? Object.entries(entity.evidence).sort(([a], [b]) => a.localeCompare(b)) : [];
+  if (!entries.length) return '<span class="seg">Per-fact evidence and age unavailable.</span>';
+  const rows = entries.map(([name, evidence]) => {
+    if (!evidence || typeof evidence !== 'object')
+      return `<span class="evidence-row"><b>${escapeMarkup(name)}</b> · unknown · age unknown · source unknown</span>`;
+    const status = evidence.status === 'known' ? 'known' : 'unknown';
+    const freshness = ['live', 'stale', 'rebuilding'].includes(evidence.freshness)
+      ? evidence.freshness : 'unknown freshness';
+    const observed = factAge(evidence.observedAt, now);
+    const source = Array.isArray(evidence.source) ? evidence.source.join(', ')
+      : (evidence.source || 'unknown source');
+    const complete = evidence.complete === true ? 'complete'
+      : evidence.complete === false ? 'incomplete' : 'unknown completeness';
+    return `<span class="evidence-row"><b>${escapeMarkup(name)}</b> · ${status} · ${freshness} · observed ${observed}${observed === 'unknown' ? '' : ' ago'} · ${escapeMarkup(source)} · ${complete}</span>`;
+  });
+  return '<span class="seg">' + rows.join('') + '</span>';
+}
