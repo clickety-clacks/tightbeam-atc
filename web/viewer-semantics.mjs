@@ -24,11 +24,15 @@ export function isModelEnvelope(model) {
     && MODEL_COLLECTIONS.every(k => rowsHaveStableIds(model[k]))
     && model.freshness && !Array.isArray(model.freshness)
     && FRESHNESS_VALUES.has(model.freshness.state)
-    && (!owns(model.freshness, 'reconciliation') || model.freshness.reconciliation === null
+    && ['since', 'reason', 'rebuildIntervalMs', 'lastCompleteAt', 'reconciliation']
+      .every(key => owns(model.freshness, key))
+    && (model.freshness.reconciliation === null
       || (model.freshness.reconciliation && typeof model.freshness.reconciliation === 'object'
         && !Array.isArray(model.freshness.reconciliation)))
-    && (!owns(model, 'gatewayVersion') || model.gatewayVersion === null || typeof model.gatewayVersion === 'string')
-    && (!owns(model, 'metrics') || model.metrics === null || (model.metrics && typeof model.metrics === 'object'
+    && owns(model, 'gatewayVersion')
+    && (model.gatewayVersion === null || typeof model.gatewayVersion === 'string')
+    && owns(model, 'metrics')
+    && (model.metrics === null || (model.metrics && typeof model.metrics === 'object'
       && !Array.isArray(model.metrics))));
 }
 
@@ -87,11 +91,24 @@ export function applyModelDelta(current, delta) {
   return isModelEnvelope(next) ? next : null;
 }
 
-export function agentSampleTimes(currentTimes, model, {fullSnapshot = false, upsertedIds = []} = {}) {
-  const next = fullSnapshot ? new Map() : new Map(currentTimes || []);
+export function agentSampleTimes(currentTimes, model,
+  {fullSnapshot = false, upsertedIds = [], previousModel = null} = {}) {
+  const next = new Map(currentTimes || []);
+  const sameGeneration = previousModel?.generation === model.generation;
+  const sameRevision = sameGeneration && previousModel.revision === model.revision;
+  const previousAgents = new Map((sameGeneration ? previousModel.agents : [])
+    .map(agent => [agent.id, agent]));
   const present = new Set(model.agents.map(agent => agent.id));
   for (const id of next.keys()) if (!present.has(id)) next.delete(id);
-  if (fullSnapshot) model.agents.forEach(agent => next.set(agent.id, model.generatedAt));
+  if (fullSnapshot) {
+    if (!sameGeneration) next.clear();
+    model.agents.forEach(agent => {
+      const previous = previousAgents.get(agent.id);
+      const unchanged = sameRevision || (previous && JSON.stringify(previous) === JSON.stringify(agent));
+      if (!unchanged) next.set(agent.id, model.generatedAt);
+      else if (!next.has(agent.id)) next.set(agent.id, previousModel.generatedAt);
+    });
+  }
   else upsertedIds.forEach(id => { if (present.has(id)) next.set(id, model.generatedAt); });
   return next;
 }
@@ -108,19 +125,32 @@ export function isEvidencePage(page, {itemId, generation, revision, offset=0} = 
     && page.freshness && typeof page.freshness === 'object' && !Array.isArray(page.freshness));
 }
 
+export function evidencePageQuery(offset, limit, generation, revision) {
+  if (!Number.isInteger(offset) || offset < 0
+      || !Number.isInteger(limit) || limit < 1 || limit > 100) return null;
+  const params = new URLSearchParams({offset: String(offset), limit: String(limit)});
+  if (offset > 0) {
+    if (typeof generation !== 'string' || !generation.length
+        || !Number.isInteger(revision) || revision < 0) return null;
+    params.set('generation', generation);
+    params.set('revision', String(revision));
+  }
+  return `?${params.toString()}`;
+}
+
 export function shouldAcceptModel(next, current) {
   if (!isModelEnvelope(next)) return false;
   return !current || next.generation !== current.generation
     || next.revision > current.revision;
 }
 
-/* Full snapshots can rebaseline sampled fields after a reconnect even when
-   the semantic model revision has not changed. Older snapshots stay ignored. */
+/* A revision is an immutable full snapshot. Equal-revision reconnects recover
+   transport without replacing rows; only a newer revision can advance data. */
 export function shouldAcceptSnapshot(next, current) {
   if (!isModelEnvelope(next)) return false;
   return !current || next.generation !== current.generation
     || next.revision > current.revision
-    || (next.revision === current.revision && next.generatedAt >= current.generatedAt);
+    || (next.revision === current.revision && next.generatedAt === current.generatedAt);
 }
 
 /* Clock, freshness, and evidence-age repaints do not change scene geometry.

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts,
+import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts, evidencePageQuery,
          factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, isModelEnvelope, knownStage,
          ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from '../web/viewer-semantics.mjs';
@@ -25,12 +25,15 @@ const model = {
 assert.equal(isModelEnvelope(model), true);
 assert.equal(isModelEnvelope({...model, items: [null]}), false);
 assert.equal(isModelEnvelope({...model, items: [model.items[0], model.items[0]]}), false);
+assert.equal(isModelEnvelope({...model, freshness: {...model.freshness, reconciliation: undefined}}), false);
+assert.equal(isModelEnvelope((({metrics, ...rest}) => rest)(model)), false);
 assert.equal(shouldAcceptModel(model, null), true);
 assert.equal(shouldAcceptModel({...model, revision: 8}, model), false);
 assert.equal(shouldAcceptModel({...model, revision: 9}, model), true);
 assert.equal(shouldAcceptModel({...model, generation: 'service-b', revision: 1}, model), true);
 assert.equal(shouldAcceptModel({...model, schemaVersion: 2}, model), false);
-assert.equal(shouldAcceptSnapshot({...model, generatedAt: 3000}, model), true);
+assert.equal(shouldAcceptSnapshot(model, model), true);
+assert.equal(shouldAcceptSnapshot({...model, generatedAt: 3000}, model), false);
 assert.equal(shouldAcceptSnapshot({...model, generatedAt: 1000}, model), false);
 assert.equal(shouldAcceptSnapshot({...model, revision: 7, generatedAt: 3000}, model), false);
 
@@ -80,7 +83,15 @@ assert.deepEqual([...agentSampleTimes(oldSamples, {...deltaModel, generatedAt: 3
 assert.deepEqual([...agentSampleTimes(oldSamples, {...deltaModel, generatedAt: 3000},
   {upsertedIds: ['agent-1']})], [['agent-1', 3000]]);
 assert.deepEqual([...agentSampleTimes(oldSamples, {...deltaModel, generatedAt: 3000},
-  {fullSnapshot: true})], [['agent-1', 3000]]);
+  {fullSnapshot: true, previousModel: deltaModel})], [['agent-1', 2000]]);
+const newerSnapshot = {...deltaBase, revision: 10, generatedAt: 4000,
+  agents: [deltaBase.agents[0], {id: 'agent-2', idleFor: 5}]};
+assert.deepEqual([...agentSampleTimes(oldSamples, newerSnapshot,
+  {fullSnapshot: true, previousModel: deltaBase})], [['agent-1', 2000], ['agent-2', 4000]]);
+const changedSnapshot = {...newerSnapshot,
+  agents: [{...deltaBase.agents[0], name: 'changed'}, newerSnapshot.agents[1]]};
+assert.deepEqual([...agentSampleTimes(oldSamples, changedSnapshot,
+  {fullSnapshot: true, previousModel: deltaBase})], [['agent-1', 4000], ['agent-2', 4000]]);
 
 const page = {itemId: 'wi-1', generation: 'service-a', revision: 9,
   records: [{author: null, note: 'sample'}], total: 1, nextOffset: null,
@@ -89,6 +100,10 @@ assert.equal(isEvidencePage(page, {itemId: 'wi-1', generation: 'service-a', revi
 assert.equal(isEvidencePage(page, {itemId: 'wi-1', generation: 'service-a', revision: 10}), false);
 assert.equal(isEvidencePage({...page, nextOffset: '10'},
   {itemId: 'wi-1', generation: 'service-a', revision: 9}), false);
+assert.equal(evidencePageQuery(0, 100, 'service-a', 9), '?offset=0&limit=100');
+assert.equal(evidencePageQuery(100, 100, 'service-a', 9),
+  '?offset=100&limit=100&generation=service-a&revision=9');
+assert.equal(evidencePageQuery(100, 100, null, null), null);
 
 /* Clock and evidence ages repaint without rebuilding the scene. */
 assert.equal(sceneSignature(model), sceneSignature({...model, revision: 9, generatedAt: 3000,

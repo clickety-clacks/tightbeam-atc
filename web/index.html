@@ -316,7 +316,7 @@
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
-import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts,
+import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts, evidencePageQuery,
          factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, isModelEnvelope, knownStage,
          ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
@@ -425,6 +425,7 @@ let streamState = 'connecting', streamError = null, modelEventSource = null, res
 let agentSamples = new Map();
 const itemEvidencePages = new Map();
 const itemEvidenceNotices = new Map();
+const pendingEvidenceReloads = new Set();
 const EVIDENCE_PAGE_SIZE = 100;
 let flight = null, orbitAngle = 0, arrowFrame = 0;
 
@@ -1926,7 +1927,13 @@ async function apiFetch(path, init){
   const t = setTimeout(() => ctl.abort(), 4000);
   try {
     const r = await fetch(API + path, {...init, signal: ctl.signal, cache:'no-store'});
-    if (!r.ok) throw new Error('http ' + r.status);
+    if (!r.ok){
+      let body = null;
+      try { body = await r.json(); } catch (error) { /* non-JSON errors have no detail payload */ }
+      const failure = new Error('http ' + r.status);
+      failure.status = r.status; failure.body = body;
+      throw failure;
+    }
     return await r.json();
   } finally { clearTimeout(t); }
 }
@@ -2175,6 +2182,7 @@ function renderModelStatus(now=Date.now()){
   const details = [
     `Gateway version: ${DATA.gatewayVersion || 'unknown'}`,
     `Service freshness: ${f.state || 'unknown'}`,
+    'Freshness: announced feed changes are applied live; unannounced changes are caught by background sweeps.',
     `Freshness since: ${factAge(f.since, now)} ago`,
     `Last complete read: ${factAge(f.lastCompleteAt, now)} ago`,
     Number.isFinite(f.rebuildIntervalMs) ? `Rebuild interval: ${Math.round(f.rebuildIntervalMs/1000)}s` : 'Rebuild interval: unknown',
@@ -2182,12 +2190,37 @@ function renderModelStatus(now=Date.now()){
       + `${Number.isFinite(f.reconciliation.pendingScopes) ? f.reconciliation.pendingScopes : 'unknown'} pending / `
       + `${Number.isFinite(f.reconciliation.totalScopes) ? f.reconciliation.totalScopes : 'unknown'} scopes · `
       + `budget ${Number.isFinite(f.reconciliation.scopeBudget) ? f.reconciliation.scopeBudget : 'unknown'} · `
+      + `history ${Number.isFinite(f.reconciliation.historyScopes) ? f.reconciliation.historyScopes : 'unknown'} · `
+      + `estimated sweep ${durationLabel(f.reconciliation.estimatedSweepMs)} · `
       + `last sweep ${sweepAge==='unknown' ? 'unknown' : sweepAge + ' ago'}` : 'Reconciliation: unknown',
     f.reason ? `Reason: ${f.reason}` : null,
     streamError ? `Connection: ${streamError}` : 'Connection: event stream open',
     'Input: pointer and touch events; no separate gaze signal is exposed to this page.',
   ].filter(Boolean);
   el.title = details.join('\n');
+}
+function durationLabel(milliseconds){
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return 'unknown';
+  if (milliseconds < 60_000) return Math.round(milliseconds / 1000) + 's';
+  if (milliseconds < 3_600_000) return Math.round(milliseconds / 60_000) + 'm';
+  const hours = milliseconds / 3_600_000;
+  return hours < 10 ? hours.toFixed(1) + 'h' : Math.round(hours) + 'h';
+}
+function focusedItemId(){
+  const data = focusMesh()?.userData;
+  return data?.type==='item' && typeof data.w?.id==='string' ? data.w.id : null;
+}
+function resumePendingEvidenceReloads(model){
+  for (const itemId of [...pendingEvidenceReloads]){
+    pendingEvidenceReloads.delete(itemId);
+    if (!model.items.some(item=>item.id===itemId)){
+      itemEvidenceNotices.set(itemId, 'This item is no longer in the current model.');
+    } else if (focusedItemId()===itemId){
+      setTimeout(()=>loadItemEvidence(itemId), 0);
+    } else {
+      itemEvidenceNotices.set(itemId, 'The model changed while notes were loading. Load the current notes again.');
+    }
+  }
 }
 function preserveViewKeys(){
   return {selection:new Set(view.selection), filterIds:view.filter.ids ? new Set(view.filter.ids) : null,
@@ -2227,7 +2260,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
   const versionChanged = Boolean(lastModel && (model.generation!==lastModel.generation
     || model.revision!==lastModel.revision));
   const nextSamples = agentSampleTimes(agentSamples, model,
-    {fullSnapshot, upsertedIds:upsertedAgentIds});
+    {fullSnapshot, upsertedIds:upsertedAgentIds, previousModel:lastModel});
   const nextSignature = sceneSignature(model);
   const sceneChanged = nextSignature !== previousSignature;
   const firstModel = !lastModel;
@@ -2238,6 +2271,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
     if (versionChanged){
       itemEvidencePages.clear(); itemEvidenceNotices.clear();
       for (const [itemId, page] of previousEvidencePages){
+        if (page.loading) pendingEvidenceReloads.add(itemId);
         if (page.records?.length || page.loading)
           itemEvidenceNotices.set(itemId, 'The model changed since these notes were loaded. Load the current notes again.');
       }
@@ -2269,6 +2303,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
     streamState='connected'; streamError=null;
     spawnWakes(); spawnMessages();
     renderModelStatus();
+    resumePendingEvidenceReloads(model);
     return true;
   } catch (error){
     DATA = previous;
@@ -2290,10 +2325,11 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
         buildGround([]); buildItems([]); buildLinks([]); applyView({preserveCamera:true});
       } catch (rollbackError){ restoredPrevious = false; }
     }
-    lastSceneSignature = previousSignature;
+    lastSceneSignature = restoredPrevious ? previousSignature : null;
     if (view.focus.stage===1) renderDetail();
-    streamState='stale'; streamError=restoredPrevious
+    streamState='stale'; streamError=previous && restoredPrevious
       ? 'model rebuild failed; previous model retained'
+      : !previous && restoredPrevious ? 'model rebuild failed; empty scene retained'
       : 'model rebuild failed; rendered scene may be incomplete';
     renderModelStatus();
     return false;
@@ -2312,7 +2348,14 @@ function startModelStream(){
   }
   if (modelEventSource) return;
   modelEventSource = new EventSource('./api/events');
-  modelEventSource.onopen = ()=>{ streamState=DATA ? 'connected' : 'connecting'; streamError=null; renderModelStatus(); };
+  modelEventSource.onopen = ()=>{
+    if (DATA && streamState==='stale'){
+      streamError='waiting for a full model snapshot after reconnect';
+    } else {
+      streamState=DATA ? 'connected' : 'connecting'; streamError=null;
+    }
+    renderModelStatus();
+  };
   modelEventSource.onerror = ()=>{ streamState='stale'; streamError='event stream disconnected; reconnecting'; renderModelStatus(); };
   modelEventSource.addEventListener('model', event=>{
     let model;
@@ -2324,7 +2367,12 @@ function startModelStream(){
     if (lastModel && model.generation===lastModel.generation && model.revision<lastModel.revision){
       forceModelResync('older model snapshot received; requesting current snapshot'); return;
     }
-    receiveModel(model);
+    if (lastModel && model.generation===lastModel.generation && model.revision===lastModel.revision
+        && model.generatedAt!==lastModel.generatedAt){
+      forceModelResync('conflicting equal-revision snapshot; requesting current snapshot'); return;
+    }
+    if (!receiveModel(model))
+      forceModelResync('model snapshot could not be applied; requesting current snapshot');
   });
   modelEventSource.addEventListener('delta', event=>{
     let delta;
@@ -2879,7 +2927,9 @@ async function loadItemEvidence(itemId){
   page.loading = true; itemEvidencePages.set(itemId, page); itemEvidenceNotices.delete(itemId);
   renderDetail();
   try {
-    const response = await apiFetch(`/items/${encodeURIComponent(itemId)}/evidence?offset=${offset}&limit=${EVIDENCE_PAGE_SIZE}`);
+    const query = evidencePageQuery(offset, EVIDENCE_PAGE_SIZE, generation, revision);
+    if (!query) throw new Error('invalid evidence page pin');
+    const response = await apiFetch(`/items/${encodeURIComponent(itemId)}/evidence${query}`);
     if (DATA?.generation!==generation || DATA?.revision!==revision){
       if (itemEvidencePages.get(itemId)===page) itemEvidencePages.delete(itemId);
       if (!itemEvidencePages.has(itemId))
@@ -2888,8 +2938,9 @@ async function loadItemEvidence(itemId){
     }
     if (response?.generation!==generation || response?.revision!==revision){
       if (itemEvidencePages.get(itemId)===page) itemEvidencePages.delete(itemId);
-      if (!itemEvidencePages.has(itemId))
-        itemEvidenceNotices.set(itemId, 'Evidence changed during pagination. Load the current notes again.');
+      pendingEvidenceReloads.add(itemId);
+      itemEvidenceNotices.set(itemId, 'Evidence changed on the service. Syncing the current model before restarting at the first page.');
+      forceModelResync('evidence revision changed; requesting current model snapshot');
       renderDetail(); return;
     }
     if (!isEvidencePage(response, {itemId, generation, revision, offset})){
@@ -2909,8 +2960,15 @@ async function loadItemEvidence(itemId){
       if (!itemEvidencePages.has(itemId))
         itemEvidenceNotices.set(itemId, 'The model changed while notes were loading. Load them again.');
     } else {
-      page.loading = false; itemEvidencePages.set(itemId, page);
-      itemEvidenceNotices.set(itemId, 'Attest notes are unavailable. Retry when the service responds.');
+      if (error?.status===409 && error?.body?.error==='revision-mismatch'){
+        if (itemEvidencePages.get(itemId)===page) itemEvidencePages.delete(itemId);
+        pendingEvidenceReloads.add(itemId);
+        itemEvidenceNotices.set(itemId, 'Evidence changed on the service. Syncing the current model before restarting at the first page.');
+        forceModelResync('evidence revision changed; requesting current model snapshot');
+      } else {
+        page.loading = false; itemEvidencePages.set(itemId, page);
+        itemEvidenceNotices.set(itemId, 'Attest notes are unavailable. Retry when the service responds.');
+      }
     }
   }
   renderDetail();
