@@ -2,8 +2,11 @@
 
 Implementation audit for Tightbeam **0.1.9 build 2908**, source
 [`8433d22fdf86027d62a34e9923501775225813ad`](https://github.com/clickety-clacks/tightbeam/tree/8433d22fdf86027d62a34e9923501775225813ad).
-This is a source audit, not a successful gateway acceptance report.
-Real-feed observations and remote verification are pending.
+The combined service/viewer candidate passed all **83 mock tests** through the
+unchanged `./scripts/test.sh` wrapper in an isolated VM. The source audit below
+is separate from runtime gateway evidence. Live-feed, browser, representative-scale,
+real bootstrap and read-load evidence remain unproved pending the later approved
+live read-only step.
 
 ## Read, payload, and recovery paths
 
@@ -29,7 +32,7 @@ field, ordering and deletion guarantees or missing guarantees for every resource
 ATC maintains. All policies still require the expected class, operation, primary
 identity and complete field set; none permits direct deletion. These authored
 policies are based on published source, **not real-feed acceptance evidence**.
-The required scratch-gateway proof remains pending, as do all test executions.
+The passing mock suite does not establish those live-feed guarantees.
 
 CLI commands run with an explicit user and target base. The packaged CLI owns
 credential discovery; ATC does not open its credential files or read its token.
@@ -122,22 +125,24 @@ matching the release's `SHA256SUMS`. Both the external and bundled provenance
 records identify the source commit above. These checks establish package
 identity; they do not establish runtime correctness.
 
-## Verification still required
+## Verification status and remaining evidence
 
-Run the unchanged tracked `scripts/test.sh` wrapper in the permitted isolated
-environment. Record the service revision, Python and dependency versions,
-scratch gateway `/version`, release provenance and package checksum. Use a
-fresh base, its own device login, packaged CLI using that base, and seeded records.
+The 83 passing mock tests provide synthetic service/viewer behavior evidence.
+They do not prove actual browser interaction or retention, live-feed behavior,
+representative-scale performance, real bootstrap completeness or read load.
+The package checksum and source audit above establish identity and source
+properties, not successful runtime operation.
 
-Real-response evidence must cover bootstrap completeness, admitted payload
-classes, targeted gaps, partial/failed reads, disconnect/sequence recovery,
-unannounced interval recovery, and event-to-model latency at representative
-scale. Record request counts and payload counts separately. Viewer interaction
-and retention need verification on the exact integrated service/viewer subject.
-Record realistic active-scope count, achieved active reconfirmation time and read
-load; a missed 30-minute budget at acceptable load remains an unresolved delivery
-limit, not grounds to extend the budget silently.
-No synthetic test result substitutes for these observations.
+Live read-only verification remains a later, separately approved post-merge
+step. It should observe bootstrap completeness, ordinary payload application,
+targeted reads, client reconnect/rebuild, and unannounced interval recovery.
+Record the source and runtime versions, request and payload counts, bootstrap
+time, event-to-model latency, realistic active-scope count, achieved active
+reconfirmation time and read load. Actual browser rendering, interaction and
+state retention also remain to be observed. A missed 30-minute active budget
+at acceptable load remains an unresolved limit, not grounds to extend the
+budget silently. The passing mock result does not substitute for these
+observations or authorize live access.
 
 ### Event and publication cost
 
