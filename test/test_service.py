@@ -112,8 +112,7 @@ class ServiceRecoveryTest(unittest.TestCase):
                          self.service.model.inventory("attests", "assignment").rows["progress"]["bySession"])
 
     def test_verified_payload_applies_without_reads_and_does_not_roll_back(self):
-        # Inject a verified policy to exercise the algorithm. This is not
-        # evidence that a real build qualifies for production PAYLOAD_BUILDS.
+        # Exercise ordering with synthetic rows. This is not real-feed proof.
         self.service.policies = {"work-items": "strict-version"}
         before = self.gateway.read_count
         notice = {"resource": "work-items", "class": "work_item.updated",
@@ -430,3 +429,149 @@ class ServiceRecoveryTest(unittest.TestCase):
         _, frame = self.service.next_event(revision, timeout=0)
         delta = json.loads(frame.split(b"data: ", 1)[1])
         self.assertEqual(["s_author"], delta["changes"]["agents"]["remove"])
+
+    def test_published_build_policy_applies_full_attest_without_reading_history(self):
+        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS
+        from atc_upstream import ATTEST_FIELDS
+        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        row = dict.fromkeys(ATTEST_FIELDS) | {
+            "id": "new-progress", "assignmentId": "assignment", "kind": "progress",
+            "note": "Original note", "bySession": "agent s_author", "ts": 15,
+            "commitRefs": [], "producer": "compiler", "producerCommand": "build",
+        }
+        notice = {"resource": "attests", "op": "upsert", "class": "attest.filed",
+                  "refs": {"attestId": row["id"]}, "payload": row}
+        self.gateway.calls.clear()
+        self.service.change(notice)
+        self.service.change(notice)
+        self.assertEqual({}, self.service.reads.pending)
+        self.assertEqual([], self.gateway.calls)
+        self.assertEqual(row, self.service.model.inventory("attests", "assignment").rows[row["id"]])
+        self.assertTrue(self.service.model.inventory("attests", "assignment").complete)
+
+    def test_completion_payload_reads_only_assignment_side_effect(self):
+        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS
+        from atc_upstream import ATTEST_FIELDS
+        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        row = dict.fromkeys(ATTEST_FIELDS) | {
+            "id": "completed", "assignmentId": "assignment", "kind": "completion",
+            "ts": 15, "bySession": "agent s_author", "commitRefs": [],
+        }
+        self.gateway.rows[("assignments", None)][0]["state"] = "closed"
+        self.gateway.calls.clear()
+        self.service.change({"resource": "attests", "class": "attest.filed", "op": "upsert",
+                             "refs": {"attestId": "completed"}, "payload": row})
+        self.drain()
+        self.assertEqual([("detail", "assignments", None, "assignment")], self.gateway.calls)
+        self.assertEqual("closed", self.service.model.inventory("assignments").rows["assignment"]["state"])
+        self.assertIn("completed", self.service.model.inventory("attests", "assignment").rows)
+
+    def test_source_qualified_session_payload_preserves_topology_and_order(self):
+        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS, SESSION_FIELDS
+        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        row = dict.fromkeys(SESSION_FIELDS) | {
+            "sessionKey": "agent s_author", "displayName": "Old", "state": "active",
+            "rowVersion": 10, "capabilities": {},
+        }
+        self.service.model.accept("sessions", None, Read([row], True, 10, "read"))
+        changed = dict(row, displayName="New", rowVersion=11, topologyParent="agent s_parent")
+        notice = {"resource": "sessions", "op": "upsert", "class": "session.updated",
+                  "refs": {"sessionKey": row["sessionKey"]}, "payload": changed}
+        self.gateway.calls.clear()
+        self.service.change(notice)
+        self.service.change(dict(notice, payload=row))
+        current = self.service.model.inventory("sessions").rows[row["sessionKey"]]
+        self.assertEqual(changed, current)
+        self.assertEqual({}, self.service.reads.pending)
+        self.assertEqual([], self.gateway.calls)
+
+    def test_review_attest_reads_producer_assignment_without_recrawling_evidence(self):
+        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS
+        from atc_upstream import ATTEST_FIELDS
+        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        self.service.model.inventory("assignments").rows["assignment"]["reviewsAssignmentId"] = "producer"
+        row = dict.fromkeys(ATTEST_FIELDS) | {
+            "id": "review", "assignmentId": "assignment", "kind": "verdict",
+            "verdictKind": "reviewed-clean", "ts": 15, "commitRefs": [],
+        }
+        self.service.change({"resource": "attests", "op": "upsert", "class": "attest.filed",
+                             "refs": {"attestId": "review"}, "payload": row})
+        self.assertEqual({("assignments", None, "producer")}, set(self.service.reads.pending))
+        self.assertIn("review", self.service.model.inventory("attests", "assignment").rows)
+
+    def test_attest_side_effect_invalidates_an_older_assignment_read(self):
+        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS
+        from atc_upstream import ATTEST_FIELDS
+        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        entered, release = threading.Event(), threading.Event()
+        original = self.gateway.detail
+
+        def captured(resource, key, scope=None):
+            result = original(resource, key, scope)
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("test did not release read")
+            return result
+
+        self.gateway.detail = captured
+        self.service._refresh("assignments", key="assignment")
+        self.service.reads.pump()
+        self.assertTrue(entered.wait(2))
+        row = dict.fromkeys(ATTEST_FIELDS) | {
+            "id": "completed", "assignmentId": "assignment", "kind": "completion",
+            "ts": 15, "commitRefs": [],
+        }
+        self.gateway.rows[("assignments", None)][0]["state"] = "closed"
+        self.service.change({"resource": "attests", "op": "upsert", "class": "attest.filed",
+                             "refs": {"attestId": "completed"}, "payload": row})
+        release.set()
+        kind, value = self.service.events.get(timeout=2)
+        self.assertEqual("read", kind)
+        self.assertFalse(self.service._read_done(value))
+        self.drain()
+        self.assertEqual("closed", self.service.model.inventory("assignments").rows["assignment"]["state"])
+
+    def test_decision_and_artifact_payloads_require_versioned_complete_projections(self):
+        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS, DECISION_FIELDS, ARTIFACT_FIELDS
+        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        decision = dict.fromkeys(DECISION_FIELDS) | {
+            "id": "decision", "kind": "statute", "status": "open", "rowVersion": 1,
+            "question": "Ship?", "options": [], "context": {}, "deadlineAt": 100,
+            "lineageRung": 0, "effortGeneration": 0,
+        }
+        artifact = dict.fromkeys(ARTIFACT_FIELDS) | {
+            "artifactId": "artifact", "kind": "report", "state": "in-workspace",
+            "title": "Report", "rowVersion": 1,
+        }
+        self.service.change({"resource": "decision requests", "op": "upsert",
+                             "class": "decision_request.opened", "refs": {"decisionRequestId": "decision"},
+                             "payload": decision})
+        self.service.change({"resource": "artifacts", "op": "upsert", "class": "artifact.recorded",
+                             "refs": {"artifactId": "artifact"}, "payload": artifact})
+        self.assertEqual({}, self.service.reads.pending)
+        self.assertEqual(decision, self.service.model.inventory("decision-requests").rows["decision"])
+        self.assertEqual(artifact, self.service.model.inventory("artifacts").rows["artifact"])
+        # The legacy operator projection does not have the closed R7 guarantee.
+        self.service.change({"resource": "decision requests", "op": "upsert",
+                             "class": "decision_request.ruled", "refs": {"decisionRequestId": "decision"},
+                             "payload": dict(decision, kind="operator", rowVersion=2)})
+        self.assertIn(("decision-requests", None, "decision"), self.service.reads.pending)
+        # A CLI artifact baseline has no version floor. Reading this named row
+        # is an ordering gap, not a whole-inventory notice refetch.
+        self.service.model.accept("artifacts", None, Read([
+            {k: v for k, v in artifact.items() if k != "rowVersion"}], True, 10, "cli:artifacts"))
+        self.service.change({"resource": "artifacts", "op": "upsert", "class": "artifact.archived",
+                             "refs": {"artifactId": "artifact"}, "payload": dict(artifact, rowVersion=2)})
+        self.assertIn(("artifacts", None, "artifact"), self.service.reads.pending)
+
+    def test_unknown_build_or_unsupported_payload_projection_uses_targeted_path(self):
+        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS, policies_for
+        version = dict(zip(("version", "build", "sha"), BUILD_ID))
+        self.assertEqual(PAYLOAD_BUILDS[BUILD_ID], policies_for(version))
+        for patch_values in ({"version": "0.1.11"}, {"build": 2909}, {"sha": "different"}, {"sha": None}):
+            self.assertEqual({}, policies_for(version | patch_values))
+        self.service.policies = policies_for(version)
+        self.service.change({"resource": "work-items", "op": "upsert", "class": "unknown.class",
+                             "refs": {"workItemId": "work"}, "payload": work("Invalid class", 5)})
+        self.assertIn(("work-items", None, "work"), self.service.reads.pending)
+        self.assertEqual("First", self.item()["title"])

@@ -14,15 +14,10 @@ from atc_reads import ReadQueue
 from atc_upstream import ATTEST_FIELDS, attest_row, now_ms
 
 
-# Enabled only after source review and real-feed verification of this build.
-# A different gateway build uses targeted reads until its guarantees are known.
-PAYLOAD_BUILDS = {}
-WORK_ITEM_FIELDS = frozenset((
-    "id", "title", "specRefName", "specRefSha256", "isBug", "ownerUserId",
-    "state", "failReason", "routingWakeId", "slateWakeId", "createdByUser",
-    "createdBySession", "createdInTurnSeq", "createdContextKnown", "createdAt",
-    "priority", "rowVersion",
-))
+# Per-resource source qualification for the published build; runtime/feed
+# verification remains separately reported and cannot be inferred from this map.
+from atc_payloads import PAYLOAD_BUILDS, WORK_ITEM_FIELDS, CLASSES, required_fields, policies_for
+
 BASE_SCOPES = (("work-items", None), ("sessions", None), ("assignments", None),
                ("roles", None), ("decision-requests", None), ("artifacts", None))
 HISTORIES = {"attests", "turns", "wakes", "messages"}
@@ -513,13 +508,11 @@ class LiveService:
             return True
         self.reads.touch(normalized, scope)
         inventory = self.model.inventory(normalized, scope)
-        required = {
-            "work-items": WORK_ITEM_FIELDS,
-            "attests": set(ATTEST_FIELDS),
-            "messages": {"id", "sessionKey", "sender", "at"},
-        }.get(resource, set())
+        required = required_fields(resource, payload, ATTEST_FIELDS)
         applied = False
-        if policy and notice.get("op") == "upsert" and required <= payload.keys():
+        if (policy and notice.get("op") == "upsert" and required is not None
+                and required <= payload.keys() and notice.get("class") in CLASSES.get(resource, ())
+                and str(payload.get(inventory.key)) == str(key)):
             row = attest_row(payload) if resource == "attests" else payload
             previous = inventory.rows.get(str(row[inventory.key]))
             applied = inventory.payload(row, at=now_ms(), source="feed:" + notice["class"],
@@ -536,13 +529,36 @@ class LiveService:
             else:
                 inventory.invalidate()
                 self._state("stale", "change missing primary reference")
+        if resource == "sessions" and applied:
+            self._discover_histories()
+        if resource == "attests":
+            assignment = self.model.inventory("assignments").rows.get(str(scope))
+            # Completion can close the holder, and a review verdict can settle
+            # its producer. The attest projection contains neither new row.
+            affected = set()
+            if assignment is None or payload.get("kind") in {None, "completion"}:
+                affected.add(str(scope))
+            if payload.get("kind") in {None, "verdict"} and assignment and assignment.get("reviewsAssignmentId"):
+                affected.add(assignment["reviewsAssignmentId"])
+            if affected:
+                self.reads.touch("assignments", None)
+                for assignment_id in affected:
+                    self._refresh("assignments", key=assignment_id)
         return True
+
+    def _discover_histories(self):
+        for resource, scope in self._history_scopes():
+            if self.model.inventory(resource, scope).observed_at is None:
+                if self.cycle:
+                    self._cycle_add([(resource, scope)])
+                else:
+                    self._refresh(resource, scope)
 
     def _handle(self, kind, value):
         if kind == "ready":
             self.connected = True
             self.version = value
-            self.policies = PAYLOAD_BUILDS.get((value["version"], value["build"], value["sha"]), {})
+            self.policies = policies_for(value)
             self.rebuild()
         elif kind == "lost":
             changed = self.connected

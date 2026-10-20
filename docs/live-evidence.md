@@ -9,24 +9,27 @@ Real-feed observations and remote verification are pending.
 
 | Resource | Published inventory reads | Notice path | Reason |
 |---|---|---|---|
-| Work items | All pages of `/api/work-items` | Targeted `/api/work-items/:id`; candidate full payload with strict `rowVersion` ordering | Transactional row versions are present. Activation still requires exact-build real-feed evidence. |
+| Work items | All pages of `/api/work-items` | Full payload by strict version; `/api/work-items/:id` on field/version gaps | Transactional metadata versions order supported mutations. Equal-version disagreements use reads. |
 | Assignments | Packaged CLI `assignments --state all` | Packaged CLI `assignment-get` for the named assignment; read newly introduced attest scopes and holder histories | Corrections are included in both CLI reads. Reopen transitions cannot be ordered safely by assuming timestamp-based versions are monotonic. |
-| Attests | Packaged CLI `attests <assignmentId>` for every assignment | The named assignment's attest inventory; candidate immutable full payload | Shared evidence fields are normalized across CLI and feed projections. Append-only semantics still need exact-build real-feed confirmation. |
-| Sessions | All pages of `/api/sessions` | `/api/sessions/:key`; missing or stale visible-session histories | Mutable session fields and topology changes require reads; notices do not cover every change. |
+| Attests | Packaged CLI `attests <assignmentId>` for every assignment | Full immutable payload; named history on gaps and named assignments for completion/review effects | Append-only insertion and closed shared evidence fields are source-qualified. Original authors and notes remain intact. |
+| Sessions | All pages of `/api/sessions` | Full payload by strict version; `/api/sessions/:key` on gaps and missing visible-session histories | Public mutations and topology use a strict per-session stamp. Interval reads still recover unannounced changes. |
 | Turns | All pages of `/api/sessions/:key/turns` for visible sessions | `/api/turns/:seq` | Started and ended timestamps establish actual running/queued state. A pending wake cannot substitute for a turn. |
 | Wakes | All pages of `/api/sessions/:key/wakes` for visible sessions | `/api/wakes/:id` | Mutable state; targeted read preserves the current row. |
 | Messages | All pages of `/api/sessions/:key/messages` for visible sessions | `/api/sessions/:key/messages/:id` | The source contains message rewrites. The feed registry's append-only label alone is insufficient. |
 | Roles | Complete `roles` array from packaged CLI `list` | Repeat that read on role notices | The packaged CLI has no `role-list` verb. `list` maps to the published inspect read, which includes all roles. Only the roles array enters this inventory. |
-| Decision requests | All pages of `/api/decision-requests` | `/api/decision-requests/:id` | Mutable state; no verified strict ordering policy. |
-| Artifacts | Complete packaged CLI `artifacts` command | `/api/artifacts/:id` | Metadata only; artifact contents are outside the evidence model. |
+| Decision requests | All pages of `/api/decision-requests` | Full statute/agent/effort payloads by strict version; `/api/decision-requests/:id` for other shapes/gaps | Stored trigger covers the closed R7 projection; operator projection is separate. |
+| Artifacts | Complete packaged CLI `artifacts` command | Full canonical payload by strict version; `/api/artifacts/:id` when the CLI baseline lacks its version floor | Durable floors order wire metadata. CLI inventory omits the floor. Artifact contents remain outside the evidence model. |
 | Canonical merges | Explicit canonical repository/branch registry, ancestry and patch equivalence | Recheck changed commit references asynchronously; expire resolver caches | Git failure is unknown. A removed checkout can recover only through proof in a registered canonical repository. |
 | Annotations and saved cards | ATC-owned JSON persistence | Existing annotation APIs with author attribution | Rebuilding upstream evidence does not replace authored marks. |
 
-`PAYLOAD_BUILDS` is currently empty. No resource is yet enabled for production
-payload application. An exact `(version, build, sha)` match must select a
-reviewed resource policy; a different build falls back to the corresponding
-targeted reads. Tests that inject a policy exercise the algorithm only.
-They do not qualify a gateway build.
+`PAYLOAD_BUILDS` selects source-qualified policies only for the exact
+`("0.1.9", 2908, "8433d22f")` identity. A different build uses targeted reads.
+The [per-resource guarantee inventory](payload-guarantees.md) cites the precise
+field, ordering and deletion guarantees or missing guarantees for every resource
+ATC maintains. All policies still require the expected class, operation, primary
+identity and complete field set; none permits direct deletion. These authored
+policies are based on published source, **not real-feed acceptance evidence**.
+The required scratch-gateway proof remains pending, as do all test executions.
 
 CLI commands run with an explicit user and target base. The packaged CLI owns
 credential discovery; ATC does not open its credential files or read its token.

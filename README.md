@@ -157,7 +157,11 @@ absence; a failed or partial read removes nothing. Last-known rows remain stale,
 and facts that cannot be established remain unknown. The viewer's camera, selection,
 focus, scope, pan and layers stay local through model changes and recovery.
 
-Payloads can update only resource classes verified for the connected gateway build.
+Payloads update only resource classes whose guarantees are qualified against the
+connected gateway's exact source build. The current table covers selected
+0.1.9 build 2908 upserts; real-feed verification remains pending. See the
+[per-resource guarantee inventory](docs/payload-guarantees.md) for the exact
+field/version guarantees, exclusions and targeted-read gaps.
 Other notices trigger a background read of the affected row or scope. Sequence
 gaps, lost heartbeats and disconnected feeds trigger complete recovery. Normal
 intervals refresh base inventories and rotate through a bounded batch of history
