@@ -54,6 +54,9 @@ import copy, json, math, os, posixpath, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
+from atc_git import GitResolver
+from atc_service import LiveService
+from atc_upstream import Gateway
 
 HOST = os.environ.get("TB_ATC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TB_ATC_PORT", "8787"))
@@ -89,6 +92,7 @@ CMD_HISTORY = 200
 # it was tracking is gone: sequence numbers alone restart at zero and would
 # silently skip commands.
 GENERATION = uuid.uuid4().hex[:12]
+live_service = None
 
 lock = threading.Lock()
 state = {
@@ -280,19 +284,19 @@ def push(kind, **payload):
 
 
 def save_tags():
-    try:
-        STATE_FILE.write_text(json.dumps(
-            {"tags": list(state["tags"].values()), "tagSeq": state["tagSeq"],
-             "arrows": list(state["arrows"].values()), "arrowSeq": state["arrowSeq"],
-             "searches": list(state["searches"].values()), "searchSeq": state["searchSeq"]}))
-    except OSError:
-        pass                            # a display, not a database: never fail a request on this
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+    temporary.write_text(json.dumps(
+        {"tags": list(state["tags"].values()), "tagSeq": state["tagSeq"],
+         "arrows": list(state["arrows"].values()), "arrowSeq": state["arrowSeq"],
+         "searches": list(state["searches"].values()), "searchSeq": state["searchSeq"]}))
+    temporary.replace(STATE_FILE)
 
 
 def load_tags():
     try:
         d = json.loads(STATE_FILE.read_text())
-    except Exception:
+    except FileNotFoundError:
         return
     for t in d.get("tags", [])[:MAX_TAGS]:
         if isinstance(t, dict) and t.get("tagId"):
@@ -349,6 +353,11 @@ def focused_arrow_report(v):
     return {"arrowId": clip(v.get("arrowId"), MAX_ID),
             "from": clip(v.get("from"), MAX_ID),
             "to": clip(v.get("to"), MAX_ID)}
+
+
+def owns_annotation(record, author, source):
+    """Authorship is an attributable claim, as in the existing control API."""
+    return source == "user" or bool(author and record.get("author") == author)
 
 
 def compatibility_report(report, client_id=None):
@@ -427,6 +436,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path)
+        if u.path in ("/api/model", "/data.json"):
+            if live_service is None:
+                return self._send({"error": "live service not configured"}, 503)
+            return self._send(live_service.snapshot())
+        if u.path == "/api/events":
+            return self._events()
         if not u.path.startswith("/api/"):
             return self._serve_file(u.path)
         snap = None
@@ -496,6 +511,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"error": "not found"}, 404)
         self._send(snap)
 
+    def _events(self):
+        if live_service is None:
+            return self._send({"error": "live service not configured"}, 503)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        revision = -1
+        try:
+            while not live_service.stop_event.is_set():
+                snapshot = live_service.next_snapshot(revision)
+                if snapshot is None:
+                    self.wfile.write(b": keepalive\n\n")
+                else:
+                    revision = snapshot["revision"]
+                    body = json.dumps(snapshot, separators=(",", ":"))
+                    self.wfile.write(("event: model\ndata: " + body + "\n\n").encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        self.close_connection = True
+
     # ---------- writes ----------
     def do_POST(self):
         u = urlparse(self.path)
@@ -532,7 +571,11 @@ class Handler(BaseHTTPRequestHandler):
                 # was actually asked for.
                 def _file_search(query, ids, author, source, result_kind):
                     if len(state["searches"]) >= MAX_SEARCHES:
-                        oldest = min(state["searches"].values(), key=lambda x: x.get("at") or 0)
+                        owned = [s for s in state["searches"].values()
+                                 if owns_annotation(s, author, source)]
+                        if not owned:
+                            return None
+                        oldest = min(owned, key=lambda x: x.get("at") or 0)
                         del state["searches"][oldest["searchId"]]
                     state["searchSeq"] += 1
                     rec = {"searchId": f"q{state['searchSeq']}", "query": query or "",
@@ -566,21 +609,27 @@ class Handler(BaseHTTPRequestHandler):
                         # set, so re-running a typed search had to be sent as a
                         # clear — which cleared it.
                         rec = _file_search(query, [], b.get("author"), "agent", "query")
-                        save_tags()
-                        out = (push("filter", ids=[], clear=False, query=query,
-                                    resultKind="query",
-                                    searchId=rec["searchId"]), 200)
+                        if rec is None:
+                            out = ({"error": "search capacity reached for other authors"}, 409)
+                        else:
+                            save_tags()
+                            out = (push("filter", ids=[], clear=False, query=query,
+                                        resultKind="query",
+                                        searchId=rec["searchId"]), 200)
                     elif result_kind == "query":
                         out = ({"error": "ids or query required"}, 400)
                     else:
                         rec = _file_search(query, ids, b.get("author"), "agent", "ids")
-                        if label:
-                            rec["label"] = label
-                        save_tags()
-                        out = (push("filter", ids=ids, clear=False,
-                                    resultKind="ids",
-                                    query=query or label,
-                                    searchId=rec["searchId"]), 200)
+                        if rec is None:
+                            out = ({"error": "search capacity reached for other authors"}, 409)
+                        else:
+                            if label:
+                                rec["label"] = label
+                            save_tags()
+                            out = (push("filter", ids=ids, clear=False,
+                                        resultKind="ids",
+                                        query=query or label,
+                                        searchId=rec["searchId"]), 200)
 
             if u.path == "/api/fit":
                 out = (push("fit", on=bool(b.get("on", True))), 200)
@@ -678,17 +727,25 @@ class Handler(BaseHTTPRequestHandler):
                 # Create or edit. A searchId edits that card in place, so a
                 # human can reopen a search and change its terms, and an agent
                 # can revise one it filed, without piling up near-duplicates.
-                made, unnamed = [], []
+                made, unnamed, unauthorized = [], [], []
                 raw = b.get("searches")
                 for q in (raw[:MAX_SEARCHES] if isinstance(raw, list) else []):
                     if not isinstance(q, dict):
                         continue
                     sid = clip(q.get("searchId"), MAX_ID)
                     prev = state["searches"].get(sid) if sid else None
+                    if prev and not owns_annotation(prev, q.get("author"), q.get("source")):
+                        unauthorized.append(sid)
+                        continue
                     if not prev and len(state["searches"]) >= MAX_SEARCHES:
                         # drop the oldest rather than refuse: the pile is a
                         # convenience, and a full one must not block new work
-                        oldest = min(state["searches"].values(), key=lambda x: x.get("at") or 0)
+                        owned = [s for s in state["searches"].values()
+                                 if owns_annotation(s, q.get("author"), q.get("source"))]
+                        if not owned:
+                            unauthorized.append(sid)
+                            continue
+                        oldest = min(owned, key=lambda x: x.get("at") or 0)
                         del state["searches"][oldest["searchId"]]
                     query = (q.get("query") or "").strip()[:MAX_SEARCH_LABEL]
                     ids = id_list(q.get("ids"))
@@ -720,16 +777,20 @@ class Handler(BaseHTTPRequestHandler):
                 if made:
                     state["searchesRev"] += 1
                     save_tags()
-                if unnamed and not made:
+                if unauthorized and not made:
+                    out = ({"error": "author does not own the saved card"}, 403)
+                elif unnamed and not made:
                     out = ({"error": "name this search", "guidance": NAME_GUIDANCE}, 400)
                 else:
                     out = ({"searches": made,
                             **({"refused": len(unnamed), "guidance": NAME_GUIDANCE}
-                               if unnamed else {})}, 200)
+                               if unnamed else {}),
+                            **({"notOwned": len(unauthorized)} if unauthorized else {})}, 200)
 
             if u.path == "/api/tags/clear":
-                state["tags"].clear(); state["tagsRev"] += 1; save_tags()
-                out = ({"ok": True}, 200)
+                out = self._sweep("tags", "tagsRev", {
+                    "source": [b.get("source")], "author": [b.get("author")],
+                    "all": ["true" if b.get("source") == "user" else "false"]})
         if out is None:
             return self._send({"error": "not found"}, 404)
         self._send(out[0], out[1])
@@ -743,6 +804,9 @@ class Handler(BaseHTTPRequestHandler):
         `all=true` is there for a human resetting the board deliberately."""
         author = (q.get("author") or [None])[0]
         wants_all = (q.get("all") or [""])[0].lower() in ("1", "true", "yes")
+        source = (q.get("source") or [None])[0]
+        if wants_all and source != "user":
+            return ({"error": "clearing other authors requires a human action"}, 403)
         if not author and not wants_all:
             return ({"error": "say whose: pass ?author=<who>, or ?all=true to "
                               "clear every author's"}, 400)
@@ -757,6 +821,19 @@ class Handler(BaseHTTPRequestHandler):
             state[rev] += 1; save_tags()
         return ({"deleted": gone, "author": None if wants_all else author}, 200)
 
+    def _remove_annotation(self, collection, revision, key, query):
+        record = state[collection].get(key)
+        if record is None:
+            return ({"deleted": False}, 404)
+        author = (query.get("author") or [None])[0]
+        source = (query.get("source") or [None])[0]
+        if not owns_annotation(record, author, source):
+            return ({"error": "author does not own this annotation"}, 403)
+        del state[collection][key]
+        state[revision] += 1
+        save_tags()
+        return ({"deleted": True}, 200)
+
     def do_DELETE(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
@@ -768,31 +845,37 @@ class Handler(BaseHTTPRequestHandler):
                 out = self._sweep("arrows", "arrowsRev", q)
             elif u.path.startswith("/api/tags/"):
                 tid = u.path.rsplit("/", 1)[-1]
-                gone = state["tags"].pop(tid, None)
-                if gone:
-                    state["tagsRev"] += 1; save_tags()
-                out = ({"deleted": bool(gone)}, 200 if gone else 404)
+                out = self._remove_annotation("tags", "tagsRev", tid, q)
             elif u.path == "/api/searches":
                 out = self._sweep("searches", "searchesRev", q)
             elif u.path.startswith("/api/searches/"):
                 sid = u.path.rsplit("/", 1)[-1]
-                gone = state["searches"].pop(sid, None)
-                if gone:
-                    state["searchesRev"] += 1; save_tags()
-                out = ({"deleted": bool(gone)}, 200 if gone else 404)
+                out = self._remove_annotation("searches", "searchesRev", sid, q)
             elif u.path.startswith("/api/arrows/"):
                 aid = u.path.rsplit("/", 1)[-1]
-                gone = state["arrows"].pop(aid, None)
-                if gone:
-                    state["arrowsRev"] += 1; save_tags()
-                out = ({"deleted": bool(gone)}, 200 if gone else 404)
+                out = self._remove_annotation("arrows", "arrowsRev", aid, q)
         if out is None:
             return self._send({"error": "not found"}, 404)
         self._send(out[0], out[1])
 
 
 if __name__ == "__main__":
+    required = ("TB_ATC_GATEWAY", "TB_ATC_DEVICE_TOKEN", "TB_ATC_ORG_TOKEN", "TB_ATC_USER")
+    missing = [key for key in required if not os.environ.get(key)]
+    if missing:
+        raise SystemExit("Missing service configuration: " + ", ".join(missing))
     load_tags()
+    gateway = Gateway(*(os.environ[key] for key in required))
+    resolver = GitResolver(
+        os.environ.get("TB_ATC_GIT_CACHE", str(STATE_FILE.parent / "git-cache")),
+        host_routes=json.loads(os.environ.get("TB_ATC_HOST_ROUTES", "{}")))
+    live_service = LiveService(gateway, resolver,
+                              rebuild_interval=float(os.environ.get("TB_ATC_REBUILD_SECONDS", "300")))
+    live_service.start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"tb-atc on http://{HOST}:{PORT}/  (web root: {WEB})", flush=True)
-    srv.serve_forever()
+    try:
+        srv.serve_forever()
+    finally:
+        live_service.stop()
+        srv.server_close()

@@ -4,9 +4,9 @@ A live 3D view of a running [Tightbeam](https://github.com/clickety-clacks/tight
 organization, drawn as a technical diagram: hidden-line wireframes on plotter
 paper in the light theme, a vector display in the dark one.
 
-Everything on screen derives from durable rows in Tightbeam's ledger. Nothing is
-estimated. Where the ledger cannot answer a question, the view says unknown
-rather than guessing.
+Organization facts come from Tightbeam's published reads and change feed; merge
+evidence comes from canonical Git branches. An unavailable answer stays unknown.
+Each fact carries its observation time and freshness, including during recovery.
 
 It also has a control plane, so an agent can point a human at something: read
 what is selected, focus a node, pin short tags onto agents and work items, and
@@ -18,12 +18,11 @@ draw labelled arrows between them.
   tree: the root deepest, leaves at the surface, each family in its own sector.
   Colour is recency — solid blue for an agent that has just acted, fading to
   grey by an hour idle. Size shrinks with depth.
-- **Floating solids above the grid are work items.** Altitude is evidence
-  remaining: they descend a band per satisfied requirement (progress, tests,
-  completion, independent review, a clean verdict), and colour runs red to green
-  over the same stops.
-- **On the floor, a ring says what happened.** Yellow: reviewed but not in the
-  branch. Green: in the branch, or closed. Grey: nothing to merge.
+- **Floating solids above the grid are work items.** Altitude and colour show the highest recorded evidence stage, from 0 to 6.
+  Missing evidence stays unknown; later evidence does not manufacture earlier steps.
+- **On the floor, a ring says what happened.** Black means merge proven by Git. Green means an explicit ready-to-merge verdict.
+  Light gray means durably non-code. Yellow means code with unknown merge status.
+  A floating item has no merge ring; floor position alone does not prove a merge.
 - **An agent taking a turn wears a rippling ring** — one sine travelling round
   a circle, drawn three times at the same frequency and amplitude with the
   period and radius offset slightly, in red, green and blue. Where they coincide
@@ -89,7 +88,7 @@ typing a tag onto it.
 
 **Selection follows scope.** With nothing focused or filtered the brush reaches
 anything; inside a focus or a filter it can only reach what that scope is
-showing, which is the same rule hover follows. Narrow first, then brush.
+showing. Ghosts remain available for hover inspection. Narrow first, then brush.
 
 **Search is deliberately asymmetric.** A human types a query and everything
 unmatched ghosts, with the camera framing what remains. An agent achieves the
@@ -99,65 +98,65 @@ for something you typed. Emptying the box releases either kind.
 
 ## Requirements
 
-- A Tightbeam installation. The view reads `state.db` read-only.
-- Python 3. Nothing else: no build step, no package manager, no CDN. three.js is
-  vendored.
-- Optional: `inotify-tools` for event-driven updates.
+- Python 3.10 or newer, Git, and the pinned dependency in `requirements.txt`.
+- A Tightbeam gateway with protocol-2 change feed and published state reads.
+- Service-side access to an approved device login and an organization read-command
+  credential. These credentials never go to the browser. The organization key
+  can also authorize mutations; this adapter exposes only its listed read commands.
 
-## Install
+## Run
 
-One process serves both the page and the API.
+The canonical branch is `main`. One process serves the model, stream, viewer and
+ATC's annotation APIs. It does not read Tightbeam's SQLite database or generate a
+static snapshot file.
 
-    sudo mkdir -p /opt/tb-atc
-    sudo cp -r web server/tb-atc-api.py /opt/tb-atc/
-    sudo cp bin/tb-weather-gen bin/tb-weather-watch /usr/local/bin/
-
-Run it:
-
-    TB_ATC_WEB=/opt/tb-atc/web python3 /opt/tb-atc/tb-atc-api.py
+    python3 -m venv .venv
+    .venv/bin/pip install -r requirements.txt
+    # Supply TB_ATC_GATEWAY, TB_ATC_DEVICE_TOKEN, TB_ATC_ORG_TOKEN and TB_ATC_USER
+    # in the service environment, using the intended gateway's credentials.
+    .venv/bin/python server/tb-atc-api.py
     # http://127.0.0.1:8787/
 
-Then keep the snapshot fresh, writing into the same web root:
-
-    TB_WEATHER_OUT=/opt/tb-atc/web/data.json tb-weather-watch &
-
-`systemd/tb-atc.service` and `systemd/tb-weather.service` are user units for
-both. Copy them into `~/.config/systemd/user/`, adjust the paths, then
-`systemctl --user enable --now tb-atc tb-weather`.
-
-### Serving from an existing web server instead
-
-The page is static, so `web/` can be served by anything. Point the generator at
-that document root and proxy `/api` to the control service:
-
-    server {
-        listen 80;
-        server_name atc.example.org;
-        root /var/www/tb-atc;
-        location / { try_files $uri $uri/ =404; }
-        location /api/ { proxy_pass http://127.0.0.1:8787/api/; }
-    }
-
-The generator can also push the snapshot to another machine over ssh; see
-`TB_WEATHER_DEST` below.
+`systemd/tb-atc.service` is an example user unit. It expects the checkout and
+virtual environment in `~/.local/share/tb-atc` and service configuration in
+`~/.config/tb-atc/service.env`. Existing annotation files can be retained by
+setting `TB_ATC_STATE` to their path. The former weather generator and watcher
+are retired; they are not part of this service.
 
 ## Configuration
 
 | variable | meaning | default |
 |---|---|---|
-| `TB_ATC_HOST` | bind address | `127.0.0.1` |
-| `TB_ATC_PORT` | port | `8787` |
+| `TB_ATC_GATEWAY` | gateway HTTP(S) base URL | required |
+| `TB_ATC_DEVICE_TOKEN` | approved device token for state reads and org-wide feed | required |
+| `TB_ATC_ORG_TOKEN` | organization token for detailed read commands | required |
+| `TB_ATC_USER` | explicit user for those read commands | required |
+| `TB_ATC_HOST` | viewer bind address | `127.0.0.1` |
+| `TB_ATC_PORT` | viewer port | `8787` |
 | `TB_ATC_WEB` | directory holding `index.html` | `../web` |
-| `TB_ATC_STATE` | file tags and arrows are persisted to | `<web>/../tags.json` |
-| `TB_BASE_DIR` | Tightbeam base directory | `~/.tightbeam` |
-| `TB_WEATHER_OUT` | where the snapshot is written | `/tmp/tb-weather.json` |
-| `TB_WEATHER_DEST` | optional `scp` target when the web root is another machine | unset |
-| `TB_WEATHER_KEY` | ssh identity for that push | unset |
+| `TB_ATC_STATE` | ATC-owned annotations and saved searches | `<web>/../tags.json` |
+| `TB_ATC_GIT_CACHE` | service-owned canonical Git cache | beside the annotation file |
+| `TB_ATC_HOST_ROUTES` | JSON mapping of recorded checkout hosts to existing SSH destinations | `{}` |
+| `TB_ATC_REBUILD_SECONDS` | full reconciliation interval, shown in the viewer | `300` |
+
+## Freshness and recovery
+
+The service subscribes before reading initial state. Complete collections establish
+absence; a failed or partial read removes nothing. Last-known rows remain stale,
+and facts that cannot be established remain unknown. The viewer's camera, selection,
+focus, scope, pan and layers stay local through model changes and recovery.
+
+Payloads can update only resource classes verified for the connected gateway build.
+Other notices trigger a read of the affected row or scope. Sequence gaps, lost
+heartbeats and disconnected feeds trigger recovery. Interval rebuilds cover facts
+without notices and changes lost before sequence allocation. A connected feed does
+not make those facts newer than their last read; their age and the rebuild interval
+remain visible.
 
 **On merge detection.** No attest kind means "merged" — an item can hold a
 completion, a clean review *and* a verified verdict while its code is still off
 the branch. Each recorded `host:path` checkout is used only to read its `origin`;
-the generator then resolves the commit through a service-owned cache for that
+the service then resolves the commit through a service-owned cache for that
 canonical repository. Arbitrary remote branches are never landing proof. The
 product-owned integration-ref registry is:
 
@@ -180,7 +179,9 @@ you mean otherwise.
 
 Because several agents may annotate one board, `author` is carried on tags and
 arrows and the unqualified clear-all verbs are refused: a caller must say whose
-notes it is removing, or ask for `?all=true` deliberately. The field is a
+notes it is removing, or identify a human reset with `?all=true&source=user`. Per-ID deletion and
+saved-card edits use the same author rule. Human actions carry `source=user`;
+this is attribution under the existing unsigned API, not authentication. The field is a
 signature rather than a credential — nothing verifies it — and it exists so the
 view can show provenance and so one caller's cleanup does not take another's
 work with it.
@@ -195,17 +196,17 @@ work with it.
 | `POST` | `/api/filter` | `{ids:[id], query, author}` or `{clear:true}` — ghost everything else, and file it as a card |
 | `GET` | `/api/searches` | `[{searchId, query, ids, label, source, author, at}]` |
 | `POST` | `/api/searches` | `{searches:[{query\|ids, label, author, searchId?}]}` — file or edit |
-| `DELETE` | `/api/searches/<searchId>` | forget one |
+| `DELETE` | `/api/searches/<searchId>?author=<who>` | forget your card |
 | `GET` | `/api/tags` | `[{tagId, target, text, source, color, author, at}]` |
 | `POST` | `/api/tags` | `{tags:[{target, text, source:"agent"\|"user", color, author}]}` |
 | `DELETE` | `/api/tags?author=<who>` | clear that author's |
-| `DELETE` | `/api/tags?all=true` | clear every author's |
-| `DELETE` | `/api/tags/<tagId>` | clear one |
+| `DELETE` | `/api/tags?all=true&source=user` | clear every author's |
+| `DELETE` | `/api/tags/<tagId>?author=<who>` | clear your tag |
 | `GET` | `/api/arrows` | `[{arrowId, from, to, text, source, color, author, at}]` |
 | `POST` | `/api/arrows` | `{arrows:[{from, to, text, source, color, author}]}` |
 | `DELETE` | `/api/arrows?author=<who>` | clear that author's |
-| `DELETE` | `/api/arrows?all=true` | clear every author's |
-| `DELETE` | `/api/arrows/<arrowId>` | clear one |
+| `DELETE` | `/api/arrows?all=true&source=user` | clear every author's |
+| `DELETE` | `/api/arrows/<arrowId>?author=<who>` | clear your arrow |
 
 Ids are the feed's own: work items `wi_...`, agents their session suffix
 `s_...`. Both are stable across snapshots, so external callers can address them.
@@ -226,8 +227,8 @@ Selection is telemetry rather than truth — the last page to report wins, so wi
 several pages open it reflects whichever reported most recently. The service
 carries a `generation` that changes on restart and reports `gap: true` when a
 client has fallen further behind than the retained history; a client ignoring
-either will silently miss commands. Tags live in memory and are capped, which is
-the right lifetime for a pointing device.
+either will silently miss commands. Tags, arrows and saved cards persist in ATC's own annotation file. Missing
+authors remain unknown; editing does not rewrite the original author.
 
 ## The operator skill
 
@@ -245,22 +246,50 @@ Adjust the host and port inside it if you did not use the defaults.
 
 ## Data contract
 
-The page fetches `data.json` every five seconds:
+`GET /api/model` returns the current model. `GET /api/events` streams SSE events
+named `model`, each containing the full model. A new connection immediately gets
+current state. `/data.json` is a dynamic compatibility alias for `/api/model`;
+there is no static-file polling path.
 
     {
+      "schemaVersion": 1,
+      "generation": "process identity",
+      "revision": 1,
       "generatedAt": 1780000000000,
-      "agents":   [{ "id", "name", "kind", "parent", "retired", "turn", "idleFor" }],
-      "items":    [{ "id", "short", "title", "stage", "holders", "turns",
-                     "flow", "merged", "code", "closedAt" }],
-      "links":    [{ "id", "from", "to", "state" }],
-      "wakes":    [{ "id", "from", "to" }],
-      "messages": [{ "id", "from", "to", "kind" }]
+      "freshness": {
+        "state": "live",
+        "since": 1780000000000,
+        "reason": null,
+        "rebuildIntervalMs": 300000,
+        "lastCompleteAt": 1780000000000
+      },
+      "agents": [], "items": [], "links": [], "wakes": [], "messages": []
     }
 
-`stage` runs 0–6 over the evidence ladder. `merged` is `true`, `false`, or
-`null` for unknown. `id` is the full work item id — the one the substrate's CLI
-will accept — and `short` is a display form the cards use; the control API
-takes either and resolves short ids against the feed. Anything emitting this
-shape can drive the page.
+Revisions increase within a generation. A viewer accepts a new generation and
+ignores older revisions from its current generation. Each event is usable on its
+own; reconnect does not require replay. Transport loss is shown stale locally
+until the stream returns.
+
+Items retain full work IDs, titles, holders and evidence inventories. Their
+`stage`, `code`, `merged`, `readyToMerge` and assignment counts may be `null`.
+`ring` is `black`, `green`, `light-gray`, `yellow` or `null`. Agents retain stable
+session suffix IDs, recorded parents and separate `run`, `wait`, `idle` or unknown
+turn state. Pending wakes do not prove queued turns.
+
+Each entity's `evidence` maps fact names to `status` (`known` or `unknown`),
+`freshness`, `observedAt`, `source` and `complete`. Fact age is measured from
+`observedAt`, never from the model's publication time. A full model can contain
+retained stale rows after an incomplete rebuild; clients must keep them in scope.
+
+## Tests
+
+The existing suite entry point is:
+
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test -v
+
+Tests exercise evidence meanings, read completeness, recovery, real temporary Git
+repositories and the service/viewer transport. Live gateway acceptance uses seeded
+scratch state and reports its exact gateway build separately from unit evidence.
 
 MIT licensed.
