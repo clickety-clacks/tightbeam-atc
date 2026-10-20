@@ -1263,7 +1263,7 @@ document.getElementById('cards').addEventListener('click', ev => {
     if (id === activeSearchId) releaseFilter();
     searches = searches.filter(q => q.searchId !== id);
     renderCards();
-    apiFetch('/searches/' + encodeURIComponent(id), {method:'DELETE'}).catch(()=>{});
+    apiFetch('/searches/' + encodeURIComponent(id) + '?source=user', {method:'DELETE'}).catch(()=>{});
     return;
   }
   const card = ev.target.closest('[data-id]');
@@ -1295,7 +1295,7 @@ function beginRename(card){
       renderCards();
       try {
         await apiFetch('/searches', {method:'POST', headers:{'content-type':'application/json'},
-          body: JSON.stringify({searches:[{searchId: id, label}]})});
+          body: JSON.stringify({searches:[{searchId: id, label, source:'user'}]})});
         searchesRev = -1;
       } catch(e){ /* the pile is a convenience; never fail on it */ }
     } else renderCards();
@@ -2031,10 +2031,10 @@ async function apiClearTags(){
   /* never clear locally on failure: the page would show an empty board while
      the server still holds the tags, and the revision would not correct it */
   try {
-    /* the board carries several authors' notes, so the server refuses an
-       unqualified sweep; this key IS the deliberate one, so it says so */
-    await apiFetch('/tags?all=true', {method:'DELETE'});
-    await apiFetch('/arrows?all=true', {method:'DELETE'});
+    /* the board carries several authors' notes, so a human clear-all must
+       carry source=user to distinguish it from an agent's cleanup */
+    await apiFetch('/tags?all=true&source=user', {method:'DELETE'});
+    await apiFetch('/arrows?all=true&source=user', {method:'DELETE'});
     apiTagsRev = -1; arrowsRev = -1; await apiPull();
   } catch(e){ apiUp = false; }
 }
