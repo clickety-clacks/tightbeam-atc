@@ -2,6 +2,7 @@
 
 from collections import Counter, defaultdict
 from copy import deepcopy
+from atc_summary import summarize, recent_marks
 
 from atc_evidence import (
     Inventory, agent_id, code_state, combined_evidence, evidence_stage, merge_ring,
@@ -20,6 +21,15 @@ class EvidenceModel:
         self.next_expiry = None
         self.details_revision = 0
         self.recent_expiries = {}
+        self.summaries = {}
+
+    def summary(self, resource, scope):
+        inventory = self.inventory(resource, scope)
+        cached = self.summaries.get((resource, scope))
+        if cached is None or cached[0] != inventory.data_revision:
+            cached = inventory.data_revision, summarize(resource, inventory.rows.values())
+            self.summaries[resource, scope] = cached
+        return cached[1]
 
     def inventory(self, resource, scope=None):
         return self.inventories.setdefault((resource, scope), Inventory(KEYS.get(resource, "id")))
@@ -42,6 +52,7 @@ class EvidenceModel:
                 if resource in {"attests", "assignments", "work-items"} and inventory.rows.get(key) != row:
                     self.details_revision += 1
                 inventory.rows[key] = deepcopy(row)
+                inventory.data_revision += 1
                 inventory.observations[key] = {
                     "status": "known", "freshness": "live", "observedAt": result.at,
                     "source": result.source, "complete": True,
@@ -74,12 +85,9 @@ class EvidenceModel:
         assignments = self.inventory("assignments")
         sessions = self.inventory("sessions")
         roles = self.inventory("roles")
-        by_item, evidence_by_item = defaultdict(list), defaultdict(list)
+        by_item = defaultdict(list)
         for assignment in assignments.rows.values():
             by_item[assignment.get("workItemId")].append(assignment)
-        for assignment in assignments.rows.values():
-            evidence_by_item[assignment.get("workItemId")].extend(
-                self.inventory("attests", assignment["id"]).rows.values())
 
         visible = self.active_sessions()
         ids = {s["sessionKey"]: agent_id(s["sessionKey"]) for s in visible}
@@ -89,34 +97,36 @@ class EvidenceModel:
 
         turns, wakes, messages = [], {}, []
         turn_evidence = []
+        activity = {}
         for session in visible:
             key = session["sessionKey"]
-            t = self.inventory("turns", key)
-            turn_evidence.append(t.evidence())
-            turns.extend(t.rows.values())
-            wakes.update(self.inventory("wakes", key).rows)
-            messages.extend(self.inventory("messages", key).rows.values())
+            turn_evidence.append(self.inventory("turns", key).evidence())
+            summary = self.summary("turns", key)
+            turns.extend(summary["live"])
+            if summary["activity"] is not None:
+                activity[key] = summary["activity"]
+            # Only live-turn wake references need historical wake lookup.
+            wake_rows = self.inventory("wakes", key).rows
+            for turn in summary["live"]:
+                wake = wake_rows.get(str(turn.get("wakeId")))
+                if wake:
+                    wakes[str(wake["wakeId"])] = wake
+            for wake in recent_marks(self.summary("wakes", key), "firedAt", now):
+                wakes[str(wake["wakeId"])] = wake
+            messages.extend(recent_marks(self.summary("messages", key), "at", now))
         all_turn_facts = combined_evidence(*turn_evidence) if visible else sessions.evidence()
 
-        activity = {}
-        activity_evidence = defaultdict(list)
-        for turn in turns:
-            at = next((turn.get(k) for k in ("endedAt", "startedAt", "createdAt")
-                       if isinstance(turn.get(k), (int, float))), None)
-            if at is not None:
-                key = turn["sessionKey"]
-                activity[key] = max(activity.get(key, 0), at)
         authored_at = defaultdict(dict)
-        for wid, attests in evidence_by_item.items():
-            for attest in attests:
-                key, at = attest.get("bySession"), attest.get("ts")
-                if key and isinstance(at, (int, float)):
-                    activity[key] = max(activity.get(key, 0), at)
-                    authored_at[key][wid] = max(authored_at[key].get(wid, 0), at)
+        activity_evidence = defaultdict(list)
         for assignment in assignments.rows.values():
-            inventory = self.inventory("attests", assignment["id"])
-            for author in {r.get("bySession") for r in inventory.rows.values()} - {None}:
-                activity_evidence[author].append(inventory.evidence())
+            wid = assignment.get("workItemId")
+            summary = self.summary("attests", assignment["id"])
+            for key, at in summary["authors"].items():
+                activity[key] = max(activity.get(key, 0), at)
+                authored_at[key][wid] = max(authored_at[key].get(wid, 0), at)
+            facts = self.inventory("attests", assignment["id"]).evidence()
+            for author in summary["authorIds"]:
+                activity_evidence[author].append(facts)
 
         agents = []
         for session in visible:
@@ -142,7 +152,7 @@ class EvidenceModel:
                 "model": session.get("model"), "parent": parent,
                 "parentSessionKey": actual_parent, "spawnedBy": session.get("spawnedBy"),
                 "retired": session.get("state") != "active",
-                "turn": turn_state(turn_inventory.rows.values(), complete=turn_inventory.complete),
+                "turn": turn_state(self.summary("turns", key)["live"], complete=turn_inventory.complete),
                 "idleFor": max(0, (now - activity[key]) // 1000) if key in activity else None,
                 "idleSince": activity.get(key),
                 "evidence": {
@@ -172,19 +182,28 @@ class EvidenceModel:
 
         items = []
         for wid, item in work.rows.items():
-            owned, attests = by_item[wid], evidence_by_item[wid]
+            owned = by_item[wid]
+            summary = {"count": 0, "kinds": Counter(), "verdicts": Counter(), "latest": {}}
+            for assignment in owned:
+                part = self.summary("attests", assignment["id"])
+                summary["count"] += part["count"]
+                summary["kinds"].update(part["kinds"])
+                summary["verdicts"].update(part["verdicts"])
+                for verdict, timestamp in part["latest"].items():
+                    summary["latest"][verdict] = max(summary["latest"].get(verdict, 0), timestamp)
             inventory_facts = [self.inventory("attests", a["id"]).evidence() for a in owned]
             attest_facts = combined_evidence(assignments.evidence(), *inventory_facts)
             identity = work.observations.get(wid, work.evidence())
             stage_facts = combined_evidence(identity, assignments.evidence(), attest_facts)
             complete = stage_facts["complete"]
-            stage = evidence_stage(item, owned, attests, complete=complete)
-            kinds = sorted({a["kind"] for a in attests})
-            verdicts = sorted({a["verdictKind"] for a in attests
-                               if a["kind"] == "verdict" and a.get("verdictKind")})
+            stage = evidence_stage(item, owned, (), complete=complete, summary=summary)
+            kinds = sorted(k for k in summary["kinds"] if k is not None)
+            verdicts = sorted(summary["verdicts"])
             refs, producer_refs = [], []
             for assignment in owned:
-                found = self.commit_refs(assignment, self.inventory("attests", assignment["id"]).rows.values())
+                corrections = assignment.get("commitRefCorrections") or []
+                found = ((corrections[-1].get("commitRefs") or []) if corrections else
+                         self.summary("attests", assignment["id"])["refs"])
                 refs.extend(found)
                 if not assignment.get("reviewsAssignmentId"):
                     producer_refs.extend(found)
@@ -223,11 +242,9 @@ class EvidenceModel:
                     "terminal": sum(a["state"] != "open" for a in owned) if assignments.complete else None,
                 },
                 "evidenceCounts": {
-                    "total": len(attests) if attest_facts["complete"] else None,
-                    "byKind": dict(Counter(a["kind"] for a in attests)) if attest_facts["complete"] else None,
-                    "byVerdict": dict(Counter(a["verdictKind"] for a in attests
-                                             if a["kind"] == "verdict" and a.get("verdictKind")))
-                    if attest_facts["complete"] else None,
+                    "total": summary["count"] if attest_facts["complete"] else None,
+                    "byKind": dict(summary["kinds"]) if attest_facts["complete"] else None,
+                    "byVerdict": dict(summary["verdicts"]) if attest_facts["complete"] else None,
                 },
                 "commitRefs": refs,
                 "commitRefCorrections": [

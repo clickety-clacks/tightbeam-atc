@@ -22,6 +22,9 @@ from atc_payloads import PAYLOAD_BUILDS, WORK_ITEM_FIELDS, CLASSES, required_fie
 BASE_SCOPES = (("work-items", None), ("sessions", None), ("assignments", None),
                ("roles", None), ("decision-requests", None), ("artifacts", None))
 HISTORIES = {"attests", "turns", "wakes", "messages"}
+PUBLICATION_INTERVAL = 0.25
+EVENT_BATCH_LIMIT = 128
+
 COLLECTIONS = ("agents", "items", "links", "wakes", "messages")
 
 RESOURCE_REFS = {
@@ -96,6 +99,10 @@ class LiveService:
         self.merge_jobs = queue.Queue()
         self.merge_pending = {}
         self.condition = threading.Condition()
+        self.model_lock = threading.RLock()
+        self._dirty = False
+        self._next_maintenance = 0
+        self._last_publication = 0
         self.stop_event = threading.Event()
         self.connected = False
         self.state, self.since, self.reason = "stale", now_ms(), "initial state unavailable"
@@ -150,10 +157,13 @@ class LiveService:
         return {k: v for k, v in row.items() if k != "idleFor"} if collection == "agents" else row
 
     def evidence_page(self, item_id, offset=0, limit=100, generation=None, revision=None):
-        # The model worker uses this same lock around mutation + publication,
-        # so a page and its revision describe one committed model state.
-        with self.condition:
+        # Model work does not hold the lock serving committed SSE/snapshots.
+        # During coalescing, retry instead of labelling newer rows with an old
+        # revision. The next publication makes the page and its pin consistent.
+        with self.model_lock:
             pin = {"generation": self.generation, "revision": self.revision}
+            if self._dirty:
+                return 409, {"error": "revision-mismatch", **pin}
             if (offset < 0 or not 1 <= limit <= 100 or
                     (offset > 0 and (generation is None or revision is None)) or
                     ((generation is None) != (revision is None))):
@@ -203,11 +213,12 @@ class LiveService:
             return True
         return False
 
-    def _publish(self):
-        # The model worker holds the publication lock across inventory changes
-        # and this commit. Published revisions and encoded events are immutable.
+    def _publish(self, *, classified=False):
+        # Only the model worker writes. Build the next immutable frame without
+        # holding the condition used by subscribers of the committed frame.
         at = now_ms()
-        self._update_backstop(at)
+        if not classified:
+            self._update_backstop(at)
         data = deepcopy(self.model.snapshot(at))
         self._retain_unproven_removals(data, at)
         old_agents = {row["id"]: row for row in self.current.get("agents", [])}
@@ -232,28 +243,33 @@ class LiveService:
         comparison = dict(candidate, agents=[
             {key: value for key, value in agent.items() if key != "idleFor"}
             for agent in data["agents"]])
+        self._dirty = False
+        self._last_publication = time.monotonic()
         if comparison == self._comparison and self.model.details_revision == self._published_details:
             return False
+        previous = self.current
+        revision = self.revision + 1
+        current = dict(candidate, revision=revision, generatedAt=at, metrics=dict(self.metrics))
+        changes = {}
+        for name in COLLECTIONS:
+            before = {row["id"]: row for row in previous.get(name, [])}
+            after = {row["id"]: row for row in data[name]}
+            changes[name] = {
+                "upsert": [row for key, row in after.items() if key not in before or
+                           self._comparable(name, row) != self._comparable(name, before[key])],
+                "remove": [key for key in before if key not in after],
+            }
+        metadata = {key: value for key, value in current.items() if key not in COLLECTIONS}
+        delta = self._encode("delta", dict(metadata, baseRevision=self.revision, changes=changes))
         with self.condition:
             previous = self.current
             self.delta_base = self.revision
-            self.revision += 1
-            self.current = dict(candidate, revision=self.revision, generatedAt=at,
-                                metrics=dict(self.metrics))
+            self.revision = revision
+            self.current = current
             self._comparison = comparison
             self._published_details = self.model.details_revision
             self._full_event = None
-            changes = {}
-            for name in COLLECTIONS:
-                before = {row["id"]: row for row in previous.get(name, [])}
-                after = {row["id"]: row for row in data[name]}
-                changes[name] = {
-                    "upsert": [row for key, row in after.items() if key not in before or
-                               self._comparable(name, row) != self._comparable(name, before[key])],
-                    "remove": [key for key in before if key not in after],
-                }
-            metadata = {key: value for key, value in self.current.items() if key not in COLLECTIONS}
-            self.delta = self._encode("delta", dict(metadata, baseRevision=self.delta_base, changes=changes))
+            self.delta = delta
             self.condition.notify_all()
         return True
 
@@ -620,32 +636,62 @@ class LiveService:
 
     def _worker(self):
         while not self.stop_event.is_set():
+            # Deadlines are recomputed once per maintenance pass, not per
+            # event. A busy feed still reaches maintenance after a bounded batch.
+            timeout = max(0, self._next_maintenance - time.monotonic())
             try:
-                kind, value = self.events.get(timeout=self._wait_timeout())
+                event = self.events.get(timeout=timeout)
             except queue.Empty:
-                kind, value = "deadline", None
-            if kind == "stop":
-                return
-            # Readers see either the previous revision or the new one, never
-            # rows from a new read labelled with the previous revision.
-            with self.condition:
-                try:
-                    update = self._handle(kind, value)
-                except Exception as error:
-                    update = True
-                    self.model.invalidate()
-                    self._state("stale", "model update failed: " + type(error).__name__)
-                if (self.connected and self.cycle is None and
-                        time.monotonic() - self.last_rebuild >= self.rebuild_interval):
-                    update = True
-                    self.rebuild(recovery=False)
-                update = self._update_backstop(now_ms()) or update
-                if self.connected:
-                    self.backstop.schedule(self.model, self.reads, now_ms())
+                event = None
+            with self.model_lock:
+                for index in range(EVENT_BATCH_LIMIT):
+                    if event is None:
+                        break
+                    kind, value = event
+                    if kind == "stop":
+                        return
+                    try:
+                        changed = self._handle(kind, value)
+                        self._dirty = changed or self._dirty
+                        if changed:
+                            self._next_maintenance = min(self._next_maintenance,
+                                                         self._last_publication + PUBLICATION_INTERVAL)
+                    except Exception as error:
+                        self._dirty = True
+                        self._next_maintenance = min(self._next_maintenance,
+                                                     self._last_publication + PUBLICATION_INTERVAL)
+                        self.model.invalidate()
+                        self._state("stale", "model update failed: " + type(error).__name__)
+                    if index == EVENT_BATCH_LIMIT - 1:
+                        break
+                    try:
+                        event = self.events.get_nowait()
+                    except queue.Empty:
+                        event = None
+                self._maintenance()
                 self.reads.pump()
-                if update:
-                    self._publish()
-                    self._resolve_merges()
+
+    def _maintenance(self):
+        clock = time.monotonic()
+        if clock < self._next_maintenance:
+            return
+        if (self.connected and self.cycle is None and
+                clock - self.last_rebuild >= self.rebuild_interval):
+            self.rebuild(recovery=False)
+            self._dirty = True
+        at = now_ms()
+        expired = self.model.next_expiry is not None and self.model.next_expiry <= at
+        self._dirty = self._update_backstop(at) or self._dirty or expired
+        if self.connected:
+            self.backstop.schedule(self.model, self.reads, at)
+        if self._dirty:
+            self._publish(classified=True)
+            self._resolve_merges()
+        delay = self._wait_timeout()
+        # Coalesce bursts and read completions, including bootstrap/recovery.
+        # Freshness/mark deadlines remain visible even without a feed event.
+        self._next_maintenance = time.monotonic() + max(
+            PUBLICATION_INTERVAL, delay if delay is not None else self.rebuild_interval)
 
     def _wait_timeout(self):
         deadlines = []

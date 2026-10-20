@@ -138,3 +138,25 @@ Record realistic active-scope count, achieved active reconfirmation time and rea
 load; a missed 30-minute budget at acceptable load remains an unresolved delivery
 limit, not grounds to extend the budget silently.
 No synthetic test result substitutes for these observations.
+
+### Event and publication cost
+
+History summaries are cached by each inventory's data revision. Classification
+and model projection reuse unchanged summaries; a read or applied payload
+invalidates only its own scope. Summary contents preserve stage timestamps,
+counts, authorship, commit references, live turns and recent marks. Raw notes
+remain available only through the existing version-pinned detail endpoint.
+
+The worker handles at most 128 queued events before checking maintenance, and
+coalesces model publication to a 250 ms cadence. Bootstrap and recovery read
+completions use that same cadence. Active confirmation and expiry deadlines
+still run when the feed is idle. Building and encoding a candidate delta does
+not hold the condition used to serve already committed snapshots and events.
+During an uncommitted batch, evidence pagination returns the existing revision
+mismatch response so clients retry against a committed revision.
+
+This bounds repeated projection frequency, not total model size or upstream
+latency. Projection still traverses compact scope summaries and visible rows;
+a changed history may require rescanning that scope. The event queue remains
+in memory. Real feed throughput, active sweep load and integrated rendering
+measurements are separate from synthetic behavior verification.

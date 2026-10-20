@@ -31,18 +31,14 @@ class ActiveBackstop:
             inventory = model.inventory(resource, scope)
             if resource != "attests" and not inventory.complete:
                 sessions.add(scope)  # Incomplete evidence cannot prove inactivity.
-            for row in inventory.rows.values():
-                if resource == "attests":
-                    activity(row.get("bySession"), row.get("ts"))
-                elif resource == "turns":
-                    if row.get("endedAt") is None:
-                        sessions.add(scope)  # Includes a queued turn.
-                    for key in ("createdAt", "startedAt", "endedAt"):
-                        activity(scope, row.get(key))
-                elif resource == "messages":
-                    activity(scope, row.get("at"))
-                elif resource == "wakes":
-                    activity(scope, row.get("firedAt"))
+            summary = model.summary(resource, scope)
+            if resource == "attests":
+                for author, timestamp in summary["authors"].items():
+                    activity(author, timestamp)
+            else:
+                if resource == "turns" and summary["live"]:
+                    sessions.add(scope)  # Includes a queued turn.
+                activity(scope, summary["recentActivity"])
         deadlines = []
         for session, timestamp in recent.items():
             if session in session_scopes and timestamp + RECENT_WINDOW_MS > at:

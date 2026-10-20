@@ -22,6 +22,7 @@ class Inventory:
     budget_stale: bool = False
     stale: bool = True
     source: str = ""
+    data_revision: int = 0
 
     def read(self, rows, *, complete, at, source):
         """A read covers this inventory's entire declared scope.
@@ -30,6 +31,7 @@ class Inventory:
         add knowledge, but cannot delete retained rows or certify absence.
         """
         incoming = {str(row[self.key]): deepcopy(row) for row in rows}
+        self.data_revision += 1
         if complete:
             self.rows = incoming
             self.observations = {}
@@ -84,6 +86,7 @@ class Inventory:
         else:
             raise ValueError("payload requires an established resource policy")
         self.rows[key] = deepcopy(row)
+        self.data_revision += 1
         self.observations[key] = {
             "status": "known", "freshness": "live", "observedAt": at,
             "source": source, "complete": True,
@@ -114,15 +117,17 @@ def combined_evidence(*facts):
     }
 
 
-def evidence_stage(item, assignments, attests, *, complete):
+def evidence_stage(item, assignments, attests, *, complete, summary=None):
     """The canonical stages inventory actual evidence, without filling steps."""
     if not complete:
         return None
     has_open = any(a["state"] == "open" for a in assignments)
     if item["state"] == "closed" and not has_open:
         return 6
-    kinds = {a["kind"] for a in attests}
-    verdicts = {a.get("verdictKind") for a in attests if a["kind"] == "verdict"}
+    if summary is None:
+        from atc_summary import summarize
+        summary = summarize("attests", attests)
+    kinds, verdicts = summary["kinds"], summary["verdicts"]
     stage = 0
     if "progress" in kinds:
         stage = 1
@@ -130,12 +135,10 @@ def evidence_stage(item, assignments, attests, *, complete):
         stage = 2
     if "completion" in kinds:
         stage = 3
-    if verdicts & {"reviewed-clean", "spec-reviewed", "verified"}:
+    if set(verdicts) & {"reviewed-clean", "spec-reviewed", "verified"}:
         stage = 4
-    clean = max((a["ts"] for a in attests
-                 if a.get("verdictKind") == "reviewed-clean"), default=None)
-    tested = max((a["ts"] for a in attests
-                  if a.get("verdictKind") == "tests-passed"), default=None)
+    clean = summary["latest"].get("reviewed-clean")
+    tested = summary["latest"].get("tests-passed")
     review_stale = clean is not None and tested is not None and tested > clean + 300_000
     if "completion" in kinds and "reviewed-clean" in verdicts and not has_open and not review_stale:
         stage = 5
