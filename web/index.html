@@ -2235,7 +2235,13 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
   try {
     DATA = model;
     agentSamples = nextSamples;
-    if (versionChanged){ itemEvidencePages.clear(); itemEvidenceNotices.clear(); }
+    if (versionChanged){
+      itemEvidencePages.clear(); itemEvidenceNotices.clear();
+      for (const [itemId, page] of previousEvidencePages){
+        if (page.records?.length || page.loading)
+          itemEvidenceNotices.set(itemId, 'The model changed since these notes were loaded. Load the current notes again.');
+      }
+    }
     if (sceneChanged){
       clearHover();
       migrateViewKeys();
