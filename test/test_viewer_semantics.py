@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is required for viewer semantic tests")
 class ViewerSemanticsTest(unittest.TestCase):
-    def test_hover_inspection_semantics(self):
+    def test_viewer_contract_semantics(self):
         result = subprocess.run(
             [shutil.which("node"), str(ROOT / "test" / "viewer-semantics.mjs")],
             cwd=ROOT,
