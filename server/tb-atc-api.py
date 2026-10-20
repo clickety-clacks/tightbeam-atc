@@ -56,7 +56,7 @@ from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 from atc_git import GitResolver
 from atc_service import LiveService
-from atc_upstream import Gateway
+from atc_upstream import Gateway, PackagedCLI
 
 HOST = os.environ.get("TB_ATC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TB_ATC_PORT", "8787"))
@@ -523,13 +523,12 @@ class Handler(BaseHTTPRequestHandler):
         revision = -1
         try:
             while not live_service.stop_event.is_set():
-                snapshot = live_service.next_snapshot(revision)
-                if snapshot is None:
+                event = live_service.next_event(revision)
+                if event is None:
                     self.wfile.write(b": keepalive\n\n")
                 else:
-                    revision = snapshot["revision"]
-                    body = json.dumps(snapshot, separators=(",", ":"))
-                    self.wfile.write(("event: model\ndata: " + body + "\n\n").encode())
+                    revision, body = event
+                    self.wfile.write(body)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -860,12 +859,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    required = ("TB_ATC_GATEWAY", "TB_ATC_DEVICE_TOKEN", "TB_ATC_ORG_TOKEN", "TB_ATC_USER")
+    required = ("TB_ATC_GATEWAY", "TB_ATC_DEVICE_TOKEN", "TB_ATC_CLI",
+                "TB_ATC_CLI_BASE_DIR", "TB_ATC_USER")
     missing = [key for key in required if not os.environ.get(key)]
     if missing:
         raise SystemExit("Missing service configuration: " + ", ".join(missing))
     load_tags()
-    gateway = Gateway(*(os.environ[key] for key in required))
+    cli = PackagedCLI(os.environ["TB_ATC_CLI"], os.environ["TB_ATC_CLI_BASE_DIR"],
+                      os.environ["TB_ATC_USER"])
+    gateway = Gateway(os.environ["TB_ATC_GATEWAY"], os.environ["TB_ATC_DEVICE_TOKEN"], cli)
     resolver = GitResolver(
         os.environ.get("TB_ATC_GIT_CACHE", str(STATE_FILE.parent / "git-cache")),
         host_routes=json.loads(os.environ.get("TB_ATC_HOST_ROUTES", "{}")))

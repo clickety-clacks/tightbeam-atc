@@ -46,7 +46,8 @@ class ModelTest(unittest.TestCase):
         after = self.model.snapshot(20)["items"][0]
         self.assertEqual(before["id"], after["id"])
         self.assertIsNone(after["stage"])
-        self.assertEqual(2, len(after["evidenceRecords"]))
+        self.assertIsNone(after["evidenceCounts"]["total"])
+        self.assertEqual(2, len(self.model.inventory("attests", "assignment").rows))
         self.assertEqual("stale", after["evidence"]["stage"]["freshness"])
 
     def test_due_wake_is_not_a_queued_turn(self):
@@ -73,7 +74,9 @@ class ModelTest(unittest.TestCase):
         item = self.model.snapshot(20)["items"][0]
         self.assertEqual([corrected], item["commitRefs"])
         self.assertEqual("person", item["commitRefCorrections"][0]["actorRef"])
-        self.assertEqual("agent s_author", item["evidenceRecords"][0]["bySession"])
+        self.assertNotIn("evidenceRecords", item)
+        self.assertEqual("agent s_author",
+                         self.model.inventory("attests", "assignment").rows["done"]["bySession"])
 
     def test_inventory_does_not_fill_in_missing_ladder_steps(self):
         self.read("attests", [{"id": "v", "assignmentId": "assignment", "kind": "verdict",

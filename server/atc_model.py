@@ -1,6 +1,6 @@
 """Derive the view from scoped evidence inventories, without viewer state."""
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from copy import deepcopy
 
 from atc_evidence import (
@@ -17,6 +17,7 @@ class EvidenceModel:
     def __init__(self):
         self.inventories = {}
         self.merges = {}
+        self.next_expiry = None
 
     def inventory(self, resource, scope=None):
         return self.inventories.setdefault((resource, scope), Inventory(KEYS.get(resource, "id")))
@@ -57,6 +58,7 @@ class EvidenceModel:
         return [ref for attest in attests for ref in (attest.get("commitRefs") or [])]
 
     def snapshot(self, now):
+        self.next_expiry = None
         work = self.inventory("work-items")
         assignments = self.inventory("assignments")
         sessions = self.inventory("sessions")
@@ -93,11 +95,13 @@ class EvidenceModel:
             if at is not None:
                 key = turn["sessionKey"]
                 activity[key] = max(activity.get(key, 0), at)
-        for attests in evidence_by_item.values():
+        authored_at = defaultdict(dict)
+        for wid, attests in evidence_by_item.items():
             for attest in attests:
                 key, at = attest.get("bySession"), attest.get("ts")
                 if key and isinstance(at, (int, float)):
                     activity[key] = max(activity.get(key, 0), at)
+                    authored_at[key][wid] = max(authored_at[key].get(wid, 0), at)
         for assignment in assignments.rows.values():
             inventory = self.inventory("attests", assignment["id"])
             for author in {r.get("bySession") for r in inventory.rows.values()} - {None}:
@@ -129,6 +133,7 @@ class EvidenceModel:
                 "retired": session.get("state") != "active",
                 "turn": turn_state(turn_inventory.rows.values(), complete=turn_inventory.complete),
                 "idleFor": max(0, (now - activity[key]) // 1000) if key in activity else None,
+                "idleSince": activity.get(key),
                 "evidence": {
                     "identity": facts, "parent": parent_facts,
                     "turn": turn_inventory.evidence(),
@@ -146,10 +151,8 @@ class EvidenceModel:
             assignment = assignments.rows.get(turn.get("assignmentId"))
             touched = {assignment["workItemId"]} if assignment else set()
             if not turn.get("assignmentId") and isinstance(turn.get("startedAt"), (int, float)):
-                for wid, attests in evidence_by_item.items():
-                    if any(a.get("bySession") == turn["sessionKey"]
-                           and isinstance(a.get("ts"), (int, float))
-                           and a["ts"] >= turn["startedAt"] for a in attests):
+                for wid, at in authored_at[turn["sessionKey"]].items():
+                    if at >= turn["startedAt"]:
                         touched.add(wid)
             state = "run" if turn.get("startedAt") is not None else "wait"
             for wid in touched:
@@ -208,7 +211,14 @@ class EvidenceModel:
                     "open": sum(a["state"] == "open" for a in owned) if assignments.complete else None,
                     "terminal": sum(a["state"] != "open" for a in owned) if assignments.complete else None,
                 },
-                "evidenceRecords": attests, "commitRefs": refs,
+                "evidenceCounts": {
+                    "total": len(attests) if attest_facts["complete"] else None,
+                    "byKind": dict(Counter(a["kind"] for a in attests)) if attest_facts["complete"] else None,
+                    "byVerdict": dict(Counter(a["verdictKind"] for a in attests
+                                             if a["kind"] == "verdict" and a.get("verdictKind")))
+                    if attest_facts["complete"] else None,
+                },
+                "commitRefs": refs,
                 "commitRefCorrections": [c for a in owned for c in a.get("commitRefCorrections", [])],
                 "evidence": {"identity": identity, "stage": stage_facts,
                              "ring": ring_facts, "assignments": assignments.evidence(),
@@ -230,6 +240,7 @@ class EvidenceModel:
                     and isinstance(wake.get("firedAt"), (int, float))
                     and wake["firedAt"] > now - 300_000):
                 wake_marks.append({"id": wake["wakeId"], "from": src, "to": dst})
+                self._expires(wake["firedAt"] + 300_000)
         bindings = {"agent:" + r["name"]: r.get("boundSessionKey") for r in roles.rows.values()}
         for message in messages:
             if not isinstance(message.get("at"), (int, float)) or message["at"] <= now - 300_000:
@@ -243,5 +254,9 @@ class EvidenceModel:
             message_marks.append({"id": message["id"], "from": src, "to": dst,
                                   "kind": "agent" if src else (
                                       "user" if sender.startswith("user:") else "substrate")})
+            self._expires(message["at"] + 300_000)
         return {"agents": agents, "items": items, "links": links,
                 "wakes": wake_marks, "messages": message_marks}
+
+    def _expires(self, at):
+        self.next_expiry = min(self.next_expiry, at) if self.next_expiry is not None else at

@@ -10,15 +10,15 @@ Real-feed observations and remote verification are pending.
 | Resource | Initial and interval reads | Notice path | Reason |
 |---|---|---|---|
 | Work items | All pages of `/api/work-items` | Targeted `/api/work-items/:id`; candidate full payload with strict `rowVersion` ordering | Transactional row versions are present. Activation still requires exact-build real-feed evidence. |
-| Assignments | Read command `assignments`, `state=all` | `assignment-get` for the named assignment; read newly introduced attest scopes and holder histories | Corrections are included in the command read. Reopen transitions cannot be ordered safely by assuming timestamp-based versions are monotonic. |
-| Attests | Read command `attests` for every assignment | The named assignment's attest inventory; candidate immutable full payload | Shared evidence fields are normalized across command and feed projections. Append-only semantics still need exact-build real-feed confirmation. |
+| Assignments | Packaged CLI `assignments --state all` | Packaged CLI `assignment-get` for the named assignment; read newly introduced attest scopes and holder histories | Corrections are included in both CLI reads. Reopen transitions cannot be ordered safely by assuming timestamp-based versions are monotonic. |
+| Attests | Packaged CLI `attests <assignmentId>` for every assignment | The named assignment's attest inventory; candidate immutable full payload | Shared evidence fields are normalized across CLI and feed projections. Append-only semantics still need exact-build real-feed confirmation. |
 | Sessions | All pages of `/api/sessions` | `/api/sessions/:key`; missing or stale visible-session histories | Mutable session fields and topology changes require reads; notices do not cover every change. |
 | Turns | All pages of `/api/sessions/:key/turns` for visible sessions | `/api/turns/:seq` | Started and ended timestamps establish actual running/queued state. A pending wake cannot substitute for a turn. |
 | Wakes | All pages of `/api/sessions/:key/wakes` for visible sessions | `/api/wakes/:id` | Mutable state; targeted read preserves the current row. |
 | Messages | All pages of `/api/sessions/:key/messages` for visible sessions | `/api/sessions/:key/messages/:id` | The source contains message rewrites. The feed registry's append-only label alone is insufficient. |
-| Roles | Complete `role-list` command | Complete `role-list` on role notices | Removal and recreation require inventory reconciliation. This refresh is limited to roles. |
+| Roles | Complete `roles` array from packaged CLI `list` | Repeat that read on role notices | The packaged CLI has no `role-list` verb. `list` maps to the published inspect read, which includes all roles. Only the roles array enters this inventory. |
 | Decision requests | All pages of `/api/decision-requests` | `/api/decision-requests/:id` | Mutable state; no verified strict ordering policy. |
-| Artifacts | Complete `artifacts` command | `/api/artifacts/:id` | Metadata only; artifact contents are outside the evidence model. |
+| Artifacts | Complete packaged CLI `artifacts` command | `/api/artifacts/:id` | Metadata only; artifact contents are outside the evidence model. |
 | Canonical merges | Explicit canonical repository/branch registry, ancestry and patch equivalence | Recheck changed commit references asynchronously; expire resolver caches | Git failure is unknown. A removed checkout can recover only through proof in a registered canonical repository. |
 | Annotations and saved cards | ATC-owned JSON persistence | Existing annotation APIs with author attribution | Rebuilding upstream evidence does not replace authored marks. |
 
@@ -27,6 +27,17 @@ payload application. An exact `(version, build, sha)` match must select a
 reviewed resource policy; a different build falls back to the corresponding
 targeted reads. Tests that inject a policy exercise the algorithm only.
 They do not qualify a gateway build.
+
+CLI commands run with an explicit user and target base. The packaged CLI owns
+credential discovery; ATC does not open its credential files or read its token.
+REST and feed traffic use the separate device bearer. CLI read failures become
+incomplete results, and diagnostics are not copied into viewer responses.
+
+The CLI source exposes every required inventory above, including commit-reference
+corrections. This is a source finding; an exact-package execution remains pending.
+The interval still repeats full inventory reads, including one CLI subprocess
+per assignment's attests. Its cost is unmeasured and remains an acceptance issue.
+No bounded-history shortcut has been substituted for complete evidence.
 
 The service subscribes before reading initial state. It buffers incoming
 changes, completes the published reads, and then processes those changes.
@@ -46,10 +57,22 @@ repairs and lost notices. The interval runs even when notices continue to
 arrive. A heartbeat sequence can include frames allocated but still queued,
 so an ahead watermark alone does not establish loss.
 
+Viewer publication compares derived model content and evidence state before
+advancing the revision. Raw attest rows/notes stay internal; snapshots carry
+actual evidence kinds, nullable counts, commit references and corrections.
+SSE bytes are encoded once per revision and shared by subscribers. Idle age is
+derived in the viewer from `idleSince`; recent mark expiry and reconciliation
+have explicit deadlines. The five-minute clean-review rule compares recorded
+attest timestamps, so it has no wall-clock expiry.
+
 ## Primary sources
 
 - [Canonical public serializers and natural row versions](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/state_resources.ex).
 - [Read routes, page cursors and envelopes](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/wire/router.ex).
+- [Packaged CLI verb arguments](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/cli/src/args.rs),
+  [dispatch and endpoint discovery](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/cli/src/dispatch.rs),
+  [assignment and correction inventories](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/assignments.ex),
+  and [inspect's roles array](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/gateway.ex).
 - [Feed resource registry](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/firehose/registry.ex)
   and [publisher projections](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/firehose/publisher.ex).
 - [Work-item transactional row-version increments](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/work_items.ex).
@@ -68,7 +91,7 @@ identity; they do not establish runtime correctness.
 Run the unchanged tracked `scripts/test.sh` wrapper in the permitted isolated
 environment. Record the service revision, Python and dependency versions,
 scratch gateway `/version`, release provenance and package checksum. Use a
-fresh base, its own device login and organization key, and seeded records.
+fresh base, its own device login, packaged CLI using that base, and seeded records.
 
 Real-response evidence must cover bootstrap completeness, admitted payload
 classes, targeted gaps, partial/failed reads, disconnect/sequence recovery,

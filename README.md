@@ -100,9 +100,11 @@ for something you typed. Emptying the box releases either kind.
 
 - Python 3.10 or newer, Git, and the pinned dependency in `requirements.txt`.
 - A Tightbeam gateway with protocol-2 change feed and published state reads.
-- Service-side access to an approved device login and an organization read-command
-  credential. These credentials never go to the browser. The organization key
-  can also authorize mutations; this adapter exposes only its listed read commands.
+- An approved device login for the feed and state reads, plus the published
+  Tightbeam CLI and its target base directory for complete inventory reads.
+  The CLI runs as the configured user and can also authorize mutations. ATC
+  invokes only the read commands listed below. ATC does not open the CLI's
+  credential files or pass their tokens to the browser.
 
 ## Run
 
@@ -112,8 +114,8 @@ static snapshot file.
 
     python3 -m venv .venv
     .venv/bin/pip install -r requirements.txt
-    # Supply TB_ATC_GATEWAY, TB_ATC_DEVICE_TOKEN, TB_ATC_ORG_TOKEN and TB_ATC_USER
-    # in the service environment, using the intended gateway's credentials.
+    # Supply TB_ATC_GATEWAY, TB_ATC_DEVICE_TOKEN, TB_ATC_CLI,
+    # TB_ATC_CLI_BASE_DIR and TB_ATC_USER for the same target gateway.
     .venv/bin/python server/tb-atc-api.py
     # http://127.0.0.1:8787/
 
@@ -129,7 +131,8 @@ are retired; they are not part of this service.
 |---|---|---|
 | `TB_ATC_GATEWAY` | gateway HTTP(S) base URL | required |
 | `TB_ATC_DEVICE_TOKEN` | approved device token for state reads and org-wide feed | required |
-| `TB_ATC_ORG_TOKEN` | organization token for detailed read commands | required |
+| `TB_ATC_CLI` | absolute path to the published package's `bin/tightbeam` | required |
+| `TB_ATC_CLI_BASE_DIR` | absolute target gateway base; the CLI reads its own credentials there | required |
 | `TB_ATC_USER` | explicit user for those read commands | required |
 | `TB_ATC_HOST` | viewer bind address | `127.0.0.1` |
 | `TB_ATC_PORT` | viewer port | `8787` |
@@ -138,6 +141,14 @@ are retired; they are not part of this service.
 | `TB_ATC_GIT_CACHE` | service-owned canonical Git cache | beside the annotation file |
 | `TB_ATC_HOST_ROUTES` | JSON mapping of recorded checkout hosts to existing SSH destinations | `{}` |
 | `TB_ATC_REBUILD_SECONDS` | full reconciliation interval, shown in the viewer | `300` |
+
+The read-only bridge invokes `assignments --state all`, `attests <assignmentId>`,
+`assignment-get <assignmentId>`, `list` (for its complete roles array), and
+`artifacts`, each with `--as-user <TB_ATC_USER>`. There is no packaged `role-list`
+command. The bridge sets `TIGHTBEAM_BASE_DIR` explicitly, removes inherited
+endpoint overrides and runs outside any session working directory so the CLI
+uses the intended base. Failed reads remain incomplete; they never establish
+an empty inventory.
 
 ## Freshness and recovery
 
@@ -266,16 +277,24 @@ there is no static-file polling path.
       "agents": [], "items": [], "links": [], "wakes": [], "messages": []
     }
 
-Revisions increase within a generation. A viewer accepts a new generation and
+Revisions increase only for model or evidence-state changes within a generation.
+A viewer accepts a new generation and
 ignores older revisions from its current generation. Each event is usable on its
 own; reconnect does not require replay. Transport loss is shown stale locally
 until the stream returns.
 
-Items retain full work IDs, titles, holders and evidence inventories. Their
+Items retain full work IDs, titles, holders, evidence kinds and counts. Raw attest
+histories and notes stay in the service's evidence inventories; they are not
+included in viewer snapshots. Counts are `null` when the relevant inventory is
+incomplete. Their
 `stage`, `code`, `merged`, `readyToMerge` and assignment counts may be `null`.
 `ring` is `black`, `green`, `light-gray`, `yellow` or `null`. Agents retain stable
 session suffix IDs, recorded parents and separate `run`, `wait`, `idle` or unknown
-turn state. Pending wakes do not prove queued turns.
+turn state. Pending wakes do not prove queued turns. `idleSince` is the observed
+last activity timestamp or `null`; `idleFor` is sampled at `generatedAt`.
+Viewers advance live idle age locally and retain stale/unknown indications.
+The service schedules removal of recent wake/message marks at their expiry;
+elapsed idle seconds do not trigger a new full snapshot.
 
 Each entity's `evidence` maps fact names to `status` (`known` or `unknown`),
 `freshness`, `observedAt`, `source` and `complete`. Fact age is measured from

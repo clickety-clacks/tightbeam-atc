@@ -91,6 +91,8 @@ class LiveService:
         self.metrics = {"bootstrapReads": None, "bootstrapMs": None, "payloads": 0,
                         "bootstrapComplete": None, "targetedReads": 0, "rebuilds": 0}
         self.current = {}
+        self._comparison = None
+        self.event = None
         self._publish()
 
     def snapshot(self):
@@ -102,6 +104,13 @@ class LiveService:
             self.condition.wait_for(
                 lambda: self.revision != revision or self.stop_event.is_set(), timeout)
             return deepcopy(self.current) if self.revision != revision else None
+
+    def next_event(self, revision, timeout=15):
+        """All subscribers share the immutable bytes encoded at publication."""
+        with self.condition:
+            self.condition.wait_for(
+                lambda: self.revision != revision or self.stop_event.is_set(), timeout)
+            return (self.revision, self.event) if self.revision != revision else None
 
     def start(self):
         # Fail startup visibly when the runtime dependency isn't installed.
@@ -119,24 +128,39 @@ class LiveService:
     def _state(self, state, reason=None):
         if (self.state, self.reason) != (state, reason):
             self.state, self.reason, self.since = state, reason, now_ms()
+            return True
+        return False
 
     def _publish(self):
         # A published revision is immutable even while the worker updates its
         # inventories outside the subscribers' lock.
-        data = deepcopy(self.model.snapshot(now_ms()))
+        at = now_ms()
+        data = deepcopy(self.model.snapshot(at))
+        candidate = {
+            "schemaVersion": 1, "generation": self.generation,
+            "freshness": {
+                "state": self.state, "since": self.since, "reason": self.reason,
+                "rebuildIntervalMs": self.rebuild_interval * 1000,
+                "lastCompleteAt": self.last_complete,
+            },
+            "gatewayVersion": self.version, **data,
+        }
+        # idleFor is sampled at generatedAt; viewers advance it from idleSince.
+        # A ticking clock or diagnostic counter alone is not a model change.
+        comparison = dict(candidate, agents=[
+            {key: value for key, value in agent.items() if key != "idleFor"}
+            for agent in data["agents"]])
+        if comparison == self._comparison:
+            return False
         with self.condition:
             self.revision += 1
-            self.current = {
-                "schemaVersion": 1, "generation": self.generation,
-                "revision": self.revision, "generatedAt": now_ms(),
-                "freshness": {
-                    "state": self.state, "since": self.since, "reason": self.reason,
-                    "rebuildIntervalMs": self.rebuild_interval * 1000,
-                    "lastCompleteAt": self.last_complete,
-                },
-                "gatewayVersion": self.version, "metrics": dict(self.metrics), **data,
-            }
+            self.current = dict(candidate, revision=self.revision, generatedAt=at,
+                                metrics=dict(self.metrics))
+            self._comparison = comparison
+            body = json.dumps(self.current, separators=(",", ":"))
+            self.event = ("event: model\ndata: " + body + "\n\n").encode()
             self.condition.notify_all()
+        return True
 
     def _read_many(self, jobs):
         complete = True
@@ -174,13 +198,12 @@ class LiveService:
             self.last_complete = now_ms()
         self._state("live" if complete and self.connected else "stale",
                     None if complete and self.connected else "incomplete read or disconnected feed")
-        self._resolve_merges()
 
     def _resolve_merges(self):
         if self.resolver is None:
             return
         # The resolver owns its cache; the rendering path never starts Git.
-        snapshot = self.model.snapshot(now_ms())
+        snapshot = self.current
         for item in snapshot["items"]:
             refs = item["commitRefs"]
             previous = self.model.merges.get(item["id"])
@@ -221,7 +244,7 @@ class LiveService:
         resource = notice.get("resource")
         if resource not in RESOURCE_REFS:
             # Observational events do not imply that every inventory changed.
-            return
+            return False
         payload, refs = notice.get("payload") or {}, notice.get("refs") or {}
         key = refs.get(RESOURCE_REFS[resource])
         normalized = "decision-requests" if resource == "decision requests" else resource
@@ -241,7 +264,7 @@ class LiveService:
                     scope = payload.get("assignmentId" if resource == "attests" else "sessionKey")
             if not scope:
                 self._state("stale", "uncorrelated " + resource + " change")
-                return
+                return True
         inventory = self.model.inventory(normalized, scope)
         required = {
             "work-items": WORK_ITEM_FIELDS,
@@ -277,8 +300,7 @@ class LiveService:
         if resource == "sessions" and key is not None:
             if any(s["sessionKey"] == str(key) for s in self.model.active_sessions()):
                 self._session_histories(str(key))
-        if resource in {"attests", "assignments", "work-items"}:
-            self._resolve_merges()
+        return True
 
     def _session_histories(self, key):
         # An assignment can bring a retired holder back into view without a
@@ -290,8 +312,9 @@ class LiveService:
 
     def _worker(self):
         while not self.stop_event.is_set():
+            update = True
             try:
-                kind, value = self.events.get(timeout=1)
+                kind, value = self.events.get(timeout=self._wait_timeout())
                 if kind == "stop":
                     return
                 if kind == "ready":
@@ -301,14 +324,17 @@ class LiveService:
                         (value["version"], value["build"], value["sha"]), {})
                     self.rebuild()
                 elif kind == "lost":
+                    update = self.connected
                     self.connected = False
-                    self.model.invalidate()
-                    self._state("stale", value)
+                    update = self._state("stale", value) or update
+                    if update:
+                        self.model.invalidate()
                 elif kind == "change":
-                    self.change(value)
+                    update = self.change(value)
                 elif kind == "merged":
                     wid, refs, merged, at = value
-                    if self.merge_pending.get(wid) == refs:
+                    update = self.merge_pending.get(wid) == refs
+                    if update:
                         self.merge_pending.pop(wid)
                         self.model.merges[wid] = {
                             "value": merged, "observedAt": at, "refs": refs}
@@ -318,13 +344,24 @@ class LiveService:
                 self.model.invalidate()
                 self._state("stale", "model update failed: " + type(error).__name__)
             if self.connected and time.monotonic() - self.last_rebuild >= self.rebuild_interval:
+                update = True
                 try:
                     self.rebuild()
                 except Exception as error:
                     self.last_rebuild = time.monotonic()
                     self.model.invalidate()
                     self._state("stale", "rebuild failed: " + type(error).__name__)
-            self._publish()
+            if update:
+                self._publish()
+                self._resolve_merges()
+
+    def _wait_timeout(self):
+        deadlines = []
+        if self.connected:
+            deadlines.append(self.last_rebuild + self.rebuild_interval - time.monotonic())
+        if self.model.next_expiry is not None:
+            deadlines.append((self.model.next_expiry - now_ms()) / 1000)
+        return max(0, min(deadlines)) if deadlines else None
 
     def _feed(self):
         from websockets.sync.client import connect
