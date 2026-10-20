@@ -308,7 +308,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { canInspectNode, evidenceCounts, factAge, factCountValue, factListValue,
-         factValue, isModelEnvelope, knownStage,
+         factValue, idleAgeSeconds, isModelEnvelope, knownStage,
          ringMeaning, sceneSignature, shouldAcceptModel } from './viewer-semantics.mjs';
 import { OrbitControls } from './addons/controls/OrbitControls.js';
 import { LineSegments2 } from './addons/lines/LineSegments2.js';
@@ -1481,16 +1481,15 @@ function renderLegend(){
     `<span style="margin-left:8px;color:${hx(T.pulseUser)}">operator (from above)</span>`;
 }
 
-function agentActivityColor(a){
+function agentActivityColor(a, now=Date.now()){
   const IDLE_FULL = 3600;
-  const idle = factValue(a, 'idleFor', a.idleFor);
-  const age = idle.known && a.evidence?.idleFor?.complete!==false && Number.isFinite(idle.value)
-    ? Math.min(idle.value, IDLE_FULL) : null;
+  const reportedAge = idleAgeSeconds(a, DATA?.generatedAt, now);
+  const age = reportedAge===null ? null : Math.min(reportedAge, IDLE_FULL);
   return a.retired ? T.retired : age===null ? T.factUnknown
     : new THREE.Color(T.liveHot).lerp(new THREE.Color(T.liveCold), age / IDLE_FULL).getHex();
 }
-function paintAgentMesh(mesh, a){
-  const base = agentActivityColor(a);
+function paintAgentMesh(mesh, a, now=Date.now()){
+  const base = agentActivityColor(a, now);
   const turn = factValue(a, 'turn', a.turn);
   const flash = turn.known && a.evidence?.turn?.complete!==false
     && (turn.value==='run' || turn.value==='wait') ? turn.value : null;
@@ -2729,7 +2728,8 @@ function nodeContent(u, clamp){
   const held = openItems.filter(w=>Array.isArray(w.holders) && w.holders.includes(a.id)).length;
   const workload = openItems.some(w=>!Array.isArray(w.holders))
     ? `${held} known · total unknown` : `${held} open item${held===1?'':'s'}`;
-  const idle = factText(a, 'idleFor', a.idleFor, value=>!Number.isFinite(value) ? 'unknown'
+  const idleAge = idleAgeSeconds(a, DATA?.generatedAt);
+  const idle = factText(a, 'idleFor', idleAge, value=>!Number.isFinite(value) ? 'unknown'
     : value<90 ? 'acted within 1 min'
     : value<3600 ? Math.round(value/60) + ' min since activity'
     : Math.round(value/3600) + ' h since activity');
@@ -2914,8 +2914,12 @@ function aimLeaders(){
     L.dot.setAttribute('cx', p.x); L.dot.setAttribute('cy', p.y);
   }
 }
-function refreshInspectionAges(){
-  renderModelStatus();
+function refreshInspectionAges(now=Date.now()){
+  renderModelStatus(now);
+  Object.values(agentMeshes).forEach(mesh=>{
+    paintAgentMesh(mesh, mesh.userData.a, now);
+    shadeSelected(mesh, view.selection.has(selKey(mesh)));
+  });
   if (view.focus.stage===1) renderDetail();
   for (const L of hoverLeaders){
     const mesh = meshForKey(L.key);

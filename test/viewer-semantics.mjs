@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { canInspectNode, evidenceCounts, factAge, factCountValue, factListValue,
-         factValue, isModelEnvelope, knownStage,
+         factValue, idleAgeSeconds, isModelEnvelope, knownStage,
          ringMeaning, sceneSignature, shouldAcceptModel } from '../web/viewer-semantics.mjs';
 
 /* A ghost is still present in the map and remains available for inspection.
@@ -31,7 +31,7 @@ assert.equal(shouldAcceptModel({...model, schemaVersion: 2}, model), false);
 /* Clock and evidence ages repaint without rebuilding the scene. */
 assert.equal(sceneSignature(model), sceneSignature({...model, revision: 9, generatedAt: 3000,
   freshness: {...model.freshness, state: 'stale', since: 3000},
-  agents: [{...model.agents[0], idleFor: 91,
+  agents: [{...model.agents[0], idleFor: 91, idleSince: 1900,
     evidence: {parent: {status: 'known', observedAt: 3000}}}],
   items: [{...model.items[0], evidence: {stage: {status: 'unknown', freshness: 'stale', observedAt: 3000},
     ring: {status: 'unknown', observedAt: 3000}}}]}));
@@ -49,6 +49,16 @@ assert.equal(ringMeaning(null, 'unknown'), 'unknown');
 assert.equal(ringMeaning(null, undefined), 'unknown');
 assert.deepEqual(factValue(model.agents[0], 'parent', null), {known: true, value: null});
 assert.deepEqual(factValue(model.items[0], 'stage', null), {known: false, value: null});
+const liveIdle = {idleFor: 30, evidence: {idleFor: {status: 'known', freshness: 'live', complete: true}}};
+assert.equal(idleAgeSeconds(liveIdle, 2000, 7000), 35);
+assert.equal(idleAgeSeconds({...liveIdle, evidence: {idleFor: {status: 'known', freshness: 'stale', complete: true}}},
+  2000, 7000), 30);
+assert.equal(idleAgeSeconds({...liveIdle, evidence: {idleFor: {status: 'known', freshness: 'rebuilding', complete: true}}},
+  2000, 7000), 30);
+assert.equal(idleAgeSeconds({...liveIdle, evidence: {idleFor: {status: 'unknown', freshness: 'live', complete: true}}},
+  2000, 7000), null);
+assert.equal(idleAgeSeconds({...liveIdle, evidence: {idleFor: {status: 'known', freshness: 'live', complete: false}}},
+  2000, 7000), null);
 assert.equal(factCountValue(null, {status: 'unknown', complete: false}), 'unknown');
 assert.equal(factCountValue(0, {status: 'known', complete: true}), '0');
 assert.equal(factCountValue(0, {status: 'known', complete: false}), '0 reported (incomplete)');

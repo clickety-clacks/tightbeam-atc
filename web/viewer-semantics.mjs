@@ -25,18 +25,18 @@ export function shouldAcceptModel(next, current) {
 }
 
 /* Clock, freshness, and evidence-age repaints do not change scene geometry.
-   The agent's idle color is updated in place, so idleFor can also stay out. */
+   The agent's idle color is updated in place, so idleFor and idleSince can stay out. */
 export function sceneSignature(model) {
   if (!isModelEnvelope(model)) return '';
   const entity = (row, agent = false) => {
-    const {idleFor, evidence, ...rest} = row;
+    const {idleFor, idleSince, evidence, ...rest} = row;
     const facts = evidence && typeof evidence==='object'
       ? Object.fromEntries(Object.entries(evidence).map(([name, value])=>{
           if (!value || typeof value!=='object') return [name, value];
           const {observedAt, freshness, ...stable} = value;
           return [name, stable];
         })) : evidence;
-    return {...rest, ...(agent ? {} : {idleFor}), evidence:facts};
+    return {...rest, ...(agent ? {} : {idleFor, idleSince}), evidence:facts};
   };
   return JSON.stringify({
     schemaVersion: model.schemaVersion,
@@ -74,6 +74,18 @@ export function factValue(entity, fact, value) {
   return status === 'known'
     ? {known: true, value}
     : {known: false, value: null};
+}
+
+/* idleFor is measured at generatedAt. Tick only while its evidence is live;
+   stale or rebuilding values remain the last reported value. */
+export function idleAgeSeconds(agent, generatedAt, now = Date.now()) {
+  const idle = factValue(agent, 'idleFor', agent?.idleFor);
+  const evidence = agent?.evidence?.idleFor;
+  if (!idle.known || !Number.isFinite(idle.value) || evidence?.complete === false) return null;
+  const reported = Math.max(0, idle.value);
+  if (evidence.freshness !== 'live' || !Number.isFinite(generatedAt) || !Number.isFinite(now))
+    return reported;
+  return Math.max(0, reported + (now - generatedAt) / 1000);
 }
 
 export function factCountValue(value, evidence) {
