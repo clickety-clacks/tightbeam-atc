@@ -158,11 +158,14 @@ and facts that cannot be established remain unknown. The viewer's camera, select
 focus, scope, pan and layers stay local through model changes and recovery.
 
 Payloads can update only resource classes verified for the connected gateway build.
-Other notices trigger a read of the affected row or scope. Sequence gaps, lost
-heartbeats and disconnected feeds trigger recovery. Interval rebuilds cover facts
-without notices and changes lost before sequence allocation. A connected feed does
-not make those facts newer than their last read; their age and the rebuild interval
-remain visible.
+Other notices trigger a background read of the affected row or scope. Sequence
+gaps, lost heartbeats and disconnected feeds trigger complete recovery. Normal
+intervals refresh base inventories and rotate through a bounded batch of history
+scopes, covering facts without notices and changes lost before sequence allocation.
+A full rotation can take many intervals; the reconciliation metadata reports its
+scope count, budget and nominal duration. A connected feed does not make those
+facts newer than their last read. Per-fact observation ages remain authoritative.
+Feed processing continues while background reads run. Partial reads remove nothing.
 
 **On merge detection.** No attest kind means "merged" — an item can hold a
 completion, a clean review *and* a verified verdict while its code is still off

@@ -3,6 +3,8 @@
 from copy import deepcopy
 from pathlib import Path
 import sys
+import time
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -48,7 +50,8 @@ class PublishedReads:
     def detail(self, resource, key, scope=None):
         self.read_count += 1
         self.calls.append(("detail", resource, scope, key))
-        rows = [r for r in self.rows.get((resource, scope), []) if r.get("id") == key]
+        identity = "sessionKey" if resource == "sessions" else "id"
+        rows = [r for r in self.rows.get((resource, scope), []) if r.get(identity) == key]
         return Read(deepcopy(rows), bool(rows), 11, "published-detail")
 
 
@@ -58,6 +61,19 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.service = LiveService(self.gateway)
         self.service.connected = True
         self.service.rebuild()
+        self.drain()
+
+    def tearDown(self):
+        self.service.stop()
+
+    def drain(self):
+        deadline = time.monotonic() + 5
+        while self.service.reads.pending or self.service.reads.active:
+            self.service.reads.pump()
+            kind, value = self.service.events.get(timeout=max(0.01, deadline - time.monotonic()))
+            self.assertEqual("read", kind)
+            self.service._read_done(value)
+            self.assertLess(time.monotonic(), deadline)
 
     def item(self):
         return self.service.model.snapshot(20)["items"][0]
@@ -74,11 +90,13 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.gateway.rows[("work-items", None)] = []
         self.gateway.partial.add(("work-items", None))
         self.service.rebuild()
+        self.drain()
         self.assertEqual("work", self.item()["id"])
         self.assertEqual("stale", self.item()["evidence"]["identity"]["freshness"])
         self.assertEqual("stale", self.service.state)
         self.gateway.partial.clear()
         self.service.rebuild()
+        self.drain()
         self.assertEqual([], self.service.model.snapshot(20)["items"])
         self.assertEqual("live", self.service.state)
 
@@ -87,6 +105,7 @@ class ServiceRecoveryTest(unittest.TestCase):
             "actorRef": "author", "commitRefs": [{"commit": "a" * 40, "repo": "repo"}],
         }]
         self.service.rebuild()
+        self.drain()
         self.assertEqual("author", self.item()["commitRefCorrections"][0]["actorRef"])
         self.assertEqual("agent s_author",
                          self.service.model.inventory("attests", "assignment").rows["progress"]["bySession"])
@@ -112,6 +131,7 @@ class ServiceRecoveryTest(unittest.TestCase):
             "resource": "work-items", "class": "work_item.updated", "op": "upsert",
             "refs": {"workItemId": "work"}, "payload": {"id": "work", "rowVersion": 4},
         })
+        self.drain()
         self.assertEqual("Current", self.item()["title"])
         self.assertEqual([("detail", "work-items", None, "work")], self.gateway.calls)
 
@@ -204,6 +224,7 @@ class ServiceRecoveryTest(unittest.TestCase):
             "displayName": "Retired", "topologyParent": None,
         })
         self.service.rebuild()
+        self.drain()
         self.gateway.rows[("assignments", None)].append({
             "id": "new", "holderKey": "agent s_retired", "workItemId": "work",
             "state": "open", "effectKind": "code",
@@ -213,8 +234,129 @@ class ServiceRecoveryTest(unittest.TestCase):
             "resource": "assignments", "op": "upsert", "class": "assignment.opened",
             "refs": {"assignmentId": "new"}, "payload": {},
         })
-        self.assertEqual([
+        self.drain()
+        self.assertCountEqual([
             ("detail", "assignments", None, "new"), ("read", "attests", "new"),
             ("read", "turns", "agent s_retired"), ("read", "wakes", "agent s_retired"),
             ("read", "messages", "agent s_retired"),
         ], self.gateway.calls)
+
+
+    def test_interval_rotates_bounded_histories(self):
+        for number in range(12):
+            self.gateway.rows[("assignments", None)].append({
+                "id": "extra" + str(number), "workItemId": "work",
+                "state": "closed", "holderKey": "agent s_author",
+            })
+        self.service.rebuild()
+        self.drain()
+        self.service.scope_budget = 2
+        seen = set()
+        for _ in range(8):
+            self.gateway.calls.clear()
+            self.service.rebuild(recovery=False)
+            # Interval refresh does not make every known inventory stale.
+            self.assertFalse(self.service.model.inventory("attests", "assignment").stale)
+            self.drain()
+            histories = {(r, scope) for kind, r, scope in self.gateway.calls
+                         if r in {"attests", "turns", "wakes", "messages"}}
+            self.assertLessEqual(len(histories), 2)
+            seen.update(histories)
+        self.assertEqual(set(self.service._history_scopes()), seen)
+
+    def test_background_history_read_does_not_block_targeted_change(self):
+        entered, release = threading.Event(), threading.Event()
+        original = self.gateway.read
+
+        def blocked(resource, scope=None):
+            if resource == "attests":
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test did not release history")
+            return original(resource, scope)
+
+        self.gateway.read = blocked
+        self.service._refresh("attests", "assignment")
+        self.service.reads.pump()
+        self.assertTrue(entered.wait(2))
+        try:
+            self.gateway.rows[("work-items", None)] = [work("While history blocked", 4)]
+            self.service.change({"resource": "work-items", "refs": {"workItemId": "work"}})
+            self.service.reads.pump()
+            kind, value = self.service.events.get(timeout=2)
+            self.assertEqual("read", kind)
+            self.assertEqual("work-items", value[0][0])
+            self.service._read_done(value)
+            self.assertEqual("While history blocked", self.item()["title"])
+        finally:
+            release.set()
+            self.drain()
+
+    def test_read_started_before_notice_cannot_replace_verified_newer_payload(self):
+        entered, release = threading.Event(), threading.Event()
+        original = self.gateway.read
+
+        def captured(resource, scope=None):
+            result = original(resource, scope)
+            if resource == "work-items":
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test did not release read")
+            return result
+
+        self.gateway.read = captured
+        self.service._refresh("work-items")
+        self.service.reads.pump()
+        self.assertTrue(entered.wait(2))
+        self.service.policies = {"work-items": "strict-version"}
+        self.service.change({"resource": "work-items", "class": "work_item.updated",
+                             "op": "upsert", "refs": {"workItemId": "work"},
+                             "payload": work("Newer", 8)})
+        self.gateway.rows[("work-items", None)] = [work("Newer", 8)]
+        release.set()
+        kind, value = self.service.events.get(timeout=2)
+        self.assertEqual("read", kind)
+        self.assertFalse(self.service._read_done(value))
+        self.assertEqual("Newer", self.item()["title"])
+        self.drain()
+        self.assertEqual("Newer", self.item()["title"])
+
+    def test_partial_rotating_read_retains_rows_and_does_not_certify_sweep(self):
+        self.gateway.partial.add(("attests", "assignment"))
+        self.gateway.rows[("attests", "assignment")] = []
+        before = self.service.last_sweep
+        self.service.rebuild(recovery=False)
+        self.drain()
+        self.assertIn("progress", self.service.model.inventory("attests", "assignment").rows)
+        self.assertIsNone(self.item()["stage"])
+        self.assertEqual("stale", self.service.state)
+        self.assertEqual(before, self.service.last_sweep)
+        self.gateway.partial.clear()
+        self.service.rebuild(recovery=False)
+        self.drain()
+        self.assertEqual({}, self.service.model.inventory("attests", "assignment").rows)
+        self.assertEqual(0, self.item()["stage"])
+
+    def test_assignment_notice_recovers_a_holder_missing_from_session_inventory(self):
+        self.gateway.rows[("sessions", None)].append({
+            "sessionKey": "agent s_new", "state": "active", "displayName": "New",
+        })
+        self.gateway.rows[("assignments", None)].append({
+            "id": "new", "holderKey": "agent s_new", "workItemId": "work", "state": "open",
+        })
+        self.service.change({"resource": "assignments", "refs": {"assignmentId": "new"}})
+        self.drain()
+        self.assertIn(("detail", "sessions", None, "agent s_new"), self.gateway.calls)
+        self.assertTrue(self.service.model.inventory("turns", "agent s_new").complete)
+
+    def test_reconnect_upgrades_an_in_progress_interval_to_full_recovery(self):
+        self.service.scope_budget = 1
+        self.service.rebuild(recovery=False)
+        self.service.rebuild(recovery=True)
+        self.assertEqual("recovery", self.service.cycle["mode"])
+        self.gateway.calls.clear()
+        self.drain()
+        histories = {(r, scope) for kind, r, scope in self.gateway.calls
+                     if r in {"attests", "turns", "wakes", "messages"}}
+        self.assertEqual(set(self.service._history_scopes()), histories)
+        self.assertEqual("live", self.service.state)

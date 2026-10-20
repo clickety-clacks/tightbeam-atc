@@ -7,7 +7,7 @@ Real-feed observations and remote verification are pending.
 
 ## Read, payload, and recovery paths
 
-| Resource | Initial and interval reads | Notice path | Reason |
+| Resource | Published inventory reads | Notice path | Reason |
 |---|---|---|---|
 | Work items | All pages of `/api/work-items` | Targeted `/api/work-items/:id`; candidate full payload with strict `rowVersion` ordering | Transactional row versions are present. Activation still requires exact-build real-feed evidence. |
 | Assignments | Packaged CLI `assignments --state all` | Packaged CLI `assignment-get` for the named assignment; read newly introduced attest scopes and holder histories | Corrections are included in both CLI reads. Reopen transitions cannot be ordered safely by assuming timestamp-based versions are monotonic. |
@@ -35,12 +35,28 @@ incomplete results, and diagnostics are not copied into viewer responses.
 
 The CLI source exposes every required inventory above, including commit-reference
 corrections. This is a source finding; an exact-package execution remains pending.
-The interval still repeats full inventory reads, including one CLI subprocess
-per assignment's attests. Its cost is unmeasured and remains an acceptance issue.
-No bounded-history shortcut has been substituted for complete evidence.
+Bootstrap and feed-gap recovery still cover every required scope. Normal intervals
+refresh the six base inventories and at most 32 existing history scopes in a fair
+rotation; newly discovered scopes are additional actual gaps. Reads run on a
+bounded worker pool, leaving feed application on the model worker. A notice
+received during a read invalidates that read's epoch; the stale response is
+discarded and reread instead of replacing newer evidence. Targeted reads normally
+go first, with every fourth dispatch reserved for waiting background work.
 
-The service subscribes before reading initial state. It buffers incoming
-changes, completes the published reads, and then processes those changes.
+The exact CLI exposes `attests <assignmentId>` with a complete history, but no
+bulk or incremental attest read. Therefore the scope budget bounds scheduled
+history reads, not response bytes, history length, or pages inside one scope.
+Complete inventories are never replaced with a recent-history approximation.
+Base inventories also have no fixed row-count bound. Actual cost remains unmeasured.
+With 16,000 history scopes, 32 per 300-second interval implies a nominal 41.7-hour
+rotation, potentially longer with slow or failed reads. Feed notices still take
+the targeted path immediately. This is a visible freshness tradeoff, not evidence
+of five-minute recovery for every unannounced historical change. The model exposes
+`historyScopes`, `scopeBudget`, `estimatedSweepMs`, `lastSweepAt`, and per-fact
+`observedAt`; the estimate is not a completion guarantee.
+
+The service subscribes before reading initial state. It processes incoming
+changes while published reads execute in the background.
 Immutable identities deduplicate; strict versions prevent older buffered rows
 from replacing newer reads. Incomplete payload projections use the targeted
 read path, even when their resource policy is enabled.
@@ -52,9 +68,11 @@ completeness of its collection. Unknown schema versions fail the read.
 
 Disconnects, missing sequence numbers, protocol errors and stalled heartbeat
 delivery mark evidence stale. Reconnection starts a fresh subscription and
-rebuild. Interval rebuilds recover unannounced corrections, topology changes,
-repairs and lost notices. The interval runs even when notices continue to
-arrive. A heartbeat sequence can include frames allocated but still queued,
+rebuild. Rolling interval reconciliation recovers unannounced corrections,
+topology changes, repairs and lost notices. An unfinished reconciliation does not
+overlap another interval. Normal interval reads do not invalidate the entire map;
+failed scopes retain their rows as stale or unknown. A disconnected feed still
+invalidates all evidence, and successful reads cannot make it live while offline. A heartbeat sequence can include frames allocated but still queued,
 so an ahead watermark alone does not establish loss.
 
 Viewer publication compares derived model content and evidence state before
