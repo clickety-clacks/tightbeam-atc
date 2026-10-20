@@ -2845,8 +2845,11 @@ function evidenceNotesMarkup(itemId){
   const detailAge = factAge(detailFreshness?.observedAt);
   const detailSources = Array.isArray(detailFreshness?.source) && detailFreshness.source.length
     ? detailFreshness.source.join(', ') : 'unknown source';
+  const observed = detailAge==='unknown' ? 'age unknown' : `observed ${detailAge} ago`;
   const status = matching
-    ? `${evidencePageFreshness(detailFreshness)} · observed ${detailAge}${detailAge==='unknown'?'':' ago'} · ${detailSources} · ${page.complete ? 'complete inventory' : 'incomplete inventory'} · ${page.records.length} of ${page.total} loaded`
+    ? [evidencePageFreshness(detailFreshness), observed, detailSources,
+        page.complete ? 'complete inventory' : 'incomplete inventory',
+        `${page.records.length} of ${page.total} loaded`].join(' · ')
     : '';
   const empty = matching && page.records.length===0
     ? (page.total===0 && page.complete ? 'No attest notes.' : 'No notes returned; inventory may be incomplete.') : '';
@@ -2951,10 +2954,12 @@ async function loadItemEvidence(itemId){
   let page = itemEvidencePages.get(itemId);
   if (!page || page.generation!==generation || page.revision!==revision){
     page = {generation, revision, records:[], total:0, nextOffset:0,
-      complete:false, freshness:{status:'unknown',freshness:'unknown',observedAt:null,source:[],complete:false}, loading:false};
+      complete:false, freshness:{status:'unknown',freshness:'unknown',observedAt:null,
+        source:[],complete:false}, loading:false};
   } else if (page.nextOffset===null){
     page = {generation, revision, records:[], total:0, nextOffset:0,
-      complete:false, freshness:{status:'unknown',freshness:'unknown',observedAt:null,source:[],complete:false}, loading:false};
+      complete:false, freshness:{status:'unknown',freshness:'unknown',observedAt:null,
+        source:[],complete:false}, loading:false};
   }
   if (page.loading) return;
   const offset = page.nextOffset ?? 0;
