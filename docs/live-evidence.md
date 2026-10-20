@@ -78,7 +78,14 @@ so an ahead watermark alone does not establish loss.
 Viewer publication compares derived model content and evidence state before
 advancing the revision. Raw attest rows/notes stay internal; snapshots carry
 actual evidence kinds, nullable counts, commit references and corrections.
-SSE bytes are encoded once per revision and shared by subscribers. Idle age is
+Changes stream as ordered stable-ID upsert/remove deltas with full replacement
+metadata. A new or lagging subscriber receives a full model snapshot; the service
+retains only the latest delta. Full encoding is lazy and shared across subscribers.
+Partial inventories cannot remove entities from uncertain projections. Timed
+recent-mark expiry removes a visual mark, not its underlying source record.
+Original notes and correction reasons are available through revision-pinned
+on-demand evidence pages. Detail-only edits advance the model revision; mismatched
+pagination returns HTTP 409 instead of mixing source versions. Idle age is
 derived in the viewer from `idleSince`; recent mark expiry and reconciliation
 have explicit deadlines. The five-minute clean-review rule compares recorded
 attest timestamps, so it has no wall-clock expiry.

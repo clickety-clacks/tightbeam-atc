@@ -260,9 +260,9 @@ Adjust the host and port inside it if you did not use the defaults.
 
 ## Data contract
 
-`GET /api/model` returns the current model. `GET /api/events` streams SSE events
-named `model`, each containing the full model. A new connection immediately gets
-current state. `/data.json` is a dynamic compatibility alias for `/api/model`;
+`GET /api/model` returns the current model. `GET /api/events` streams an initial
+full `model` event followed by `delta` events for changes, with full resyncs when
+needed. `/data.json` is a dynamic compatibility alias for `/api/model`;
 there is no static-file polling path.
 
     {
@@ -281,10 +281,33 @@ there is no static-file polling path.
     }
 
 Revisions increase only for model or evidence-state changes within a generation.
-A viewer accepts a new generation and
-ignores older revisions from its current generation. Each event is usable on its
-own; reconnect does not require replay. Transport loss is shown stale locally
-until the stream returns.
+Every new SSE connection starts with a full `event:model` snapshot, including
+reconnects; `Last-Event-ID` is not used for replay. Subsequent `event:delta` frames
+carry `generation`, `baseRevision`, `revision`, `generatedAt`, complete replacement
+`freshness`, `gatewayVersion` and `metrics`, plus `changes`. Each of `agents`,
+`items`, `links`, `wakes` and `messages` has `{upsert: [...], remove: [...]}`.
+An upsert replaces the entire stable-ID row; removes contain IDs. Apply a delta
+atomically only when its generation matches, its base equals the current revision,
+and its revision advances. Malformed or mismatched deltas require reconnect.
+Only the latest delta is retained; slower subscribers receive a full model resync.
+Transport loss is shown stale locally until a full snapshot arrives. Status-only
+deltas can have empty collection changes.
+
+`freshness.reconciliation` includes `mode` (`bootstrap`, `recovery`, `interval` or
+null), `pendingScopes`, `totalScopes`, `scopeBudget`, `historyScopes`,
+`estimatedSweepMs` and `lastSweepAt`. The estimate covers a nominal rotation,
+not a guarantee that every read will finish or succeed within that time.
+
+Long notes are loaded only on request through
+`GET /api/items/:id/evidence?offset=0&limit=100`. The response has `generation`,
+`revision`, `itemId`, `records`, `total`, `nextOffset`, `complete` and per-fact-style
+`freshness`, plus the original `item` and `assignments` detail rows. Attests keep
+nullable `bySession`, `byUser` and `note`. Subsequent pages must send the returned
+`generation` and `revision` as query parameters; a change returns HTTP 409 with
+`error: "revision-mismatch"` and the current pin. Restart from offset zero.
+The page limit is 1–100; `nextOffset: null` marks the end. Partial inventories
+report only retained records and `complete: false`. Detail-only edits also
+advance the model revision, so pages never silently mix versions.
 
 Items retain full work IDs, titles, holders, evidence kinds and counts. Raw attest
 histories and notes stay in the service's evidence inventories; they are not
@@ -294,7 +317,8 @@ incomplete. Their
 `ring` is `black`, `green`, `light-gray`, `yellow` or `null`. Agents retain stable
 session suffix IDs, recorded parents and separate `run`, `wait`, `idle` or unknown
 turn state. Pending wakes do not prove queued turns. `idleSince` is the observed
-last activity timestamp or `null`; `idleFor` is sampled at `generatedAt`.
+last activity timestamp or `null`; `idleFor` is sampled at the `generatedAt` of the event that applied that row.
+A client retains that sample time across unrelated deltas.
 Viewers advance live idle age locally and retain stale/unknown indications.
 The service schedules removal of recent wake/message marks at their expiry;
 elapsed idle seconds do not trigger a new full snapshot.

@@ -45,7 +45,7 @@ class HttpTest(unittest.TestCase):
         except HTTPError as error:
             return error.code, json.load(error)
 
-    def test_stream_carries_full_recovery_models_and_retains_partial_rows(self):
+    def test_stream_starts_full_then_sends_delta_and_retains_partial_rows(self):
         self.live.model.accept("work-items", None, Read(
             [{"id": "item", "title": "Visible", "state": "open"}], True, 1, "test-read"))
         self.live._publish()
@@ -57,13 +57,15 @@ class HttpTest(unittest.TestCase):
             self.live.model.accept("work-items", None, Read([], False, 2, "test-read"))
             self.live._state("stale", "partial read")
             self.live._publish()
-            self.assertEqual(b"event: model\n", response.readline())
+            self.assertEqual(b"event: delta\n", response.readline())
             second = json.loads(response.readline()[6:])
             self.assertGreater(second["revision"], first["revision"])
             self.assertEqual(first["generation"], second["generation"])
-            self.assertEqual("item", second["items"][0]["id"])
+            self.assertEqual(first["revision"], second["baseRevision"])
+            self.assertEqual("item", second["changes"]["items"]["upsert"][0]["id"])
+            self.assertEqual([], second["changes"]["items"]["remove"])
             self.assertEqual("stale", second["freshness"]["state"])
-            self.assertEqual("stale", second["items"][0]["evidence"]["identity"]["freshness"])
+            self.assertEqual("stale", second["changes"]["items"]["upsert"][0]["evidence"]["identity"]["freshness"])
         self.assertEqual(second["generation"], self.request("/data.json")[1]["generation"])
 
     def test_an_agent_cannot_remove_another_authors_annotation(self):
@@ -96,3 +98,49 @@ class HttpTest(unittest.TestCase):
         self.api.state["arrows"].clear()
         self.api.load_tags()
         self.assertIsNone(self.request("/api/arrows")[1][0]["author"])
+
+
+    def test_evidence_pages_pin_revision_and_preserve_notes_and_unknown_authors(self):
+        self.live.model.accept("work-items", None, Read([
+            {"id": "item", "title": "Visible", "state": "open"}], True, 1, "test-read"))
+        self.live.model.accept("assignments", None, Read([
+            {"id": "assignment", "workItemId": "item", "state": "closed"}], True, 1, "test-read"))
+        rows = [{"id": str(i), "assignmentId": "assignment", "kind": "progress",
+                 "ts": i, "note": "Note " + str(i), "byUser": None, "bySession": None}
+                for i in range(3)]
+        self.live.model.accept("attests", "assignment", Read(rows, True, 1, "test-read"))
+        self.live._publish()
+        status, first = self.request("/api/items/item/evidence?limit=2")
+        self.assertEqual(200, status)
+        self.assertTrue(first["complete"])
+        self.assertEqual(3, first["total"])
+        self.assertEqual(2, first["nextOffset"])
+        self.assertEqual("Note 0", first["records"][0]["note"])
+        self.assertIsNone(first["records"][0]["byUser"])
+        pin = "&generation=" + first["generation"] + "&revision=" + str(first["revision"])
+        status, last = self.request("/api/items/item/evidence?offset=2&limit=2" + pin)
+        self.assertEqual(200, status)
+        self.assertEqual(["2"], [r["id"] for r in last["records"]])
+        self.assertIsNone(last["nextOffset"])
+        # Only long detail text changes; the next page must still invalidate.
+        rows[0]["note"] = "Changed note"
+        self.live.model.accept("attests", "assignment", Read(rows, True, 1, "test-read"))
+        self.live._publish()
+        status, mismatch = self.request("/api/items/item/evidence?offset=2&limit=2" + pin)
+        self.assertEqual(409, status)
+        self.assertEqual("revision-mismatch", mismatch["error"])
+        self.assertGreater(mismatch["revision"], first["revision"])
+        self.assertEqual(400, self.request("/api/items/item/evidence?offset=1")[0])
+        self.assertEqual(400, self.request("/api/items/item/evidence?limit=101")[0])
+        self.assertEqual(404, self.request("/api/items/missing/evidence")[0])
+        status, restarted = self.request("/api/items/item/evidence?limit=2")
+        self.assertEqual(200, status)
+        self.assertEqual("Changed note", restarted["records"][0]["note"])
+        self.assertNotIn("Changed note", json.dumps(self.request("/api/model")[1]))
+
+    def test_reconnect_ignores_last_event_id_and_starts_with_current_full_model(self):
+        request = Request(self.url + "/api/events", headers={"Last-Event-ID": "old"})
+        with urlopen(request, timeout=3) as response:
+            self.assertEqual(b"event: model\n", response.readline())
+            model = json.loads(response.readline()[6:])
+            self.assertEqual(self.live.snapshot(), model)

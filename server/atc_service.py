@@ -1,4 +1,4 @@
-"""One upstream feed, recoverable read model, and full-model subscriptions."""
+"""One upstream feed, recoverable read model, and snapshot/delta subscriptions."""
 
 from collections import deque
 from copy import deepcopy
@@ -9,6 +9,7 @@ import time
 import uuid
 
 from atc_model import EvidenceModel
+from atc_evidence import combined_evidence
 from atc_reads import ReadQueue
 from atc_upstream import ATTEST_FIELDS, attest_row, now_ms
 
@@ -25,6 +26,7 @@ WORK_ITEM_FIELDS = frozenset((
 BASE_SCOPES = (("work-items", None), ("sessions", None), ("assignments", None),
                ("roles", None), ("decision-requests", None), ("artifacts", None))
 HISTORIES = {"attests", "turns", "wakes", "messages"}
+COLLECTIONS = ("agents", "items", "links", "wakes", "messages")
 
 RESOURCE_REFS = {
     "work-items": "workItemId", "assignments": "assignmentId",
@@ -107,7 +109,10 @@ class LiveService:
                         "bootstrapComplete": None, "targetedReads": 0, "rebuilds": 0}
         self.current = {}
         self._comparison = None
-        self.event = None
+        self._published_details = -1
+        self._full_event = None
+        self.delta = None
+        self.delta_base = None
         self._publish()
 
     def snapshot(self):
@@ -125,7 +130,58 @@ class LiveService:
         with self.condition:
             self.condition.wait_for(
                 lambda: self.revision != revision or self.stop_event.is_set(), timeout)
-            return (self.revision, self.event) if self.revision != revision else None
+            if self.revision == revision:
+                return None
+            body = self.delta if revision == self.delta_base else self.event
+            return self.revision, body
+
+    @property
+    def event(self):
+        """Encode full state only for a new subscriber or an explicit resync."""
+        with self.condition:
+            if self._full_event is None:
+                self._full_event = self._encode("model", self.current)
+            return self._full_event
+
+    @staticmethod
+    def _encode(kind, value):
+        return ("event: " + kind + "\ndata: " +
+                json.dumps(value, separators=(",", ":")) + "\n\n").encode()
+
+    @staticmethod
+    def _comparable(collection, row):
+        return {k: v for k, v in row.items() if k != "idleFor"} if collection == "agents" else row
+
+    def evidence_page(self, item_id, offset=0, limit=100, generation=None, revision=None):
+        # The model worker uses this same lock around mutation + publication,
+        # so a page and its revision describe one committed model state.
+        with self.condition:
+            pin = {"generation": self.generation, "revision": self.revision}
+            if (offset < 0 or not 1 <= limit <= 100 or
+                    (offset > 0 and (generation is None or revision is None)) or
+                    ((generation is None) != (revision is None))):
+                return 400, {"error": "invalid-pagination"}
+            if generation is not None and (generation != self.generation or revision != self.revision):
+                return 409, {"error": "revision-mismatch", **pin}
+            work = self.model.inventory("work-items")
+            item = work.rows.get(item_id)
+            if item is None:
+                return (404 if work.complete else 503), {"error": "item-unavailable", **pin}
+            assignments = self.model.inventory("assignments")
+            owned = [a for a in assignments.rows.values() if a.get("workItemId") == item_id]
+            scopes = [self.model.inventory("attests", a["id"]) for a in owned]
+            facts = combined_evidence(work.evidence(), assignments.evidence(),
+                                      *(scope.evidence() for scope in scopes))
+            rows = sorted((row for scope in scopes for row in scope.rows.values()),
+                          key=lambda row: (row.get("ts") or 0, row["id"]))
+            end = offset + limit
+            return 200, deepcopy({
+                **pin, "itemId": item_id, "item": item, "assignments": owned,
+                "records": [dict(row, bySession=row.get("bySession"), byUser=row.get("byUser"),
+                                 note=row.get("note")) for row in rows[offset:end]],
+                "total": len(rows), "nextOffset": end if end < len(rows) else None,
+                "complete": facts["complete"], "freshness": facts,
+            })
 
     def start(self):
         # Fail startup visibly when the runtime dependency isn't installed.
@@ -148,10 +204,18 @@ class LiveService:
         return False
 
     def _publish(self):
-        # A published revision is immutable even while the worker updates its
-        # inventories outside the subscribers' lock.
+        # The model worker holds the publication lock across inventory changes
+        # and this commit. Published revisions and encoded events are immutable.
         at = now_ms()
         data = deepcopy(self.model.snapshot(at))
+        self._retain_unproven_removals(data, at)
+        old_agents = {row["id"]: row for row in self.current.get("agents", [])}
+        for agent in data["agents"]:
+            fact = agent["evidence"]["idleFor"]
+            previous = old_agents.get(agent["id"])
+            if (previous and previous.get("idleSince") == agent.get("idleSince") and
+                    (self.state != "live" or fact["freshness"] != "live" or not fact["complete"])):
+                agent["idleFor"] = previous.get("idleFor")
         candidate = {
             "schemaVersion": 1, "generation": self.generation,
             "freshness": {
@@ -167,17 +231,61 @@ class LiveService:
         comparison = dict(candidate, agents=[
             {key: value for key, value in agent.items() if key != "idleFor"}
             for agent in data["agents"]])
-        if comparison == self._comparison:
+        if comparison == self._comparison and self.model.details_revision == self._published_details:
             return False
         with self.condition:
+            previous = self.current
+            self.delta_base = self.revision
             self.revision += 1
             self.current = dict(candidate, revision=self.revision, generatedAt=at,
                                 metrics=dict(self.metrics))
             self._comparison = comparison
-            body = json.dumps(self.current, separators=(",", ":"))
-            self.event = ("event: model\ndata: " + body + "\n\n").encode()
+            self._published_details = self.model.details_revision
+            self._full_event = None
+            changes = {}
+            for name in COLLECTIONS:
+                before = {row["id"]: row for row in previous.get(name, [])}
+                after = {row["id"]: row for row in data[name]}
+                changes[name] = {
+                    "upsert": [row for key, row in after.items() if key not in before or
+                               self._comparable(name, row) != self._comparable(name, before[key])],
+                    "remove": [key for key in before if key not in after],
+                }
+            metadata = {key: value for key, value in self.current.items() if key not in COLLECTIONS}
+            self.delta = self._encode("delta", dict(metadata, baseRevision=self.delta_base, changes=changes))
             self.condition.notify_all()
         return True
+
+    def _retain_unproven_removals(self, data, at):
+        # A partial read may contain a changed row (for example a retirement)
+        # but cannot certify disappearance from a cross-inventory projection.
+        bases = self.model.inventory("sessions").complete and self.model.inventory("assignments").complete
+        complete = {"items": self.model.inventory("work-items").complete, "agents": bases}
+        for name, sources in (("links", {"turns", "wakes"}), ("wakes", {"wakes"}),
+                              ("messages", {"messages"})):
+            complete[name] = bases and all(inventory.complete for (resource, _), inventory
+                                          in self.model.inventories.items() if resource in sources)
+        complete["messages"] = complete["messages"] and self.model.inventory("roles").complete
+        for name in COLLECTIONS:
+            if complete[name]:
+                continue
+            present = {row["id"] for row in data[name]}
+            for old in self.current.get(name, []):
+                if old["id"] in present:
+                    continue
+                if name in {"wakes", "messages"}:
+                    expiry = self.model.recent_expiries.get((name, old["id"]))
+                    if expiry is None or expiry <= at:
+                        continue  # Timed projection expiry, not a source deletion.
+                    self.model._expires(expiry)
+                retained = deepcopy(old)
+                for fact in retained.get("evidence", {}).values():
+                    fact.update(status="unknown", complete=False, freshness="stale")
+                if name == "agents":
+                    retained["turn"] = None
+                if name == "links":
+                    retained["state"] = None
+                data[name].append(retained)
 
     def _history_scopes(self):
         return [("attests", a["id"])
@@ -413,10 +521,13 @@ class LiveService:
         applied = False
         if policy and notice.get("op") == "upsert" and required <= payload.keys():
             row = attest_row(payload) if resource == "attests" else payload
+            previous = inventory.rows.get(str(row[inventory.key]))
             applied = inventory.payload(row, at=now_ms(), source="feed:" + notice["class"],
                                         policy=policy)
             if applied:
                 self.metrics["payloads"] += 1
+                if resource in {"work-items", "attests"} and previous != inventory.rows.get(str(row[inventory.key])):
+                    self.model.details_revision += 1
         if not applied:
             if resource in {"roles", "attests"}:
                 self._refresh(normalized, scope)
@@ -427,55 +538,58 @@ class LiveService:
                 self._state("stale", "change missing primary reference")
         return True
 
+    def _handle(self, kind, value):
+        if kind == "ready":
+            self.connected = True
+            self.version = value
+            self.policies = PAYLOAD_BUILDS.get((value["version"], value["build"], value["sha"]), {})
+            self.rebuild()
+        elif kind == "lost":
+            changed = self.connected
+            self.connected = False
+            changed = self._state("stale", value) or changed
+            if changed:
+                self.model.invalidate()
+                for resource, scope in self.model.inventories:
+                    self.reads.touch(resource, scope)
+            return changed
+        elif kind == "read":
+            return self._read_done(value)
+        elif kind == "change":
+            return self.change(value)
+        elif kind == "merged":
+            wid, refs, merged, at = value
+            if self.merge_pending.get(wid) != refs:
+                return False
+            self.merge_pending.pop(wid)
+            self.model.merges[wid] = {"value": merged, "observedAt": at, "refs": refs}
+        return True
+
     def _worker(self):
         while not self.stop_event.is_set():
-            update = True
             try:
                 kind, value = self.events.get(timeout=self._wait_timeout())
-                if kind == "stop":
-                    return
-                if kind == "ready":
-                    self.connected = True
-                    self.version = value
-                    self.policies = PAYLOAD_BUILDS.get(
-                        (value["version"], value["build"], value["sha"]), {})
-                    self.rebuild()
-                elif kind == "lost":
-                    update = self.connected
-                    self.connected = False
-                    update = self._state("stale", value) or update
-                    if update:
-                        self.model.invalidate()
-                        for resource, scope in self.model.inventories:
-                            self.reads.touch(resource, scope)
-                elif kind == "read":
-                    update = self._read_done(value)
-                elif kind == "change":
-                    update = self.change(value)
-                elif kind == "merged":
-                    wid, refs, merged, at = value
-                    update = self.merge_pending.get(wid) == refs
-                    if update:
-                        self.merge_pending.pop(wid)
-                        self.model.merges[wid] = {
-                            "value": merged, "observedAt": at, "refs": refs}
             except queue.Empty:
-                pass
-            except Exception as error:
-                self.model.invalidate()
-                self._state("stale", "model update failed: " + type(error).__name__)
-            if self.connected and self.cycle is None and time.monotonic() - self.last_rebuild >= self.rebuild_interval:
-                update = True
+                kind, value = "deadline", None
+            if kind == "stop":
+                return
+            # Readers see either the previous revision or the new one, never
+            # rows from a new read labelled with the previous revision.
+            with self.condition:
                 try:
-                    self.rebuild(recovery=False)
+                    update = self._handle(kind, value)
                 except Exception as error:
-                    self.last_rebuild = time.monotonic()
+                    update = True
                     self.model.invalidate()
-                    self._state("stale", "rebuild failed: " + type(error).__name__)
-            self.reads.pump()
-            if update:
-                self._publish()
-                self._resolve_merges()
+                    self._state("stale", "model update failed: " + type(error).__name__)
+                if (self.connected and self.cycle is None and
+                        time.monotonic() - self.last_rebuild >= self.rebuild_interval):
+                    update = True
+                    self.rebuild(recovery=False)
+                self.reads.pump()
+                if update:
+                    self._publish()
+                    self._resolve_merges()
 
     def _wait_timeout(self):
         deadlines = []

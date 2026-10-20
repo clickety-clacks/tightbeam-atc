@@ -52,7 +52,7 @@ Config:
 """
 import copy, json, math, os, posixpath, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 from pathlib import Path
 from atc_git import GitResolver
 from atc_service import LiveService
@@ -442,6 +442,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(live_service.snapshot())
         if u.path == "/api/events":
             return self._events()
+        if u.path.startswith("/api/items/") and u.path.endswith("/evidence"):
+            if live_service is None:
+                return self._send({"error": "live service not configured"}, 503)
+            query = parse_qs(u.query)
+            try:
+                offset = int(query.get("offset", ["0"])[0])
+                limit = int(query.get("limit", ["100"])[0])
+                generation = query.get("generation", [None])[0]
+                revision = int(query["revision"][0]) if "revision" in query else None
+            except (ValueError, TypeError):
+                return self._send({"error": "invalid-pagination"}, 400)
+            item_id = unquote(u.path[len("/api/items/"):-len("/evidence")])
+            status, page = live_service.evidence_page(item_id, offset, limit, generation, revision)
+            return self._send(page, status)
         if not u.path.startswith("/api/"):
             return self._serve_file(u.path)
         snap = None

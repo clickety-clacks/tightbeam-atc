@@ -3,6 +3,7 @@
 from copy import deepcopy
 from pathlib import Path
 import sys
+import json
 import time
 import threading
 import unittest
@@ -360,3 +361,72 @@ class ServiceRecoveryTest(unittest.TestCase):
                      if r in {"attests", "turns", "wakes", "messages"}}
         self.assertEqual(set(self.service._history_scopes()), histories)
         self.assertEqual("live", self.service.state)
+
+
+    def test_delta_replaces_rows_and_complete_read_can_remove_them(self):
+        self.service._publish()
+        baseline = self.service.snapshot()
+        self.service.model.accept("work-items", None, Read([work("Updated", 3)], True, 30, "read"))
+        self.service._publish()
+        revision, frame = self.service.next_event(baseline["revision"], timeout=0)
+        self.assertTrue(frame.startswith(b"event: delta\n"))
+        delta = json.loads(frame.split(b"data: ", 1)[1])
+        self.assertEqual(baseline["revision"], delta["baseRevision"])
+        self.assertEqual(revision, delta["revision"])
+        self.assertEqual("Updated", delta["changes"]["items"]["upsert"][0]["title"])
+        self.assertEqual([], delta["changes"]["items"]["remove"])
+        for name in ("freshness", "gatewayVersion", "metrics", "generation", "generatedAt"):
+            self.assertEqual(self.service.snapshot()[name], delta[name])
+        self.service.model.accept("work-items", None, Read([], True, 40, "read"))
+        self.service._publish()
+        _, frame = self.service.next_event(revision, timeout=0)
+        delta = json.loads(frame.split(b"data: ", 1)[1])
+        self.assertEqual(["work"], delta["changes"]["items"]["remove"])
+        # Falling behind more than the retained delta yields a complete resync.
+        _, frame = self.service.next_event(baseline["revision"], timeout=0)
+        self.assertTrue(frame.startswith(b"event: model\n"))
+        self.assertEqual([], json.loads(frame.split(b"data: ", 1)[1])["items"])
+
+    def test_status_delta_has_no_clock_only_agent_upserts(self):
+        self.service._publish()
+        revision = self.service.revision
+        self.service._state("rebuilding", "interval read")
+        self.service._publish()
+        _, frame = self.service.next_event(revision, timeout=0)
+        delta = json.loads(frame.split(b"data: ", 1)[1])
+        self.assertEqual("rebuilding", delta["freshness"]["state"])
+        self.assertTrue(all(not change["upsert"] and not change["remove"]
+                            for change in delta["changes"].values()))
+
+    def test_stale_idle_age_does_not_advance_on_unrelated_updates_or_resync(self):
+        with patch("atc_service.now_ms", return_value=10000):
+            self.service._publish()
+        self.service._state("stale", "lost")
+        self.service.model.invalidate()
+        self.service._publish()
+        frozen = self.service.snapshot()["agents"][0]["idleFor"]
+        self.service.model.inventory("work-items").rows["work"]["title"] = "Other change"
+        with patch("atc_service.now_ms", return_value=50000):
+            self.service._publish()
+        self.assertEqual(frozen, self.service.snapshot()["agents"][0]["idleFor"])
+
+    def test_partial_retirement_read_does_not_remove_projected_agent(self):
+        assignments = deepcopy(self.gateway.rows[("assignments", None)])
+        assignments[0]["state"] = "closed"
+        self.service.model.accept("assignments", None, Read(assignments, True, 20, "read"))
+        self.service._publish()
+        revision = self.service.revision
+        sessions = deepcopy(self.gateway.rows[("sessions", None)])
+        sessions[0]["state"] = "retired"
+        self.service.model.accept("sessions", None, Read(sessions, False, 30, "read"))
+        self.service._publish()
+        _, frame = self.service.next_event(revision, timeout=0)
+        delta = json.loads(frame.split(b"data: ", 1)[1])
+        self.assertEqual([], delta["changes"]["agents"]["remove"])
+        self.assertEqual("unknown", self.service.snapshot()["agents"][0]["evidence"]["identity"]["status"])
+        revision = self.service.revision
+        self.service.model.accept("sessions", None, Read(sessions, True, 40, "read"))
+        self.service._publish()
+        _, frame = self.service.next_event(revision, timeout=0)
+        delta = json.loads(frame.split(b"data: ", 1)[1])
+        self.assertEqual(["s_author"], delta["changes"]["agents"]["remove"])

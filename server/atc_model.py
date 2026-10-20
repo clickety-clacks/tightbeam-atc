@@ -18,12 +18,20 @@ class EvidenceModel:
         self.inventories = {}
         self.merges = {}
         self.next_expiry = None
+        self.details_revision = 0
+        self.recent_expiries = {}
 
     def inventory(self, resource, scope=None):
         return self.inventories.setdefault((resource, scope), Inventory(KEYS.get(resource, "id")))
 
     def accept(self, resource, scope, result):
-        self.inventory(resource, scope).read(
+        inventory = self.inventory(resource, scope)
+        if resource in {"attests", "assignments", "work-items"}:
+            incoming = {str(row[inventory.key]): row for row in result.rows}
+            if (any(inventory.rows.get(k) != row for k, row in incoming.items())
+                    or (result.complete and inventory.rows.keys() != incoming.keys())):
+                self.details_revision += 1
+        inventory.read(
             result.rows, complete=result.complete, at=result.at, source=result.source)
 
     def detail(self, resource, scope, result):
@@ -31,6 +39,8 @@ class EvidenceModel:
         if result.complete:
             for row in result.rows:
                 key = str(row[inventory.key])
+                if resource in {"attests", "assignments", "work-items"} and inventory.rows.get(key) != row:
+                    self.details_revision += 1
                 inventory.rows[key] = deepcopy(row)
                 inventory.observations[key] = {
                     "status": "known", "freshness": "live", "observedAt": result.at,
@@ -59,6 +69,7 @@ class EvidenceModel:
 
     def snapshot(self, now):
         self.next_expiry = None
+        self.recent_expiries = {key: at for key, at in self.recent_expiries.items() if at > now}
         work = self.inventory("work-items")
         assignments = self.inventory("assignments")
         sessions = self.inventory("sessions")
@@ -219,7 +230,9 @@ class EvidenceModel:
                     if attest_facts["complete"] else None,
                 },
                 "commitRefs": refs,
-                "commitRefCorrections": [c for a in owned for c in a.get("commitRefCorrections", [])],
+                "commitRefCorrections": [
+                    {k: v for k, v in c.items() if k not in {"reason", "note"}}
+                    for a in owned for c in a.get("commitRefCorrections", [])],
                 "evidence": {"identity": identity, "stage": stage_facts,
                              "ring": ring_facts, "assignments": assignments.evidence(),
                              "attests": attest_facts, "turns": all_turn_facts,
@@ -240,6 +253,7 @@ class EvidenceModel:
                     and isinstance(wake.get("firedAt"), (int, float))
                     and wake["firedAt"] > now - 300_000):
                 wake_marks.append({"id": wake["wakeId"], "from": src, "to": dst})
+                self.recent_expiries["wakes", wake["wakeId"]] = wake["firedAt"] + 300_000
                 self._expires(wake["firedAt"] + 300_000)
         bindings = {"agent:" + r["name"]: r.get("boundSessionKey") for r in roles.rows.values()}
         for message in messages:
@@ -254,6 +268,7 @@ class EvidenceModel:
             message_marks.append({"id": message["id"], "from": src, "to": dst,
                                   "kind": "agent" if src else (
                                       "user" if sender.startswith("user:") else "substrate")})
+            self.recent_expiries["messages", message["id"]] = message["at"] + 300_000
             self._expires(message["at"] + 300_000)
         return {"agents": agents, "items": items, "links": links,
                 "wakes": wake_marks, "messages": message_marks}
