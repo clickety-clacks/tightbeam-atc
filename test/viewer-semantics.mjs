@@ -49,6 +49,15 @@ assert.equal(backstop.active.stale, true);
 assert.equal(backstop.active.overBudgetScopes, 1);
 assert.equal(backstop.history.ageMs, null);
 assert.equal(backstop.history.scopeCount, 2);
+assert.equal(backstop.history.unconfirmedScopes, 2);
+const disconnectedBackstop = reconciliationFreshness({
+  announcedChanges: 'stale', unannouncedChanges: 'swept', activeBudgetMs: 1_800_000,
+  activeRefreshMs: 900_000, recentWindowMs: 1_800_000,
+  active: {scopeCount: 1, unconfirmedScopes: 0, oldestConfirmedAt: 1000, overBudgetScopes: 0},
+  history: {scopeCount: 0, unconfirmedScopes: 0, oldestConfirmedAt: null},
+}, 1_801_000);
+assert.equal(disconnectedBackstop.active.ageMs, 1_800_000);
+assert.equal(disconnectedBackstop.active.stale, true);
 const noScopes = reconciliationFreshness({
   announcedChanges: 'stale', unannouncedChanges: 'swept', activeBudgetMs: 1_800_000,
   activeRefreshMs: 900_000, recentWindowMs: 1_800_000,

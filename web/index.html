@@ -2184,9 +2184,9 @@ function renderModelStatus(now=Date.now()){
   const groupDetails = (label, group) => {
     if (!group) return `${label}: unknown (service metadata unavailable)`;
     if (group.scopeCount===0) return `${label}: no scopes`;
-    const confirmationAge = group.ageMs===null ? 'unknown age (no complete confirmation yet)'
-      : `${durationLabel(group.ageMs)} since the oldest successful complete read`;
-    return `${label}: ${group.scopeCount} scopes · ${group.unconfirmedScopes} unconfirmed · ${confirmationAge}`;
+    const confirmationAge = group.ageMs===null ? 'oldest known confirmation age unknown'
+      : `oldest known confirmation age ${durationLabel(group.ageMs)}`;
+    return `${label}: ${group.scopeCount} scopes · ${group.unconfirmedScopes} with unknown age · ${confirmationAge}`;
   };
   const activeBudgetDetail = backstop
     ? `${backstop.active.overBudgetScopes} reported over-budget scopes`

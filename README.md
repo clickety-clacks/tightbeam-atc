@@ -157,14 +157,21 @@ absence; a failed or partial read removes nothing. Last-known rows remain stale,
 and facts that cannot be established remain unknown. The viewer's camera, selection,
 focus, scope, pan and layers stay local through model changes and recovery.
 
-Payloads can update only resource classes verified for the connected gateway build.
+Payloads update only resource classes whose guarantees are qualified against the
+connected gateway's exact source build. The current table covers selected
+0.1.9 build 2908 upserts; real-feed verification remains pending. See the
+[per-resource guarantee inventory](docs/payload-guarantees.md) for the exact
+field/version guarantees, exclusions and targeted-read gaps.
 Other notices trigger a background read of the affected row or scope. Sequence
 gaps, lost heartbeats and disconnected feeds trigger complete recovery. Normal
-intervals refresh base inventories and rotate through a bounded batch of history
-scopes, covering facts without notices and changes lost before sequence allocation.
-A full rotation can take many intervals; the reconciliation metadata reports its
-scope count, budget and nominal duration. A connected feed does not make those
-facts newer than their last read. Per-fact observation ages remain authoritative.
+intervals refresh base inventories and rotate through a bounded batch of terminal
+histories. Active histories have an independent 15-minute refresh target and a
+30-minute confirmation budget; exceeding it marks the scope and model stale.
+This backstop covers facts without notices and changes lost before sequencing.
+Terminal rotation can take many intervals. The reconciliation metadata reports
+separate active/history counts and confirmation timestamps. A connected feed does
+not make unannounced changes newer than their last complete read. Per-fact
+observation ages remain authoritative. Active-scale throughput is not yet measured.
 Feed processing continues while background reads run. Partial reads remove nothing.
 
 **On merge detection.** No attest kind means "merged" — an item can hold a
@@ -295,8 +302,36 @@ deltas can have empty collection changes.
 
 `freshness.reconciliation` includes `mode` (`bootstrap`, `recovery`, `interval` or
 null), `pendingScopes`, `totalScopes`, `scopeBudget`, `historyScopes`,
-`estimatedSweepMs` and `lastSweepAt`. The estimate covers a nominal rotation,
-not a guarantee that every read will finish or succeed within that time.
+`estimatedSweepMs` and `lastSweepAt`. The estimate covers terminal history only,
+not active freshness or a guarantee that every read will finish in that time.
+
+Additional reconciliation fields distinguish the two freshness paths:
+
+| Field | Meaning |
+|---|---|
+| `announcedChanges` | `live` when the feed is connected, otherwise `stale`; independent of backstop completeness. |
+| `unannouncedChanges` | `swept`: changes without notices are caught by complete scope reads. |
+| `activeBudgetMs` | 1800000: active scopes past 30 minutes without complete reconfirmation are stale. |
+| `activeRefreshMs` | 900000: 15-minute scheduling target, leaving execution headroom; not a performance claim. |
+| `recentWindowMs` | 1800000: recent activity classification window. |
+| `activeBatchLimit` | 32: active scope reads queued per pass, with bounded worker concurrency. |
+| `active` | `{scopeCount, unconfirmedScopes, oldestConfirmedAt, overBudgetScopes}`. |
+| `history` | `{scopeCount, unconfirmedScopes, oldestConfirmedAt}`. |
+
+`oldestConfirmedAt` is an epoch-millisecond timestamp: the oldest successful
+complete scope confirmation in that group, or null when none exists. The viewer
+computes current age locally; no clock-only frames are needed. `unconfirmedScopes`
+counts scopes with no complete confirmation and therefore unknown age. An empty
+group has zero counts and a null timestamp. Detail reads, payloads and partial
+reads do not reset scope confirmation time. Ages keep increasing while stale.
+
+Open-assignment attest histories are active. Session turn/wake/message histories
+are active for open-assignment holders, running/queued sessions, recent activity,
+or incomplete histories that cannot prove inactivity. Other maintained histories
+are terminal. Partial reads cannot demote a previously active assignment history.
+Previously visible retired sessions remain in terminal reconciliation. Only
+successful complete reads reconfirm scopes; the scheduler does not silently
+extend the budget when capacity is insufficient.
 
 Long notes are loaded only on request through
 `GET /api/items/:id/evidence?offset=0&limit=100`. The response has `generation`,
