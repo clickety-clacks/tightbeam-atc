@@ -317,7 +317,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts, evidencePageQuery,
-         factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
+         evidencePageFreshness, evidenceRecordAuthor, factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, isModelEnvelope, knownStage,
          reconciliationFreshness, ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
 import { OrbitControls } from './addons/controls/OrbitControls.js';
@@ -2829,8 +2829,7 @@ function evidenceNotesMarkup(itemId){
   const matching = page && page.generation===DATA?.generation && page.revision===DATA?.revision;
   const notice = itemEvidenceNotices.get(itemId);
   const records = matching ? page.records.map(record=>{
-    const author = [record.author, record.byUser, record.bySession, record.producer]
-      .find(value=>typeof value==='string' && value.length) || 'author unknown';
+    const author = evidenceRecordAuthor(record);
     const kind = [record.kind, record.verdictKind].filter(value=>typeof value==='string' && value.length).join(' · ')
       || 'attest';
     const age = Number.isFinite(record.ts) ? factAge(record.ts) + ' ago' : 'age unknown';
@@ -2842,8 +2841,12 @@ function evidenceNotesMarkup(itemId){
     : matching && page.nextOffset!==null && page.records.length ? 'Load more notes'
     : matching ? 'Reload notes' : 'Load attest notes';
   const disabled = page?.loading ? ' disabled' : '';
+  const detailFreshness = page?.freshness;
+  const detailAge = factAge(detailFreshness?.observedAt);
+  const detailSources = Array.isArray(detailFreshness?.source) && detailFreshness.source.length
+    ? detailFreshness.source.join(', ') : 'unknown source';
   const status = matching
-    ? `${page.freshness.state || 'unknown freshness'} · ${page.complete ? 'complete inventory' : 'incomplete inventory'} · ${page.records.length} of ${page.total} loaded`
+    ? `${evidencePageFreshness(detailFreshness)} · observed ${detailAge}${detailAge==='unknown'?'':' ago'} · ${detailSources} · ${page.complete ? 'complete inventory' : 'incomplete inventory'} · ${page.records.length} of ${page.total} loaded`
     : '';
   const empty = matching && page.records.length===0
     ? (page.total===0 && page.complete ? 'No attest notes.' : 'No notes returned; inventory may be incomplete.') : '';
@@ -2948,10 +2951,10 @@ async function loadItemEvidence(itemId){
   let page = itemEvidencePages.get(itemId);
   if (!page || page.generation!==generation || page.revision!==revision){
     page = {generation, revision, records:[], total:0, nextOffset:0,
-      complete:false, freshness:{state:'unknown'}, loading:false};
+      complete:false, freshness:{status:'unknown',freshness:'unknown',observedAt:null,source:[],complete:false}, loading:false};
   } else if (page.nextOffset===null){
     page = {generation, revision, records:[], total:0, nextOffset:0,
-      complete:false, freshness:{state:'unknown'}, loading:false};
+      complete:false, freshness:{status:'unknown',freshness:'unknown',observedAt:null,source:[],complete:false}, loading:false};
   }
   if (page.loading) return;
   const offset = page.nextOffset ?? 0;

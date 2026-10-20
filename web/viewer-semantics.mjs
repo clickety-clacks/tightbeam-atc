@@ -165,6 +165,7 @@ export function agentSampleTimes(currentTimes, model,
 }
 
 export function isEvidencePage(page, {itemId, generation, revision, offset=0} = {}) {
+  const freshness = page?.freshness;
   return Boolean(Number.isInteger(offset) && offset >= 0
     && page && page.itemId === itemId && page.generation === generation
     && page.revision === revision && Array.isArray(page.records)
@@ -173,7 +174,23 @@ export function isEvidencePage(page, {itemId, generation, revision, offset=0} = 
     && (page.nextOffset === null || (Number.isInteger(page.nextOffset)
       && page.nextOffset === offset + page.records.length && page.nextOffset <= page.total))
     && typeof page.complete === 'boolean'
-    && page.freshness && typeof page.freshness === 'object' && !Array.isArray(page.freshness));
+    && freshness && typeof freshness === 'object' && !Array.isArray(freshness)
+    && ['known', 'unknown'].includes(freshness.status)
+    && ['live', 'stale'].includes(freshness.freshness)
+    && (freshness.observedAt === null || Number.isFinite(freshness.observedAt))
+    && Array.isArray(freshness.source) && freshness.source.every(source => typeof source === 'string')
+    && typeof freshness.complete === 'boolean' && freshness.complete === page.complete);
+}
+
+export function evidencePageFreshness(freshness) {
+  return freshness && typeof freshness === 'object' && !Array.isArray(freshness)
+    && ['live', 'stale'].includes(freshness.freshness)
+    ? freshness.freshness : 'unknown freshness';
+}
+
+export function evidenceRecordAuthor(record) {
+  return [record?.byUser, record?.bySession]
+    .find(value => typeof value === 'string' && value.trim().length) || 'author unknown';
 }
 
 export function evidencePageQuery(offset, limit, generation, revision) {

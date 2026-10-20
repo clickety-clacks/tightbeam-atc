@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts, evidencePageQuery,
+import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts, evidencePageFreshness,
+         evidencePageQuery, evidenceRecordAuthor,
          factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, isModelEnvelope, knownStage,
          reconciliationFreshness, ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from '../web/viewer-semantics.mjs';
@@ -137,12 +138,21 @@ assert.deepEqual([...agentSampleTimes(oldSamples, changedSnapshot,
   {fullSnapshot: true, previousModel: deltaBase})], [['agent-1', 4000], ['agent-2', 4000]]);
 
 const page = {itemId: 'wi-1', generation: 'service-a', revision: 9,
-  records: [{author: null, note: 'sample'}], total: 1, nextOffset: null,
-  complete: true, freshness: {state: 'live'}};
+  records: [{byUser: null, bySession: null, producer: 'producer-session', note: 'sample'}],
+  total: 1, nextOffset: null, complete: true,
+  freshness: {status: 'known', freshness: 'live', observedAt: 1000, source: ['work-items'], complete: true}};
 assert.equal(isEvidencePage(page, {itemId: 'wi-1', generation: 'service-a', revision: 9}), true);
 assert.equal(isEvidencePage(page, {itemId: 'wi-1', generation: 'service-a', revision: 10}), false);
 assert.equal(isEvidencePage({...page, nextOffset: '10'},
   {itemId: 'wi-1', generation: 'service-a', revision: 9}), false);
+assert.equal(isEvidencePage({...page, freshness: {...page.freshness, state: 'live'}},
+  {itemId: 'wi-1', generation: 'service-a', revision: 9}), false);
+assert.equal(evidencePageFreshness(page.freshness), 'live');
+assert.equal(evidencePageFreshness({...page.freshness, freshness: 'stale'}), 'stale');
+assert.equal(evidencePageFreshness({state: 'live'}), 'unknown freshness');
+assert.equal(evidenceRecordAuthor({byUser: 'mike', bySession: 'agent-session', producer: 'builder'}), 'mike');
+assert.equal(evidenceRecordAuthor({bySession: 'agent-session', producer: 'builder'}), 'agent-session');
+assert.equal(evidenceRecordAuthor({producer: 'builder'}), 'author unknown');
 assert.equal(evidencePageQuery(0, 100, 'service-a', 9), '?offset=0&limit=100');
 assert.equal(evidencePageQuery(100, 100, 'service-a', 9),
   '?offset=100&limit=100&generation=service-a&revision=9');
