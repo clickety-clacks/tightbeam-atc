@@ -11,6 +11,7 @@ import uuid
 from atc_model import EvidenceModel
 from atc_evidence import combined_evidence
 from atc_reads import ReadQueue
+from atc_reconciliation import ActiveBackstop
 from atc_upstream import ATTEST_FIELDS, attest_row, now_ms
 
 
@@ -84,6 +85,7 @@ class LiveService:
         self.rebuild_interval, self.workers = rebuild_interval, workers
         self.events = queue.Queue()
         self.reads = ReadQueue(gateway, self.events, workers)
+        self.backstop = ActiveBackstop()
         self.scope_budget = scope_budget
         self.rotation = deque()
         self.cycle = None
@@ -193,6 +195,9 @@ class LiveService:
             self.condition.notify_all()
 
     def _state(self, state, reason=None):
+        if (state in {"live", "rebuilding"} and self.connected and
+                any(self.model.inventory(*s).budget_stale for s in self.backstop.active)):
+            state, reason = "stale", "active reconciliation budget exceeded"
         if (self.state, self.reason) != (state, reason):
             self.state, self.reason, self.since = state, reason, now_ms()
             return True
@@ -202,6 +207,7 @@ class LiveService:
         # The model worker holds the publication lock across inventory changes
         # and this commit. Published revisions and encoded events are immutable.
         at = now_ms()
+        self._update_backstop(at)
         data = deepcopy(self.model.snapshot(at))
         self._retain_unproven_removals(data, at)
         old_agents = {row["id"]: row for row in self.current.get("agents", [])}
@@ -283,23 +289,52 @@ class LiveService:
                 data[name].append(retained)
 
     def _history_scopes(self):
-        return [("attests", a["id"])
+        scopes = [("attests", a["id"])
                 for a in self.model.inventory("assignments").rows.values()] + [
                     (resource, session["sessionKey"])
                     for session in self.model.active_sessions()
                     for resource in ("turns", "wakes", "messages")]
+        # Previously visible sessions remain in terminal reconciliation after
+        # retirement; losing visibility does not establish historical absence.
+        scopes.extend((resource, scope) for resource, scope in self.model.inventories
+                      if resource in {"turns", "wakes", "messages"} and scope is not None)
+        return list(dict.fromkeys(scopes))
+
+    def _update_backstop(self, at):
+        before = (self.state, self.reason, self.backstop.active, self.backstop.history,
+                  {s for s in self.backstop.active if self.model.inventory(*s).budget_stale})
+        scopes = self._history_scopes()
+        self.backstop.classify(self.model, scopes, at)
+        overdue = any(self.model.inventory(*s).budget_stale for s in self.backstop.active)
+        if overdue and self.connected:
+            self._state("stale", "active reconciliation budget exceeded")
+        elif self.reason == "active reconciliation budget exceeded":
+            required = list(BASE_SCOPES) + scopes
+            complete = all(self.model.inventory(*s).complete and not self.model.inventory(*s).stale
+                           for s in required)
+            if self.cycle:
+                self._state("rebuilding", "reading published state: " + self.cycle["mode"])
+            elif complete and self.connected and not self.read_failures and not self.correlation_gaps:
+                self._state("live")
+            else:
+                self._state("stale", "incomplete read or disconnected feed")
+        after = (self.state, self.reason, self.backstop.active, self.backstop.history,
+                 {s for s in self.backstop.active if self.model.inventory(*s).budget_stale})
+        return before != after
 
     def _reconciliation(self):
         cycle = self.cycle
         histories = len(self._history_scopes())
+        terminal = len(self.backstop.history)
         return {"mode": cycle["mode"] if cycle else None,
                 "pendingScopes": len(cycle["pending"]) if cycle else 0,
                 "totalScopes": len(cycle["seen"]) if cycle else 0,
                 "scopeBudget": self.scope_budget,
                 "historyScopes": histories,
-                "estimatedSweepMs": ((histories + self.scope_budget - 1) // self.scope_budget
+                "estimatedSweepMs": ((terminal + self.scope_budget - 1) // self.scope_budget
                                      * self.rebuild_interval * 1000),
-                "lastSweepAt": self.last_sweep}
+                "lastSweepAt": self.last_sweep,
+                **self.backstop.metadata(self.model, self.connected)}
 
     def rebuild(self, *, recovery=True):
         """Schedule work, never perform upstream I/O on the model worker.
@@ -347,9 +382,11 @@ class LiveService:
             self._cycle_add(scopes, repeat=True)
             return
         needed = set(scopes)
-        self.rotation = deque(s for s in self.rotation if s in needed)
+        self.backstop.classify(self.model, scopes, now_ms())
+        terminal = self.backstop.history
+        self.rotation = deque(s for s in self.rotation if s in terminal)
         scheduled = set(self.rotation)
-        self.rotation.extend(s for s in scopes if s not in scheduled)
+        self.rotation.extend(s for s in scopes if s in terminal and s not in scheduled)
         # Newly discovered scopes are genuine data gaps, not interval recrawls.
         missing = [s for s in scopes if self.model.inventory(*s).observed_at is None]
         self._cycle_add(missing)
@@ -602,6 +639,9 @@ class LiveService:
                         time.monotonic() - self.last_rebuild >= self.rebuild_interval):
                     update = True
                     self.rebuild(recovery=False)
+                update = self._update_backstop(now_ms()) or update
+                if self.connected:
+                    self.backstop.schedule(self.model, self.reads, now_ms())
                 self.reads.pump()
                 if update:
                     self._publish()
@@ -613,6 +653,9 @@ class LiveService:
             deadlines.append(self.last_rebuild + self.rebuild_interval - time.monotonic())
         if self.model.next_expiry is not None:
             deadlines.append((self.model.next_expiry - now_ms()) / 1000)
+        backstop_deadline = self.backstop.deadline(self.model, self.reads, now_ms(), self.connected)
+        if backstop_deadline is not None:
+            deadlines.append((backstop_deadline - now_ms()) / 1000)
         return max(0, min(deadlines)) if deadlines else None
 
     def _feed(self):

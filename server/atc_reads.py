@@ -20,11 +20,12 @@ class ReadQueue:
         # read's snapshot. Such a read must not overwrite the newer evidence.
         self.epochs[resource, scope] += 1
 
-    def schedule(self, resource, scope=None, key=None, *, priority=False):
+    def schedule(self, resource, scope=None, key=None, *, priority=False, active=False):
         job = resource, scope, key
         if self.active.get(job[:2]) == (job, self.epochs[job[:2]]):
             return
-        self.pending[job] = priority or self.pending.get(job, False)
+        self.pending[job] = max(2 if priority else 1 if active else 0,
+                                self.pending.get(job, 0))
         if priority:
             self.pending.move_to_end(job, last=False)
 
@@ -33,10 +34,12 @@ class ReadQueue:
             eligible = [job for job in self.pending if job[:2] not in self.active]
             if not eligible:
                 break
-            # Notices normally go first; reserve every fourth dispatch for
-            # reconciliation so sustained feed activity cannot starve recovery.
-            background = [job for job in eligible if not self.pending[job]]
-            job = background[0] if background and self.dispatched % 4 == 3 else eligible[0]
+            # Notices go first, then active confirmations, then terminal
+            # rotation. Every fourth dispatch admits reconciliation even under
+            # sustained notices; active scopes take that slot before history.
+            background = [job for job in eligible if self.pending[job] < 2]
+            choices = background if background and self.dispatched % 4 == 3 else eligible
+            job = max(choices, key=lambda candidate: self.pending[candidate])
             inventory = job[:2]
             del self.pending[job]
             self.dispatched += 1

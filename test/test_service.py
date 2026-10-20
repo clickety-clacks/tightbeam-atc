@@ -58,11 +58,15 @@ class PublishedReads:
 
 class ServiceRecoveryTest(unittest.TestCase):
     def setUp(self):
+        clock = patch("atc_service.now_ms", return_value=20)
+        clock.start()
+        self.addCleanup(clock.stop)
         self.gateway = PublishedReads()
         self.service = LiveService(self.gateway)
         self.service.connected = True
         self.service.rebuild()
         self.drain()
+        self.service._update_backstop(20)
 
     def tearDown(self):
         self.service.stop()
@@ -216,7 +220,8 @@ class ServiceRecoveryTest(unittest.TestCase):
                 self.assertEqual(15, self.service._wait_timeout())
         self.service.connected = False
         self.service.model.next_expiry = None
-        self.assertIsNone(self.service._wait_timeout())
+        # Confirmation-age and recent-activity transitions remain visible offline.
+        self.assertGreater(self.service._wait_timeout(), 0)
 
     def test_new_assignment_fills_histories_of_previously_inactive_holder(self):
         self.gateway.rows[("sessions", None)].append({
@@ -262,7 +267,7 @@ class ServiceRecoveryTest(unittest.TestCase):
                          if r in {"attests", "turns", "wakes", "messages"}}
             self.assertLessEqual(len(histories), 2)
             seen.update(histories)
-        self.assertEqual(set(self.service._history_scopes()), seen)
+        self.assertEqual(self.service.backstop.history, seen)
 
     def test_background_history_read_does_not_block_targeted_change(self):
         entered, release = threading.Event(), threading.Event()
@@ -575,3 +580,28 @@ class ServiceRecoveryTest(unittest.TestCase):
                              "refs": {"workItemId": "work"}, "payload": work("Invalid class", 5)})
         self.assertIn(("work-items", None, "work"), self.service.reads.pending)
         self.assertEqual("First", self.item()["title"])
+
+    def test_active_budget_expiry_publishes_stale_without_clock_only_deltas(self):
+        from atc_reconciliation import ACTIVE_BUDGET_MS
+        self.service._publish()
+        before = self.service.snapshot()
+        meta = before["freshness"]["reconciliation"]
+        self.assertEqual(4, meta["active"]["scopeCount"])
+        self.assertEqual(10, meta["active"]["oldestConfirmedAt"])
+        self.assertEqual(0, meta["active"]["overBudgetScopes"])
+        with patch("atc_service.now_ms", return_value=1000):
+            self.assertFalse(self.service._publish())
+        with patch("atc_service.now_ms", return_value=10 + ACTIVE_BUDGET_MS):
+            self.assertTrue(self.service._publish())
+        stale = self.service.snapshot()
+        self.assertEqual("stale", stale["freshness"]["state"])
+        self.assertEqual("stale", stale["items"][0]["evidence"]["stage"]["freshness"])
+        self.assertEqual(4, stale["freshness"]["reconciliation"]["active"]["overBudgetScopes"])
+        self.assertEqual(before["agents"][0]["idleFor"], stale["agents"][0]["idleFor"])
+        for scope in self.service.backstop.active:
+            inventory = self.service.model.inventory(*scope)
+            self.service.model.accept(*scope, Read(list(inventory.rows.values()), True,
+                                                  20 + ACTIVE_BUDGET_MS, "read"))
+        with patch("atc_service.now_ms", return_value=20 + ACTIVE_BUDGET_MS):
+            self.service._publish()
+        self.assertEqual("live", self.service.snapshot()["freshness"]["state"])

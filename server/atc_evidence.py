@@ -18,6 +18,8 @@ class Inventory:
     observations: dict = field(default_factory=dict)
     complete: bool = False
     observed_at: int | None = None
+    confirmed_at: int | None = None
+    budget_stale: bool = False
     stale: bool = True
     source: str = ""
 
@@ -31,6 +33,8 @@ class Inventory:
         if complete:
             self.rows = incoming
             self.observations = {}
+            self.confirmed_at = at
+            self.budget_stale = False
         else:
             self.rows.update(incoming)
             for observation in self.observations.values():
@@ -90,7 +94,7 @@ class Inventory:
     def evidence(self):
         return {
             "status": "known" if self.complete else "unknown",
-            "freshness": "stale" if self.stale else "live",
+            "freshness": "stale" if self.stale or self.budget_stale else "live",
             "observedAt": self.observed_at, "source": self.source,
             "complete": self.complete,
         }

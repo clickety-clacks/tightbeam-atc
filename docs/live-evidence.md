@@ -39,24 +39,32 @@ incomplete results, and diagnostics are not copied into viewer responses.
 The CLI source exposes every required inventory above, including commit-reference
 corrections. This is a source finding; an exact-package execution remains pending.
 Bootstrap and feed-gap recovery still cover every required scope. Normal intervals
-refresh the six base inventories and at most 32 existing history scopes in a fair
-rotation; newly discovered scopes are additional actual gaps. Reads run on a
+refresh the six base inventories and at most 32 terminal history scopes in a fair
+rotation; newly discovered scopes are additional actual gaps. Active histories
+are scheduled independently with a 15-minute refresh target and a 30-minute
+maximum confirmation age. Each pass queues at most 32 active reads. Reads run on a
 bounded worker pool, leaving feed application on the model worker. A notice
 received during a read invalidates that read's epoch; the stale response is
 discarded and reread instead of replacing newer evidence. Targeted reads normally
-go first, with every fourth dispatch reserved for waiting background work.
+go first, with every fourth dispatch reserved for waiting reconciliation. Due
+active scopes precede terminal history, including during initial recovery.
 
 The exact CLI exposes `attests <assignmentId>` with a complete history, but no
 bulk or incremental attest read. Therefore the scope budget bounds scheduled
 history reads, not response bytes, history length, or pages inside one scope.
 Complete inventories are never replaced with a recent-history approximation.
 Base inventories also have no fixed row-count bound. Actual cost remains unmeasured.
-With 16,000 history scopes, 32 per 300-second interval implies a nominal 41.7-hour
+With 16,000 terminal history scopes, 32 per 300-second interval implies a nominal 41.7-hour
 rotation, potentially longer with slow or failed reads. Feed notices still take
 the targeted path immediately. This is a visible freshness tradeoff, not evidence
-of five-minute recovery for every unannounced historical change. The model exposes
-`historyScopes`, `scopeBudget`, `estimatedSweepMs`, `lastSweepAt`, and per-fact
-`observedAt`; the estimate is not a completion guarantee.
+of five-minute recovery for every unannounced historical change. It is not active
+freshness and is not a measured cold-start time. The model exposes `active` and
+`history` groups with scope counts, unknown confirmation counts and oldest complete
+confirmation timestamps. Active over-budget scopes become stale at their deadline;
+the status transition is published, while the viewer ticks ages locally.
+`historyScopes` remains the total maintained scope count; `estimatedSweepMs` now
+describes only terminal rotation. See the [metadata contract](../README.md).
+No scheduling estimate proves achieved freshness or acceptable read load.
 
 The service subscribes before reading initial state. It processes incoming
 changes while published reads execute in the background.
@@ -126,4 +134,7 @@ classes, targeted gaps, partial/failed reads, disconnect/sequence recovery,
 unannounced interval recovery, and event-to-model latency at representative
 scale. Record request counts and payload counts separately. Viewer interaction
 and retention need verification on the exact integrated service/viewer subject.
+Record realistic active-scope count, achieved active reconfirmation time and read
+load; a missed 30-minute budget at acceptable load remains an unresolved delivery
+limit, not grounds to extend the budget silently.
 No synthetic test result substitutes for these observations.

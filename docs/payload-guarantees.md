@@ -52,6 +52,15 @@ No published global bulk/incremental attest read was found: the CLI exposes only
 `attests <assignmentId>`. Rotating complete scopes therefore has the cost/freshness
 tradeoff documented in [live-evidence.md](live-evidence.md).
 
+Announced changes use the payload/read paths above promptly. Unannounced changes
+use a separate backstop: active histories target a complete reconfirmation every
+15 minutes and become stale at 30 minutes without one. Terminal histories retain
+the bounded interval rotation and may have multi-day ages. Payloads and detail
+reads update individual facts but cannot reset the complete-scope confirmation
+clock. Active/history counts and oldest confirmation timestamps are separate in
+the full-model/delta metadata; the nominal 41.7-hour example applies to 16,000
+terminal scopes, not current-activity freshness or measured startup performance.
+
 Users, devices, read markers, condition facts, critical-state, config, host
 environment, hosts, identity and kungfu do not supply facts to this ATC model.
 They are outside its maintained resource set, not denied source guarantees.
@@ -100,3 +109,7 @@ read-count benchmark, or scale/cold-start measurement has been collected. All
 new tests are authored and unrun. Published source guarantees justify the selected
 algorithms; they are not a substitute for the required scratch-gateway execution
 on the exact integrated service/viewer revision. That execution remains held.
+Acceptance must also measure realistic active-scope count, achieved active
+confirmation time and read load. If the 30-minute budget cannot be achieved at
+acceptable load, the observed shortfall must be reported; no slower budget is
+silently substituted.
