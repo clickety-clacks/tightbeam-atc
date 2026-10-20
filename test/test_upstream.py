@@ -8,7 +8,7 @@ from atc_upstream import Gateway
 
 
 def page(rows, more=False, cursor=None):
-    return {"items": rows, "page": {
+    return {"schemaVersion": 1, "items": rows, "page": {
         "hasMoreBefore": False, "hasMoreAfter": more, "newestCursor": cursor}}
 
 
@@ -42,3 +42,18 @@ class ReadCompletionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.gateway.command("work-item-close", work_item_id="a")
         self.gateway.request.assert_not_called()
+
+    def test_first_page_with_older_rows_missing_is_partial_even_with_next_page(self):
+        first = page([{"id": "b"}], True, "cursor")
+        first["page"]["hasMoreBefore"] = True
+        self.gateway.request = Mock(return_value=first)
+        result = self.gateway.collection("/api/work-items")
+        self.assertFalse(result.complete)
+        self.assertEqual([{"id": "b"}], result.rows)
+        self.gateway.request.assert_called_once()
+
+    def test_unknown_schema_cannot_establish_complete_or_empty_state(self):
+        unknown = dict(page([]), schemaVersion=2)
+        self.gateway.request = Mock(return_value=unknown)
+        self.assertFalse(self.gateway.collection("/api/work-items").complete)
+        self.assertFalse(self.gateway.detail("work-items", "work").complete)

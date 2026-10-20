@@ -1,0 +1,78 @@
+# Live evidence inventory
+
+Implementation audit for Tightbeam **0.1.9 build 2908**, source
+[`8433d22fdf86027d62a34e9923501775225813ad`](https://github.com/clickety-clacks/tightbeam/tree/8433d22fdf86027d62a34e9923501775225813ad).
+This is a source audit, not a successful gateway acceptance report.
+Real-feed observations and remote verification are pending.
+
+## Read, payload, and recovery paths
+
+| Resource | Initial and interval reads | Notice path | Reason |
+|---|---|---|---|
+| Work items | All pages of `/api/work-items` | Targeted `/api/work-items/:id`; candidate full payload with strict `rowVersion` ordering | Transactional row versions are present. Activation still requires exact-build real-feed evidence. |
+| Assignments | Read command `assignments`, `state=all` | `assignment-get` for the named assignment; read newly introduced attest scopes and holder histories | Corrections are included in the command read. Reopen transitions cannot be ordered safely by assuming timestamp-based versions are monotonic. |
+| Attests | Read command `attests` for every assignment | The named assignment's attest inventory; candidate immutable full payload | Shared evidence fields are normalized across command and feed projections. Append-only semantics still need exact-build real-feed confirmation. |
+| Sessions | All pages of `/api/sessions` | `/api/sessions/:key`; missing or stale visible-session histories | Mutable session fields and topology changes require reads; notices do not cover every change. |
+| Turns | All pages of `/api/sessions/:key/turns` for visible sessions | `/api/turns/:seq` | Started and ended timestamps establish actual running/queued state. A pending wake cannot substitute for a turn. |
+| Wakes | All pages of `/api/sessions/:key/wakes` for visible sessions | `/api/wakes/:id` | Mutable state; targeted read preserves the current row. |
+| Messages | All pages of `/api/sessions/:key/messages` for visible sessions | `/api/sessions/:key/messages/:id` | The source contains message rewrites. The feed registry's append-only label alone is insufficient. |
+| Roles | Complete `role-list` command | Complete `role-list` on role notices | Removal and recreation require inventory reconciliation. This refresh is limited to roles. |
+| Decision requests | All pages of `/api/decision-requests` | `/api/decision-requests/:id` | Mutable state; no verified strict ordering policy. |
+| Artifacts | Complete `artifacts` command | `/api/artifacts/:id` | Metadata only; artifact contents are outside the evidence model. |
+| Canonical merges | Explicit canonical repository/branch registry, ancestry and patch equivalence | Recheck changed commit references asynchronously; expire resolver caches | Git failure is unknown. A removed checkout can recover only through proof in a registered canonical repository. |
+| Annotations and saved cards | ATC-owned JSON persistence | Existing annotation APIs with author attribution | Rebuilding upstream evidence does not replace authored marks. |
+
+`PAYLOAD_BUILDS` is currently empty. No resource is yet enabled for production
+payload application. An exact `(version, build, sha)` match must select a
+reviewed resource policy; a different build falls back to the corresponding
+targeted reads. Tests that inject a policy exercise the algorithm only.
+They do not qualify a gateway build.
+
+The service subscribes before reading initial state. It buffers incoming
+changes, completes the published reads, and then processes those changes.
+Immutable identities deduplicate; strict versions prevent older buffered rows
+from replacing newer reads. Incomplete payload projections use the targeted
+read path, even when their resource policy is enabled.
+
+All pages must succeed before a collection replaces its inventory. An
+incomplete read retains previous rows, records stale evidence, and cannot
+prove absence. A successful detail read establishes that row only, never the
+completeness of its collection. Unknown schema versions fail the read.
+
+Disconnects, missing sequence numbers, protocol errors and stalled heartbeat
+delivery mark evidence stale. Reconnection starts a fresh subscription and
+rebuild. Interval rebuilds recover unannounced corrections, topology changes,
+repairs and lost notices. The interval runs even when notices continue to
+arrive. A heartbeat sequence can include frames allocated but still queued,
+so an ahead watermark alone does not establish loss.
+
+## Primary sources
+
+- [Canonical public serializers and natural row versions](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/state_resources.ex).
+- [Read routes, page cursors and envelopes](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/wire/router.ex).
+- [Feed resource registry](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/firehose/registry.ex)
+  and [publisher projections](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/firehose/publisher.ex).
+- [Work-item transactional row-version increments](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/work_items.ex).
+- [Message rewrite during credential-failure settlement](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/terminal_credential_failure.ex).
+- [Change socket protocol](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/wire/change_socket.ex).
+- [Published package and checksums](https://github.com/clickety-clacks/tightbeam/releases/tag/v0.1.9%2B2908).
+
+The downloaded macOS ARM64 package has SHA-256
+`97f2960da8daf67ec316bdab0f246b1d304a52165ed5366500b8aced731fab1b`,
+matching the release's `SHA256SUMS`. Both the external and bundled provenance
+records identify the source commit above. These checks establish package
+identity; they do not establish runtime correctness.
+
+## Verification still required
+
+Run the unchanged tracked `scripts/test.sh` wrapper in the permitted isolated
+environment. Record the service revision, Python and dependency versions,
+scratch gateway `/version`, release provenance and package checksum. Use a
+fresh base, its own device login and organization key, and seeded records.
+
+Real-response evidence must cover bootstrap completeness, admitted payload
+classes, targeted gaps, partial/failed reads, disconnect/sequence recovery,
+unannounced interval recovery, and event-to-model latency at representative
+scale. Record request counts and payload counts separately. Viewer interaction
+and retention need verification on the exact integrated service/viewer subject.
+No synthetic test result substitutes for these observations.

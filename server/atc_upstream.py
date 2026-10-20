@@ -86,15 +86,17 @@ class Gateway:
                 if cursor is not None:
                     query["after"] = cursor
                 result = self.request(path + "?" + urlencode(query))
+                if result.get("schemaVersion") != 1:
+                    raise ValueError("unsupported collection schema")
                 items, page = result["items"], result["page"]
                 if not isinstance(items, list) or not all(isinstance(r, dict) for r in items):
                     raise ValueError("invalid collection rows")
                 rows.extend(items)
+                if cursor is None and page["hasMoreBefore"] is not False:
+                    raise ValueError("collection did not start at head")
                 if page["hasMoreAfter"] is False:
                     # Starting at the head and walking forward is complete;
                     # a server unexpectedly returning a tail is not.
-                    if cursor is None and page["hasMoreBefore"] is not False:
-                        raise ValueError("collection did not start at head")
                     return Read(rows, True, now_ms(), path)
                 if page["hasMoreAfter"] is not True:
                     raise ValueError("invalid page completion")
@@ -135,10 +137,16 @@ class Gateway:
                 # This read includes unannounced canonical-ref corrections.
                 row = self.command("assignment-get", assignment_id=key)
             elif resource == "messages":
-                row = self.request("/api/sessions/" + quote(scope, safe="") +
-                                   "/messages/" + quote(str(key), safe=""))["item"]
+                response = self.request("/api/sessions/" + quote(scope, safe="") +
+                                        "/messages/" + quote(str(key), safe=""))
+                if response.get("schemaVersion") != 1:
+                    raise ValueError("unsupported detail schema")
+                row = response["item"]
             else:
-                row = self.request("/api/" + resource + "/" + quote(str(key), safe=""))["item"]
+                response = self.request("/api/" + resource + "/" + quote(str(key), safe=""))
+                if response.get("schemaVersion") != 1:
+                    raise ValueError("unsupported detail schema")
+                row = response["item"]
             if not isinstance(row, dict):
                 raise ValueError("invalid detail row")
             return Read([row], True, now_ms(), resource + "/" + str(key))

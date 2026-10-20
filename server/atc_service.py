@@ -9,12 +9,18 @@ import time
 import uuid
 
 from atc_model import EvidenceModel
-from atc_upstream import attest_row, now_ms
+from atc_upstream import ATTEST_FIELDS, attest_row, now_ms
 
 
 # Enabled only after source review and real-feed verification of this build.
 # A different gateway build uses targeted reads until its guarantees are known.
 PAYLOAD_BUILDS = {}
+WORK_ITEM_FIELDS = frozenset((
+    "id", "title", "specRefName", "specRefSha256", "isBug", "ownerUserId",
+    "state", "failReason", "routingWakeId", "slateWakeId", "createdByUser",
+    "createdBySession", "createdInTurnSeq", "createdContextKnown", "createdAt",
+    "priority", "rowVersion",
+))
 RESOURCE_REFS = {
     "work-items": "workItemId", "assignments": "assignmentId",
     "attests": "attestId", "sessions": "sessionKey", "turns": "turnSeq",
@@ -238,8 +244,8 @@ class LiveService:
                 return
         inventory = self.model.inventory(normalized, scope)
         required = {
-            "work-items": {"id", "title", "state", "createdAt", "rowVersion"},
-            "attests": {"id", "assignmentId", "kind", "ts", "commitRefs"},
+            "work-items": WORK_ITEM_FIELDS,
+            "attests": set(ATTEST_FIELDS),
             "messages": {"id", "sessionKey", "sender", "at"},
         }.get(resource, set())
         applied = False
@@ -262,12 +268,25 @@ class LiveService:
             # attest scope; an existing complete inventory needs no reread.
             if not self.model.inventory("attests", str(key)).complete:
                 self._refresh("attests", str(key))
+            assignment = self.model.inventory("assignments").rows.get(str(key), {})
+            holder = assignment.get("holderKey")
+            if assignment.get("state") == "open" and holder:
+                if holder not in self.model.inventory("sessions").rows:
+                    self._refresh("sessions", key=holder)
+                self._session_histories(holder)
         if resource == "sessions" and key is not None:
-            for nested in ("turns", "wakes", "messages"):
-                if not self.model.inventory(nested, str(key)).complete:
-                    self._refresh(nested, str(key))
+            if any(s["sessionKey"] == str(key) for s in self.model.active_sessions()):
+                self._session_histories(str(key))
         if resource in {"attests", "assignments", "work-items"}:
             self._resolve_merges()
+
+    def _session_histories(self, key):
+        # An assignment can bring a retired holder back into view without a
+        # session notice. Previously unused or stale histories are actual gaps.
+        for nested in ("turns", "wakes", "messages"):
+            inventory = self.model.inventory(nested, key)
+            if not inventory.complete or inventory.stale:
+                self._refresh(nested, key)
 
     def _worker(self):
         while not self.stop_event.is_set():

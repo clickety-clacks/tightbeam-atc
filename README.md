@@ -284,9 +284,9 @@ retained stale rows after an incomplete rebuild; clients must keep them in scope
 
 ## Tests
 
-The existing suite entry point is:
+Run the tracked wrapper, which invokes the existing suite command unchanged:
 
-    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test -v
+    ./scripts/test.sh
 
 Tests exercise evidence meanings, read completeness, recovery, real temporary Git
 repositories and the service/viewer transport. Live gateway acceptance uses seeded
