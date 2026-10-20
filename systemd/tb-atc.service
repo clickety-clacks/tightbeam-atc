@@ -1,12 +1,13 @@
 [Unit]
-Description=Tightbeam Air Traffic Control (page + control API)
+Description=Tightbeam Air Traffic Control (live model and viewer)
 After=network.target
 
 [Service]
 Environment=TB_ATC_HOST=127.0.0.1
 Environment=TB_ATC_PORT=8787
 Environment=TB_ATC_WEB=%h/.local/share/tb-atc/web
-ExecStart=%h/.local/bin/tb-atc-api
+EnvironmentFile=%h/.config/tb-atc/service.env
+ExecStart=%h/.local/share/tb-atc/.venv/bin/python %h/.local/share/tb-atc/server/tb-atc-api.py
 Restart=always
 RestartSec=2
 
