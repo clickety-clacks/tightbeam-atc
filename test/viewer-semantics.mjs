@@ -145,7 +145,9 @@ assert.equal(isEvidencePage(page, {itemId: 'wi-1', generation: 'service-a', revi
 assert.equal(isEvidencePage(page, {itemId: 'wi-1', generation: 'service-a', revision: 10}), false);
 assert.equal(isEvidencePage({...page, nextOffset: '10'},
   {itemId: 'wi-1', generation: 'service-a', revision: 9}), false);
-assert.equal(isEvidencePage({...page, freshness: {...page.freshness, state: 'live'}},
+assert.equal(isEvidencePage({...page, freshness: {
+  status: 'known', state: 'live', observedAt: 1000, source: ['work-items'], complete: true,
+}},
   {itemId: 'wi-1', generation: 'service-a', revision: 9}), false);
 assert.equal(evidencePageFreshness(page.freshness), 'live');
 assert.equal(evidencePageFreshness({...page.freshness, freshness: 'stale'}), 'stale');
