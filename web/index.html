@@ -319,7 +319,7 @@ import * as THREE from 'three';
 import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts, evidencePageQuery,
          factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, isModelEnvelope, knownStage,
-         ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
+         reconciliationFreshness, ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
 import { OrbitControls } from './addons/controls/OrbitControls.js';
 import { LineSegments2 } from './addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from './addons/lines/LineSegmentsGeometry.js';
@@ -2170,7 +2170,9 @@ function renderModelStatus(now=Date.now()){
     return;
   }
   const f = DATA.freshness || {};
-  const state = streamState==='stale' ? 'stale' : (f.state || 'unknown');
+  const backstop = reconciliationFreshness(f.reconciliation, now);
+  const state = streamState==='stale' || backstop?.announcedChanges==='stale'
+    || backstop?.active.stale ? 'stale' : (f.state || 'unknown');
   const counts = evidenceCounts(DATA);
   const age = factAge(DATA.generatedAt, now);
   el.textContent = `${state} · ${DATA.agents.length} agents · ${DATA.items.length} items · `
@@ -2179,20 +2181,49 @@ function renderModelStatus(now=Date.now()){
     : state==='rebuilding' ? 'rebuilding' : 'unknown';
   const sweepAge = f.reconciliation && typeof f.reconciliation==='object'
     ? factAge(f.reconciliation.lastSweepAt, now) : 'unknown';
+  const groupDetails = (label, group) => {
+    if (!group) return `${label}: unknown (service metadata unavailable)`;
+    if (group.scopeCount===0) return `${label}: no scopes`;
+    const confirmationAge = group.ageMs===null ? 'unknown age (no complete confirmation yet)'
+      : `${durationLabel(group.ageMs)} since the oldest successful complete read`;
+    return `${label}: ${group.scopeCount} scopes · ${group.unconfirmedScopes} unconfirmed · ${confirmationAge}`;
+  };
+  const activeBudgetDetail = backstop
+    ? `${backstop.active.overBudgetScopes} reported over-budget scopes`
+      + (backstop.active.agePastBudget && backstop.active.overBudgetScopes===0
+        ? ' · oldest confirmation age also exceeds the budget' : '')
+    : '';
+  const activeBackstop = backstop
+    ? `Active backstop: ${backstop.active.stale ? 'stale' : 'within budget'} · `
+      + `${activeBudgetDetail} · `
+      + `confirmation budget ${durationLabel(backstop.activeBudgetMs)} · `
+      + `refresh target ${durationLabel(backstop.activeRefreshMs)} · `
+      + `recent-activity window ${durationLabel(backstop.recentWindowMs)} · `
+      + groupDetails('active', backstop.active)`
+    : 'Active backstop: unknown (service metadata unavailable)';
+  const historyBackstop = backstop
+    ? groupDetails('Terminal-history backstop', backstop.history)
+      + ` · estimated rotation ${durationLabel(f.reconciliation?.estimatedSweepMs)}`
+    : 'Terminal-history backstop: unknown (service metadata unavailable)';
+  const reconciliation = f.reconciliation && typeof f.reconciliation==='object'
+    ? `Reconciliation: ${f.reconciliation.mode || 'unknown'} · `
+      + `${Number.isFinite(f.reconciliation.pendingScopes) ? f.reconciliation.pendingScopes : 'unknown'} pending / `
+      + `${Number.isFinite(f.reconciliation.totalScopes) ? f.reconciliation.totalScopes : 'unknown'} cycle scopes · `
+      + `budget ${Number.isFinite(f.reconciliation.scopeBudget) ? f.reconciliation.scopeBudget : 'unknown'} · `
+      + `maintained scopes ${Number.isFinite(f.reconciliation.historyScopes) ? f.reconciliation.historyScopes : 'unknown'} · `
+      + `last sweep ${sweepAge==='unknown' ? 'unknown' : sweepAge + ' ago'}`
+    : 'Reconciliation: unknown';
   const details = [
     `Gateway version: ${DATA.gatewayVersion || 'unknown'}`,
     `Service freshness: ${f.state || 'unknown'}`,
-    'Freshness: announced feed changes are applied live; unannounced changes are caught by background sweeps.',
+    `Announced changes: ${backstop?.announcedChanges || 'unknown'} at the latest service publication (feed delivery, not proof that unannounced changes are absent)`,
+    `Unannounced changes: ${backstop?.unannouncedChanges || 'unknown'} by background confirmation sweeps`,
+    activeBackstop,
+    historyBackstop,
     `Freshness since: ${factAge(f.since, now)} ago`,
     `Last complete read: ${factAge(f.lastCompleteAt, now)} ago`,
     Number.isFinite(f.rebuildIntervalMs) ? `Rebuild interval: ${Math.round(f.rebuildIntervalMs/1000)}s` : 'Rebuild interval: unknown',
-    f.reconciliation && typeof f.reconciliation==='object' ? `Reconciliation: ${f.reconciliation.mode || 'unknown'} · `
-      + `${Number.isFinite(f.reconciliation.pendingScopes) ? f.reconciliation.pendingScopes : 'unknown'} pending / `
-      + `${Number.isFinite(f.reconciliation.totalScopes) ? f.reconciliation.totalScopes : 'unknown'} scopes · `
-      + `budget ${Number.isFinite(f.reconciliation.scopeBudget) ? f.reconciliation.scopeBudget : 'unknown'} · `
-      + `history ${Number.isFinite(f.reconciliation.historyScopes) ? f.reconciliation.historyScopes : 'unknown'} · `
-      + `estimated sweep ${durationLabel(f.reconciliation.estimatedSweepMs)} · `
-      + `last sweep ${sweepAge==='unknown' ? 'unknown' : sweepAge + ' ago'}` : 'Reconciliation: unknown',
+    reconciliation,
     f.reason ? `Reason: ${f.reason}` : null,
     streamError ? `Connection: ${streamError}` : 'Connection: event stream open',
     'Input: pointer and touch events; no separate gaze signal is exposed to this page.',

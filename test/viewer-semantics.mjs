@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts, evidencePageQuery,
          factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, isModelEnvelope, knownStage,
-         ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from '../web/viewer-semantics.mjs';
+         reconciliationFreshness, ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from '../web/viewer-semantics.mjs';
 
 /* A ghost is still present in the map and remains available for inspection.
    Hiding the node layer or hovering non-node geometry removes that path. */
@@ -36,6 +36,40 @@ assert.equal(shouldAcceptSnapshot(model, model), true);
 assert.equal(shouldAcceptSnapshot({...model, generatedAt: 3000}, model), false);
 assert.equal(shouldAcceptSnapshot({...model, generatedAt: 1000}, model), false);
 assert.equal(shouldAcceptSnapshot({...model, revision: 7, generatedAt: 3000}, model), false);
+
+const backstop = reconciliationFreshness({
+  announcedChanges: 'live', unannouncedChanges: 'swept', activeBudgetMs: 1_800_000,
+  activeRefreshMs: 900_000, recentWindowMs: 1_800_000, activeBatchLimit: 32,
+  active: {scopeCount: 3, unconfirmedScopes: 1, oldestConfirmedAt: 1000, overBudgetScopes: 1},
+  history: {scopeCount: 2, unconfirmedScopes: 2, oldestConfirmedAt: null},
+}, 1_801_000);
+assert.equal(backstop.announcedChanges, 'live');
+assert.equal(backstop.active.ageMs, 1_800_000);
+assert.equal(backstop.active.stale, true);
+assert.equal(backstop.active.overBudgetScopes, 1);
+assert.equal(backstop.history.ageMs, null);
+assert.equal(backstop.history.scopeCount, 2);
+const noScopes = reconciliationFreshness({
+  announcedChanges: 'stale', unannouncedChanges: 'swept', activeBudgetMs: 1_800_000,
+  activeRefreshMs: 900_000, recentWindowMs: 1_800_000,
+  active: {scopeCount: 0, unconfirmedScopes: 0, oldestConfirmedAt: null, overBudgetScopes: 0},
+  history: {scopeCount: 0, unconfirmedScopes: 0, oldestConfirmedAt: null},
+}, 5_000);
+assert.equal(noScopes.active.scopeCount, 0);
+assert.equal(noScopes.active.ageMs, null);
+assert.equal(noScopes.active.stale, false);
+const neverConfirmedMetadata = {
+  announcedChanges: 'live', unannouncedChanges: 'swept', activeBudgetMs: 1_800_000,
+  activeRefreshMs: 900_000, recentWindowMs: 1_800_000,
+  active: {scopeCount: 2, unconfirmedScopes: 2, oldestConfirmedAt: null, overBudgetScopes: 0},
+  history: {scopeCount: 0, unconfirmedScopes: 0, oldestConfirmedAt: null},
+};
+const neverConfirmed = reconciliationFreshness(neverConfirmedMetadata, 5_000);
+assert.equal(neverConfirmed.active.scopeCount, 2);
+assert.equal(neverConfirmed.active.ageMs, null);
+assert.equal(neverConfirmed.active.stale, false);
+assert.equal(reconciliationFreshness({...neverConfirmedMetadata,
+  active: {...neverConfirmedMetadata.active, unconfirmedScopes: 1}}, 5_000), null);
 
 const deltaBase = {...model,
   agents: [{id: 'agent-1', name: 'old', idleFor: 20,

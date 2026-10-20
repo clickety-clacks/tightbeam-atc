@@ -70,6 +70,57 @@ export function isModelDelta(delta) {
   });
 }
 
+/* Reconciliation timestamps are the last successful complete read for each
+   group. The viewer turns them into ages locally so an unchanged service
+   revision can still show an active scope crossing its budget. */
+export function reconciliationFreshness(reconciliation, now = Date.now()) {
+  if (!reconciliation || typeof reconciliation !== 'object' || Array.isArray(reconciliation)
+      || !Number.isFinite(now)
+      || !['live', 'stale'].includes(reconciliation.announcedChanges)
+      || reconciliation.unannouncedChanges !== 'swept'
+      || !Number.isFinite(reconciliation.activeBudgetMs) || reconciliation.activeBudgetMs <= 0
+      || !Number.isFinite(reconciliation.activeRefreshMs) || reconciliation.activeRefreshMs <= 0
+      || !Number.isFinite(reconciliation.recentWindowMs) || reconciliation.recentWindowMs <= 0) return null;
+
+  const group = (value, active = false) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || !Number.isInteger(value.scopeCount) || value.scopeCount < 0
+        || !Number.isInteger(value.unconfirmedScopes) || value.unconfirmedScopes < 0
+        || value.unconfirmedScopes > value.scopeCount
+        || !(value.oldestConfirmedAt === null
+          || (Number.isFinite(value.oldestConfirmedAt) && value.oldestConfirmedAt >= 0))) return null;
+    if ((value.scopeCount === 0 && value.oldestConfirmedAt !== null)
+        || (value.oldestConfirmedAt === null && value.unconfirmedScopes !== value.scopeCount)
+        || (value.oldestConfirmedAt !== null && value.unconfirmedScopes === value.scopeCount)) return null;
+    if (active && (!Number.isInteger(value.overBudgetScopes) || value.overBudgetScopes < 0
+        || value.overBudgetScopes > value.scopeCount - value.unconfirmedScopes)) return null;
+    const ageMs = value.oldestConfirmedAt === null
+      ? null : Math.max(0, now - value.oldestConfirmedAt);
+    const agePastBudget = active && ageMs !== null && ageMs >= reconciliation.activeBudgetMs;
+    return {
+      scopeCount: value.scopeCount,
+      unconfirmedScopes: value.unconfirmedScopes,
+      ageMs,
+      ...(active ? {overBudgetScopes: value.overBudgetScopes,
+        agePastBudget,
+        stale: value.overBudgetScopes > 0 || agePastBudget} : {}),
+    };
+  };
+
+  const active = group(reconciliation.active, true);
+  const history = group(reconciliation.history);
+  if (!active || !history) return null;
+  return {
+    announcedChanges: reconciliation.announcedChanges,
+    unannouncedChanges: reconciliation.unannouncedChanges,
+    activeBudgetMs: reconciliation.activeBudgetMs,
+    activeRefreshMs: reconciliation.activeRefreshMs,
+    recentWindowMs: reconciliation.recentWindowMs,
+    active,
+    history,
+  };
+}
+
 function applyCollection(rows, change) {
   const next = new Map(rows.map(row => [row.id, row]));
   change.remove.forEach(id => next.delete(id));
