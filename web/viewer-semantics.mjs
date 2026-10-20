@@ -5,6 +5,15 @@ export function canInspectNode({type, layerVisible}) {
 
 const RING_VALUES = new Set(['black', 'green', 'light-gray', 'yellow']);
 const FRESHNESS_VALUES = new Set(['live', 'stale', 'rebuilding']);
+const MODEL_COLLECTIONS = ['agents', 'items', 'links', 'wakes', 'messages'];
+const owns = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+const rowsHaveStableIds = rows => {
+  const ids = new Set();
+  return rows.every(row => {
+    if (!row || typeof row.id !== 'string' || !row.id.length || ids.has(row.id)) return false;
+    ids.add(row.id); return true;
+  });
+};
 
 export function isModelEnvelope(model) {
   return Boolean(model && model.schemaVersion === 1
@@ -12,16 +21,106 @@ export function isModelEnvelope(model) {
     && Number.isInteger(model.revision) && model.revision >= 0
     && Number.isFinite(model.generatedAt)
     && ['agents', 'items', 'links', 'wakes', 'messages'].every(k => Array.isArray(model[k]))
-    && model.agents.every(row => row && typeof row.id === 'string' && row.id.length > 0)
-    && model.items.every(row => row && typeof row.id === 'string' && row.id.length > 0)
-    && ['links', 'wakes', 'messages'].every(k => model[k].every(row => row && typeof row === 'object'))
-    && model.freshness && FRESHNESS_VALUES.has(model.freshness.state));
+    && MODEL_COLLECTIONS.every(k => rowsHaveStableIds(model[k]))
+    && model.freshness && !Array.isArray(model.freshness)
+    && FRESHNESS_VALUES.has(model.freshness.state)
+    && (!owns(model.freshness, 'reconciliation') || model.freshness.reconciliation === null
+      || (model.freshness.reconciliation && typeof model.freshness.reconciliation === 'object'
+        && !Array.isArray(model.freshness.reconciliation)))
+    && (!owns(model, 'gatewayVersion') || model.gatewayVersion === null || typeof model.gatewayVersion === 'string')
+    && (!owns(model, 'metrics') || model.metrics === null || (model.metrics && typeof model.metrics === 'object'
+      && !Array.isArray(model.metrics))));
+}
+
+export function isModelDelta(delta) {
+  if (!delta || delta.schemaVersion !== 1
+      || typeof delta.generation !== 'string' || !delta.generation.length
+      || !Number.isInteger(delta.baseRevision) || delta.baseRevision < 0
+      || !Number.isInteger(delta.revision) || delta.revision <= delta.baseRevision
+      || !Number.isFinite(delta.generatedAt)
+      || !delta.freshness || Array.isArray(delta.freshness) || !FRESHNESS_VALUES.has(delta.freshness.state)
+      || !owns(delta.freshness, 'reconciliation')
+      || (delta.freshness.reconciliation !== null
+        && (!delta.freshness.reconciliation || typeof delta.freshness.reconciliation !== 'object'
+          || Array.isArray(delta.freshness.reconciliation)))
+      || !owns(delta, 'gatewayVersion')
+      || (delta.gatewayVersion !== null && typeof delta.gatewayVersion !== 'string')
+      || !owns(delta, 'metrics')
+      || (delta.metrics !== null && (!delta.metrics || typeof delta.metrics !== 'object' || Array.isArray(delta.metrics)))
+      || !delta.changes || typeof delta.changes !== 'object') return false;
+
+  return MODEL_COLLECTIONS.every(name => {
+    const change = delta.changes[name];
+    if (!change || !Array.isArray(change.upsert) || !Array.isArray(change.remove)) return false;
+    const ids = new Set();
+    for (const row of change.upsert) {
+      if (!row || typeof row.id !== 'string' || !row.id.length || ids.has(row.id)) return false;
+      ids.add(row.id);
+    }
+    const removed = new Set();
+    for (const id of change.remove) {
+      if (typeof id !== 'string' || !id.length || removed.has(id) || ids.has(id)) return false;
+      removed.add(id);
+    }
+    return true;
+  });
+}
+
+function applyCollection(rows, change) {
+  const next = new Map(rows.map(row => [row.id, row]));
+  change.remove.forEach(id => next.delete(id));
+  change.upsert.forEach(row => next.set(row.id, row));
+  return [...next.values()];
+}
+
+/* A delta is atomic: reject the entire envelope unless it is based on the
+   exact model currently held by the viewer. Upserts replace complete rows. */
+export function applyModelDelta(current, delta) {
+  if (!isModelEnvelope(current) || !isModelDelta(delta)
+      || delta.generation !== current.generation
+      || delta.baseRevision !== current.revision) return null;
+
+  const {baseRevision, changes, ...metadata} = delta;
+  const next = {...current, ...metadata};
+  for (const name of MODEL_COLLECTIONS)
+    next[name] = applyCollection(current[name], changes[name]);
+  return isModelEnvelope(next) ? next : null;
+}
+
+export function agentSampleTimes(currentTimes, model, {fullSnapshot = false, upsertedIds = []} = {}) {
+  const next = fullSnapshot ? new Map() : new Map(currentTimes || []);
+  const present = new Set(model.agents.map(agent => agent.id));
+  for (const id of next.keys()) if (!present.has(id)) next.delete(id);
+  if (fullSnapshot) model.agents.forEach(agent => next.set(agent.id, model.generatedAt));
+  else upsertedIds.forEach(id => { if (present.has(id)) next.set(id, model.generatedAt); });
+  return next;
+}
+
+export function isEvidencePage(page, {itemId, generation, revision, offset=0} = {}) {
+  return Boolean(Number.isInteger(offset) && offset >= 0
+    && page && page.itemId === itemId && page.generation === generation
+    && page.revision === revision && Array.isArray(page.records)
+    && page.records.every(record => record && typeof record === 'object' && !Array.isArray(record))
+    && Number.isInteger(page.total) && page.total >= 0
+    && (page.nextOffset === null || (Number.isInteger(page.nextOffset)
+      && page.nextOffset === offset + page.records.length && page.nextOffset <= page.total))
+    && typeof page.complete === 'boolean'
+    && page.freshness && typeof page.freshness === 'object' && !Array.isArray(page.freshness));
 }
 
 export function shouldAcceptModel(next, current) {
   if (!isModelEnvelope(next)) return false;
   return !current || next.generation !== current.generation
     || next.revision > current.revision;
+}
+
+/* Full snapshots can rebaseline sampled fields after a reconnect even when
+   the semantic model revision has not changed. Older snapshots stay ignored. */
+export function shouldAcceptSnapshot(next, current) {
+  if (!isModelEnvelope(next)) return false;
+  return !current || next.generation !== current.generation
+    || next.revision > current.revision
+    || (next.revision === current.revision && next.generatedAt >= current.generatedAt);
 }
 
 /* Clock, freshness, and evidence-age repaints do not change scene geometry.
@@ -81,10 +180,11 @@ export function factValue(entity, fact, value) {
 export function idleAgeSeconds(agent, generatedAt, now = Date.now()) {
   const idle = factValue(agent, 'idleFor', agent?.idleFor);
   const evidence = agent?.evidence?.idleFor;
-  if (!idle.known || !Number.isFinite(idle.value) || evidence?.complete === false) return null;
-  const reported = Math.max(0, idle.value);
-  if (evidence.freshness !== 'live' || !Number.isFinite(generatedAt) || !Number.isFinite(now))
-    return reported;
+  if (!idle.known || evidence?.complete === false) return null;
+  const reported = Number.isFinite(idle.value) ? Math.max(0, idle.value) : null;
+  if (evidence.freshness !== 'live' || !Number.isFinite(now)) return reported;
+  if (Number.isFinite(agent?.idleSince)) return Math.max(0, (now - agent.idleSince) / 1000);
+  if (reported === null || !Number.isFinite(generatedAt)) return null;
   return Math.max(0, reported + (now - generatedAt) / 1000);
 }
 

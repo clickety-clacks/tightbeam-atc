@@ -187,10 +187,19 @@
   #detail .k { color:#7c8188; text-transform:uppercase; letter-spacing:.12em;
     font-size:9.5px; display:block; margin:10px 0 3px; }
   #detail .evidence-row { display:block; margin:2px 0; }
+  #detail .evidence-notes { margin-top:8px; padding-top:6px; border-top:1px solid #3a3d42; }
+  #detail .evidence-note { margin:6px 0; padding-left:8px; border-left:2px solid #5b6068; }
+  #detail .evidence-note-text { white-space:pre-wrap; }
+  #detail .evidence-action { margin-top:6px; border:1px solid #50555d; border-radius:4px;
+    padding:5px 8px; background:#25292e; color:#d8d6d1; font:inherit; cursor:pointer; }
+  #detail .evidence-action:disabled { opacity:.55; cursor:default; }
   body.light #detail { background:#faf7eef7; border-color:#b8c7d9;
     border-left-color:#c23b22; color:#26323c; }
   body.light #detail .t { color:#c23b22; }
   body.light #detail .seg, body.light #detail .k { color:#5c6b78; }
+  body.light #detail .evidence-notes { border-color:#c3cdd8; }
+  body.light #detail .evidence-note { border-color:#8a97a3; }
+  body.light #detail .evidence-action { border-color:#aab8c6; background:#f0ece2; color:#26323c; }
   @media (max-aspect-ratio: 1/1){
     #detail { top:auto; left:18px; right:18px; width:auto;
       bottom:calc(14px + env(safe-area-inset-bottom)); max-height:46vh; }
@@ -307,9 +316,10 @@
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
-import { canInspectNode, evidenceCounts, factAge, factCountValue, factListValue,
-         factValue, idleAgeSeconds, isModelEnvelope, knownStage,
-         ringMeaning, sceneSignature, shouldAcceptModel } from './viewer-semantics.mjs';
+import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts,
+         factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
+         isEvidencePage, isModelDelta, isModelEnvelope, knownStage,
+         ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
 import { OrbitControls } from './addons/controls/OrbitControls.js';
 import { LineSegments2 } from './addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from './addons/lines/LineSegmentsGeometry.js';
@@ -411,7 +421,11 @@ layerCards.addEventListener('click', ev => {
 renderLayerCards();
 
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
-let streamState = 'connecting', streamError = null, modelEventSource = null;
+let streamState = 'connecting', streamError = null, modelEventSource = null, resyncTimer = null;
+let agentSamples = new Map();
+const itemEvidencePages = new Map();
+const itemEvidenceNotices = new Map();
+const EVIDENCE_PAGE_SIZE = 100;
 let flight = null, orbitAngle = 0, arrowFrame = 0;
 
 /* ---------- view state ----------
@@ -1483,7 +1497,7 @@ function renderLegend(){
 
 function agentActivityColor(a, now=Date.now()){
   const IDLE_FULL = 3600;
-  const reportedAge = idleAgeSeconds(a, DATA?.generatedAt, now);
+  const reportedAge = idleAgeSeconds(a, agentSamples.get(a.id) ?? DATA?.generatedAt, now);
   const age = reportedAge===null ? null : Math.min(reportedAge, IDLE_FULL);
   return a.retired ? T.retired : age===null ? T.factUnknown
     : new THREE.Color(T.liveHot).lerp(new THREE.Color(T.liveCold), age / IDLE_FULL).getHex();
@@ -2153,14 +2167,22 @@ function renderModelStatus(now=Date.now()){
   const counts = evidenceCounts(DATA);
   const age = factAge(DATA.generatedAt, now);
   el.textContent = `${state} · ${DATA.agents.length} agents · ${DATA.items.length} items · `
-    + `${counts.stale} stale · ${counts.rebuilding} rebuilding · ${counts.unknown} unknown · model ${age} old`;
+    + `${counts.stale} stale · ${counts.rebuilding} rebuilding · ${counts.unknown} unknown · snapshot age ${age}`;
   el.className = state==='live' ? 'live' : state==='stale' ? 'stale'
     : state==='rebuilding' ? 'rebuilding' : 'unknown';
+  const sweepAge = f.reconciliation && typeof f.reconciliation==='object'
+    ? factAge(f.reconciliation.lastSweepAt, now) : 'unknown';
   const details = [
+    `Gateway version: ${DATA.gatewayVersion || 'unknown'}`,
     `Service freshness: ${f.state || 'unknown'}`,
     `Freshness since: ${factAge(f.since, now)} ago`,
     `Last complete read: ${factAge(f.lastCompleteAt, now)} ago`,
     Number.isFinite(f.rebuildIntervalMs) ? `Rebuild interval: ${Math.round(f.rebuildIntervalMs/1000)}s` : 'Rebuild interval: unknown',
+    f.reconciliation && typeof f.reconciliation==='object' ? `Reconciliation: ${f.reconciliation.mode || 'unknown'} · `
+      + `${Number.isFinite(f.reconciliation.pendingScopes) ? f.reconciliation.pendingScopes : 'unknown'} pending / `
+      + `${Number.isFinite(f.reconciliation.totalScopes) ? f.reconciliation.totalScopes : 'unknown'} scopes · `
+      + `budget ${Number.isFinite(f.reconciliation.scopeBudget) ? f.reconciliation.scopeBudget : 'unknown'} · `
+      + `last sweep ${sweepAge==='unknown' ? 'unknown' : sweepAge + ' ago'}` : 'Reconciliation: unknown',
     f.reason ? `Reason: ${f.reason}` : null,
     streamError ? `Connection: ${streamError}` : 'Connection: event stream open',
     'Input: pointer and touch events; no separate gaze signal is exposed to this page.',
@@ -2191,18 +2213,29 @@ function refreshModelReferences(model){
   });
   selectables().forEach(mesh=>shadeSelected(mesh, view.selection.has(selKey(mesh))));
 }
-function receiveModel(model){
-  if (!shouldAcceptModel(model, lastModel)) return false;
+function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
+  const acceptedByOrder = fullSnapshot
+    ? shouldAcceptSnapshot(model, lastModel) : shouldAcceptModel(model, lastModel);
+  if (!acceptedByOrder) return false;
   if (!validModelRows(model)){
     streamState='stale'; streamError='invalid model rows ignored'; renderModelStatus(); return false;
   }
   const previous = DATA, previousSignature = lastSceneSignature;
+  const previousSamples = agentSamples;
+  const previousEvidencePages = new Map(itemEvidencePages);
+  const previousEvidenceNotices = new Map(itemEvidenceNotices);
+  const versionChanged = Boolean(lastModel && (model.generation!==lastModel.generation
+    || model.revision!==lastModel.revision));
+  const nextSamples = agentSampleTimes(agentSamples, model,
+    {fullSnapshot, upsertedIds:upsertedAgentIds});
   const nextSignature = sceneSignature(model);
   const sceneChanged = nextSignature !== previousSignature;
   const firstModel = !lastModel;
   const pose = captureModelPose(), savedKeys = preserveViewKeys();
   try {
     DATA = model;
+    agentSamples = nextSamples;
+    if (versionChanged){ itemEvidencePages.clear(); itemEvidenceNotices.clear(); }
     if (sceneChanged){
       clearHover();
       migrateViewKeys();
@@ -2233,6 +2266,9 @@ function receiveModel(model){
     return true;
   } catch (error){
     DATA = previous;
+    agentSamples = previousSamples;
+    itemEvidencePages.clear(); previousEvidencePages.forEach((value,key)=>itemEvidencePages.set(key,value));
+    itemEvidenceNotices.clear(); previousEvidenceNotices.forEach((value,key)=>itemEvidenceNotices.set(key,value));
     restoreViewKeys(savedKeys);
     restoreModelPose(pose);
     /* A failed scene rebuild restores the prior complete model and view. */
@@ -2249,6 +2285,7 @@ function receiveModel(model){
       } catch (rollbackError){ restoredPrevious = false; }
     }
     lastSceneSignature = previousSignature;
+    if (view.focus.stage===1) renderDetail();
     streamState='stale'; streamError=restoredPrevious
       ? 'model rebuild failed; previous model retained'
       : 'model rebuild failed; rendered scene may be incomplete';
@@ -2256,22 +2293,43 @@ function receiveModel(model){
     return false;
   }
 }
+function forceModelResync(reason){
+  streamState='stale'; streamError=reason; renderModelStatus();
+  if (modelEventSource){ modelEventSource.close(); modelEventSource=null; }
+  if (resyncTimer!==null) return;
+  resyncTimer=setTimeout(()=>{ resyncTimer=null; startModelStream(); }, 250);
+}
 function startModelStream(){
   if (typeof EventSource!=='function'){
     streamState='stale'; streamError='this browser does not support EventSource';
     renderModelStatus(); return;
   }
+  if (modelEventSource) return;
   modelEventSource = new EventSource('./api/events');
   modelEventSource.onopen = ()=>{ streamState=DATA ? 'connected' : 'connecting'; streamError=null; renderModelStatus(); };
   modelEventSource.onerror = ()=>{ streamState='stale'; streamError='event stream disconnected; reconnecting'; renderModelStatus(); };
   modelEventSource.addEventListener('model', event=>{
     let model;
     try { model = JSON.parse(event.data); }
-    catch (error){ streamState='stale'; streamError='invalid JSON model event'; renderModelStatus(); return; }
+    catch (error){ forceModelResync('invalid JSON model event'); return; }
     if (!isModelEnvelope(model)){
-      streamState='stale'; streamError='unsupported or incomplete model event'; renderModelStatus(); return;
+      forceModelResync('unsupported or incomplete model snapshot'); return;
+    }
+    if (lastModel && model.generation===lastModel.generation && model.revision<lastModel.revision){
+      forceModelResync('older model snapshot received; requesting current snapshot'); return;
     }
     receiveModel(model);
+  });
+  modelEventSource.addEventListener('delta', event=>{
+    let delta;
+    try { delta = JSON.parse(event.data); }
+    catch (error){ forceModelResync('invalid JSON delta event'); return; }
+    const next = applyModelDelta(lastModel, delta);
+    if (!next){ forceModelResync('model revision gap or invalid delta; requesting full snapshot'); return; }
+    const accepted = receiveModel(next, {fullSnapshot:false,
+      upsertedAgentIds:delta.changes.agents.upsert.map(agent=>agent.id)});
+    if (!accepted || lastModel?.revision!==delta.revision)
+      forceModelResync('delta could not be applied; requesting full snapshot');
   });
 }
 
@@ -2681,6 +2739,36 @@ function evidenceMarkup(entity){
   });
   return '<span class="seg">' + rows.join('') + '</span>';
 }
+function evidenceNotesMarkup(itemId){
+  const page = itemEvidencePages.get(itemId);
+  const matching = page && page.generation===DATA?.generation && page.revision===DATA?.revision;
+  const notice = itemEvidenceNotices.get(itemId);
+  const records = matching ? page.records.map(record=>{
+    const author = [record.author, record.byUser, record.bySession, record.producer]
+      .find(value=>typeof value==='string' && value.length) || 'author unknown';
+    const kind = [record.kind, record.verdictKind].filter(value=>typeof value==='string' && value.length).join(' · ')
+      || 'attest';
+    const age = Number.isFinite(record.ts) ? factAge(record.ts) + ' ago' : 'age unknown';
+    const note = typeof record.note==='string' ? record.note : 'note unavailable';
+    return '<div class="evidence-note"><b>' + esc(kind) + '</b> · ' + esc(author) + ' · '
+      + esc(age) + '<div class="evidence-note-text">' + esc(note) + '</div></div>';
+  }).join('') : '';
+  const label = page?.loading ? 'Loading notes…'
+    : matching && page.nextOffset!==null && page.records.length ? 'Load more notes'
+    : matching ? 'Reload notes' : 'Load attest notes';
+  const disabled = page?.loading ? ' disabled' : '';
+  const status = matching
+    ? `${page.freshness.state || 'unknown freshness'} · ${page.complete ? 'complete inventory' : 'incomplete inventory'} · ${page.records.length} of ${page.total} loaded`
+    : '';
+  const empty = matching && page.records.length===0
+    ? (page.total===0 && page.complete ? 'No attest notes.' : 'No notes returned; inventory may be incomplete.') : '';
+  return '<span class="k">attest notes</span><div class="evidence-notes">'
+    + (status ? '<span class="seg">' + esc(status) + '</span>' : '')
+    + (notice ? '<span class="seg">' + esc(notice) + '</span>' : '')
+    + records + (empty ? '<span class="seg">' + esc(empty) + '</span>' : '')
+    + '<button type="button" class="evidence-action" data-item-evidence-load="' + esc(itemId) + '"'
+    + disabled + '>' + esc(label) + '</button></div>';
+}
 function nodeContent(u, clamp){
   if (u.type === 'item'){
     const w = u.w;
@@ -2721,14 +2809,15 @@ function nodeContent(u, clamp){
       + '<span class="k">evidence age and source</span>' + evidenceMarkup(w)
       + '<span class="k">turns</span><span class="seg">' + acts + '</span>'
       /* the pane has room, and this is the id the CLI will accept */
-      + (clamp ? '' : '<span class="k">id</span><span class="seg">' + esc(w.id) + '</span>');
+      + (clamp ? '' : evidenceNotesMarkup(w.id)
+        + '<span class="k">id</span><span class="seg">' + esc(w.id) + '</span>');
   }
   const a = u.a;
   const openItems = ((DATA&&DATA.items)||[]).filter(w=>w.state==='open');
   const held = openItems.filter(w=>Array.isArray(w.holders) && w.holders.includes(a.id)).length;
   const workload = openItems.some(w=>!Array.isArray(w.holders))
     ? `${held} known · total unknown` : `${held} open item${held===1?'':'s'}`;
-  const idleAge = idleAgeSeconds(a, DATA?.generatedAt);
+  const idleAge = idleAgeSeconds(a, agentSamples.get(a.id) ?? DATA?.generatedAt);
   const idle = factText(a, 'idleFor', idleAge, value=>!Number.isFinite(value) ? 'unknown'
     : value<90 ? 'acted within 1 min'
     : value<3600 ? Math.round(value/60) + ' min since activity'
@@ -2768,6 +2857,62 @@ function renderDetail(){
     detailEl.style.maxHeight = '';
   }
 }
+async function loadItemEvidence(itemId){
+  if (!DATA || !lastModel) return;
+  const generation = DATA.generation, revision = DATA.revision;
+  let page = itemEvidencePages.get(itemId);
+  if (!page || page.generation!==generation || page.revision!==revision){
+    page = {generation, revision, records:[], total:0, nextOffset:0,
+      complete:false, freshness:{state:'unknown'}, loading:false};
+  } else if (page.nextOffset===null){
+    page = {generation, revision, records:[], total:0, nextOffset:0,
+      complete:false, freshness:{state:'unknown'}, loading:false};
+  }
+  if (page.loading) return;
+  const offset = page.nextOffset ?? 0;
+  page.loading = true; itemEvidencePages.set(itemId, page); itemEvidenceNotices.delete(itemId);
+  renderDetail();
+  try {
+    const response = await apiFetch(`/items/${encodeURIComponent(itemId)}/evidence?offset=${offset}&limit=${EVIDENCE_PAGE_SIZE}`);
+    if (DATA?.generation!==generation || DATA?.revision!==revision){
+      if (itemEvidencePages.get(itemId)===page) itemEvidencePages.delete(itemId);
+      if (!itemEvidencePages.has(itemId))
+        itemEvidenceNotices.set(itemId, 'The model changed while notes were loading. Load them again.');
+      renderDetail(); return;
+    }
+    if (response?.generation!==generation || response?.revision!==revision){
+      if (itemEvidencePages.get(itemId)===page) itemEvidencePages.delete(itemId);
+      if (!itemEvidencePages.has(itemId))
+        itemEvidenceNotices.set(itemId, 'Evidence changed during pagination. Load the current notes again.');
+      renderDetail(); return;
+    }
+    if (!isEvidencePage(response, {itemId, generation, revision, offset})){
+      throw new Error('invalid evidence page');
+    }
+    const combined = [...page.records, ...response.records];
+    if ((response.nextOffset!==null && response.nextOffset!==combined.length)
+        || (response.complete && response.nextOffset===null && combined.length!==response.total))
+      throw new Error('inconsistent evidence pagination');
+    page.records = combined;
+    page.total = response.total; page.nextOffset = response.nextOffset;
+    page.complete = response.complete; page.freshness = response.freshness;
+    page.loading = false; itemEvidencePages.set(itemId, page);
+  } catch (error){
+    if (DATA?.generation!==generation || DATA?.revision!==revision){
+      if (itemEvidencePages.get(itemId)===page) itemEvidencePages.delete(itemId);
+      if (!itemEvidencePages.has(itemId))
+        itemEvidenceNotices.set(itemId, 'The model changed while notes were loading. Load them again.');
+    } else {
+      page.loading = false; itemEvidencePages.set(itemId, page);
+      itemEvidenceNotices.set(itemId, 'Attest notes are unavailable. Retry when the service responds.');
+    }
+  }
+  renderDetail();
+}
+detailEl.addEventListener('click', event=>{
+  const button = event.target?.closest?.('button[data-item-evidence-load]');
+  if (button) loadItemEvidence(button.dataset.itemEvidenceLoad);
+});
 
 /* ---------- tooltip ---------- */
 const ray = new THREE.Raycaster(), mouse = new THREE.Vector2(), tip = document.getElementById('tip');
