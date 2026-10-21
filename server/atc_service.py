@@ -712,7 +712,7 @@ class LiveService:
                 url = self.gateway.url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
                 with connect(url + "/ws/changes?protocolVersion=2", proxy=None,
                              ping_interval=None, max_size=None) as connection:
-                    connection.send(json.dumps({"type": "auth", "token": self.gateway.device_token}))
+                    self.gateway.authenticate_feed(connection)
                     auth = json.loads(connection.recv(timeout=30))
                     if auth.get("type") != "auth_result" or auth.get("success") is not True:
                         raise ValueError("feed authentication rejected")

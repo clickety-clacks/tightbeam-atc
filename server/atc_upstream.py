@@ -38,7 +38,7 @@ def attest_row(row):
 
 
 class PackagedCLI:
-    """The packaged CLI owns credential discovery; ATC only requests reads."""
+    """Read-only CLI bridge and its existing provisioned operator login."""
 
     def __init__(self, executable, base_dir, user):
         if not Path(executable).is_absolute() or not Path(base_dir).is_absolute():
@@ -47,6 +47,13 @@ class PackagedCLI:
             raise ValueError("CLI reads require an explicit user")
         self.executable, self.base_dir = executable, base_dir
         self.user = user
+
+    def operator_token(self):
+        # Consume the same provisioned login as the packaged CLI, in place at
+        # runtime. Only the path and user are configuration; no token is copied
+        # into the service environment or passed through a command invocation.
+        with (Path(self.base_dir) / "gateway.json").open() as source:
+            return json.load(source)["cliToken"]
 
     def read(self, verb, **params):
         if verb == "assignments" and params == {"state": "all"}:
@@ -67,7 +74,7 @@ class PackagedCLI:
         env = dict(os.environ)
         # CLI discovery prefers a session in cwd, then explicit endpoint env,
         # then the configured base. Select this base without reading its token.
-        for key in ("TIGHTBEAM_URL", "TIGHTBEAM_TOKEN", "TB_ATC_DEVICE_TOKEN"):
+        for key in ("TIGHTBEAM_URL", "TIGHTBEAM_TOKEN"):
             env.pop(key, None)
         env["TIGHTBEAM_BASE_DIR"] = self.base_dir
         result = subprocess.run(
@@ -83,15 +90,15 @@ class PackagedCLI:
 
 
 class Gateway:
-    def __init__(self, url, device_token, cli):
+    def __init__(self, url, cli):
         self.url = url.rstrip("/")
-        self.device_token = device_token
         self.cli = cli
         self.read_count = 0
         self.count_lock = threading.Lock()
 
     def request(self, path):
-        headers = {"Authorization": "Bearer " + self.device_token}
+        headers = {"Authorization": "Bearer " + self.cli.operator_token()}
+        path += ("&" if "?" in path else "?") + urlencode({"asUser": self.cli.user})
         with self.count_lock:
             self.read_count += 1
         with urlopen(Request(self.url + path, headers=headers),
@@ -102,9 +109,12 @@ class Gateway:
         return result
 
     def version(self):
-        with urlopen(self.url + "/version", timeout=10) as response:
-            result = json.load(response)
+        result = self.request("/version")
         return {key: result[key] for key in ("version", "build", "sha")}
+
+    def authenticate_feed(self, connection):
+        connection.send(json.dumps({"type": "auth", "token": self.cli.operator_token(),
+                                    "asUser": self.cli.user}))
 
     def command(self, verb, **params):
         # This closed set is the adapter's read interface, not a generic

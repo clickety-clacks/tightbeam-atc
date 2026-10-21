@@ -14,7 +14,7 @@ def page(rows, more=False, cursor=None):
 
 class ReadCompletionTest(unittest.TestCase):
     def setUp(self):
-        self.gateway = Gateway("http://example.invalid", "test-device", Mock())
+        self.gateway = Gateway("http://example.invalid", Mock())
 
     def test_walks_every_page_before_claiming_complete(self):
         self.gateway.request = Mock(side_effect=[
@@ -98,7 +98,7 @@ class PackagedCLITest(unittest.TestCase):
     @patch("atc_upstream.subprocess.run")
     def test_cli_failure_is_partial_and_does_not_expose_diagnostics(self, run):
         run.return_value = Mock(returncode=1, stdout="not a result", stderr="private diagnostic")
-        result = Gateway("http://example.invalid", "test-device", self.cli).read("assignments")
+        result = Gateway("http://example.invalid", self.cli).read("assignments")
         self.assertFalse(result.complete)
         self.assertEqual([], result.rows)
         self.assertEqual("ValueError", result.error)
@@ -109,7 +109,7 @@ class PackagedCLITest(unittest.TestCase):
         run.return_value = Mock(returncode=0, stdout=(
             '{"id":"assignment","commitRefCorrections":'
             '[{"actorRef":"author","commitRefs":[{"commit":"abc"}]}]}'))
-        result = Gateway("http://example.invalid", "test-device", self.cli).detail(
+        result = Gateway("http://example.invalid", self.cli).detail(
             "assignments", "assignment")
         self.assertTrue(result.complete)
         self.assertEqual("author", result.rows[0]["commitRefCorrections"][0]["actorRef"])
