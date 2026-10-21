@@ -873,7 +873,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    required = ("TB_ATC_GATEWAY", "TB_ATC_DEVICE_TOKEN", "TB_ATC_CLI",
+    required = ("TB_ATC_GATEWAY", "TB_ATC_CLI",
                 "TB_ATC_CLI_BASE_DIR", "TB_ATC_USER")
     missing = [key for key in required if not os.environ.get(key)]
     if missing:
@@ -881,7 +881,7 @@ if __name__ == "__main__":
     load_tags()
     cli = PackagedCLI(os.environ["TB_ATC_CLI"], os.environ["TB_ATC_CLI_BASE_DIR"],
                       os.environ["TB_ATC_USER"])
-    gateway = Gateway(os.environ["TB_ATC_GATEWAY"], os.environ["TB_ATC_DEVICE_TOKEN"], cli)
+    gateway = Gateway(os.environ["TB_ATC_GATEWAY"], cli)
     resolver = GitResolver(
         os.environ.get("TB_ATC_GIT_CACHE", str(STATE_FILE.parent / "git-cache")),
         host_routes=json.loads(os.environ.get("TB_ATC_HOST_ROUTES", "{}")))

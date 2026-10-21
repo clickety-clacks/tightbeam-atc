@@ -2,7 +2,8 @@
 
 Implementation audit for Tightbeam **0.1.9 build 2908**, source
 [`8433d22fdf86027d62a34e9923501775225813ad`](https://github.com/clickety-clacks/tightbeam/tree/8433d22fdf86027d62a34e9923501775225813ad).
-The combined service/viewer candidate passed all **83 mock tests** through the
+Before the operator-login adapter change, the combined service/viewer candidate
+passed all **83 mock tests** through the
 unchanged `./scripts/test.sh` wrapper in an isolated VM. The source audit below
 is separate from runtime gateway evidence. Live-feed, browser, representative-scale,
 real bootstrap and read-load evidence remain unproved pending the later approved
@@ -34,10 +35,22 @@ identity and complete field set; none permits direct deletion. These authored
 policies are based on published source, **not real-feed acceptance evidence**.
 The passing mock suite does not establish those live-feed guarantees.
 
-CLI commands run with an explicit user and target base. The packaged CLI owns
-credential discovery; ATC does not open its credential files or read its token.
-REST and feed traffic use the separate device bearer. CLI read failures become
-incomplete results, and diagnostics are not copied into viewer responses.
+All gateway reads use the existing operator login and the configured user.
+At runtime, the service consumes `cliToken` in place from the target base
+`gateway.json`, matching the packaged CLI provisioned-login route. HTTP reads
+carry `asUser` in the query; change-feed authentication carries `asUser` in its
+auth frame and subscribes with `filters: {}`. CLI inventory reads retain
+`--as-user` and the explicit target base. No device token is required or used,
+and credentials are not copied into environment/unit files, command arguments,
+logs or viewer data. Failed reads remain incomplete, including refusals from
+gateways predating the 0.1.11 operator-read change. There is no alternate auth path.
+
+The credential-consumer source is the packaged CLI
+[`endpoint_from_gateway_file`](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/cli/src/dispatch.rs#L1743).
+The payload policies above remain pinned to their audited source version; the
+authentication change does not qualify another gateway build for payload use.
+Operator-login real-response acceptance remains unproved until the gateway read
+change is merged and exercised with a fresh scratch base and scratch login.
 
 The CLI source exposes every required inventory above, including commit-reference
 corrections. This is a source finding; an exact-package execution remains pending.

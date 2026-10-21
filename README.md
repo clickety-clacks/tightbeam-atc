@@ -100,11 +100,15 @@ for something you typed. Emptying the box releases either kind.
 
 - Python 3.10 or newer, Git, and the pinned dependency in `requirements.txt`.
 - A Tightbeam gateway with protocol-2 change feed and published state reads.
-- An approved device login for the feed and state reads, plus the published
-  Tightbeam CLI and its target base directory for complete inventory reads.
-  The CLI runs as the configured user and can also authorize mutations. ATC
-  invokes only the read commands listed below. ATC does not open the CLI's
-  credential files or pass their tokens to the browser.
+- An existing Tightbeam operator login in the target base directory and the
+  published Tightbeam CLI for complete inventory reads. At runtime, ATC consumes
+  the provisioned login in place from `gateway.json`, as the CLI does. HTTP reads
+  and the org-wide feed use `asUser` with the configured user; CLI reads use
+  `--as-user`. ATC invokes only the read commands listed below.
+- The gateway must support operator-login reads across state collections, session
+  histories and the org-wide feed (the 0.1.11 read change). Older gateways may
+  refuse these reads; ATC then reports incomplete/stale evidence through its
+  existing recovery path. No device login is required or used.
 
 ## Run
 
@@ -114,15 +118,18 @@ static snapshot file.
 
     python3 -m venv .venv
     .venv/bin/pip install -r requirements.txt
-    # Supply TB_ATC_GATEWAY, TB_ATC_DEVICE_TOKEN, TB_ATC_CLI,
+    # Supply TB_ATC_GATEWAY, TB_ATC_CLI,
     # TB_ATC_CLI_BASE_DIR and TB_ATC_USER for the same target gateway.
     .venv/bin/python server/tb-atc-api.py
     # http://127.0.0.1:8787/
 
 `systemd/tb-atc.service` is an example user unit. It expects the checkout and
 virtual environment in `~/.local/share/tb-atc` and service configuration in
-`~/.config/tb-atc/service.env`. Existing annotation files can be retained by
-setting `TB_ATC_STATE` to their path. The former weather generator and watcher
+`~/.config/tb-atc/service.env`. Configure only paths, the gateway URL and user;
+never copy login tokens into the environment or unit file. Credential bytes stay
+in the runtime credential consumer and authenticated gateway requests; they do
+not enter command arguments, logs, model snapshots or viewer data. Existing
+annotation files can be retained by setting `TB_ATC_STATE` to their path. The former weather generator and watcher
 are retired; they are not part of this service.
 
 ## Configuration
@@ -130,10 +137,9 @@ are retired; they are not part of this service.
 | variable | meaning | default |
 |---|---|---|
 | `TB_ATC_GATEWAY` | gateway HTTP(S) base URL | required |
-| `TB_ATC_DEVICE_TOKEN` | approved device token for state reads and org-wide feed | required |
 | `TB_ATC_CLI` | absolute path to the published package's `bin/tightbeam` | required |
-| `TB_ATC_CLI_BASE_DIR` | absolute target gateway base; the CLI reads its own credentials there | required |
-| `TB_ATC_USER` | explicit user for those read commands | required |
+| `TB_ATC_CLI_BASE_DIR` | absolute target gateway base containing the existing operator login | required |
+| `TB_ATC_USER` | explicit user for all gateway reads (`asUser` / `--as-user`) | required |
 | `TB_ATC_HOST` | viewer bind address | `127.0.0.1` |
 | `TB_ATC_PORT` | viewer port | `8787` |
 | `TB_ATC_WEB` | directory holding `index.html` | `../web` |
