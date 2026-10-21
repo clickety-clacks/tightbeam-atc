@@ -18,7 +18,7 @@ from atc_upstream import Gateway, PackagedCLI
 @unittest.skipUnless(os.environ.get("ATC_INTEROP_PACKAGE"),
                      "requires an explicit gateway package for scratch interoperability")
 class OperatorInteropTest(unittest.TestCase):
-    def test_operator_collections_and_org_wide_feed(self):
+    def test_operator_inventories_histories_and_org_wide_feed(self):
         from websockets.sync.client import connect
 
         package = Path(os.environ["ATC_INTEROP_PACKAGE"]).resolve()
@@ -74,10 +74,8 @@ class OperatorInteropTest(unittest.TestCase):
                         expected_sha.startswith(version["sha"]) and len(version["sha"]) >= 7,
                         "runtime gateway source stamp differs from the requested source")
 
-        def command(*args, bootstrap=False):
-            argv = [cli_path, *args]
-            if not bootstrap:
-                argv += ["--as-user", user]
+        def command(*args):
+            argv = [cli_path, *args, "--as-user", user]
             result = subprocess.run(argv, cwd=root, env=env, capture_output=True,
                                     text=True, timeout=30)
             # Do not include command output in failures: it can contain credentials.
@@ -90,7 +88,31 @@ class OperatorInteropTest(unittest.TestCase):
             self.assertFalse(bool(value.get("error")), f"scratch command refused: {args[0]}")
             return value
 
-        command("add-user", user, bootstrap=True)
+        def seed_session():
+            # A first scratch client creates its user and main chat session.
+            # Its bearer is fixture-only: never passed to Gateway or persisted here.
+            device_id = "scratch-session-fixture"
+            with connect(f"ws://127.0.0.1:{port}/ws", proxy=None,
+                         ping_interval=None, open_timeout=10) as fixture:
+                fixture.send(json.dumps({"type": "pair_request", "protocolVersion": 1,
+                                         "deviceId": device_id, "claimedName": user,
+                                         "deviceInfo": {"platform": "test", "model": "fixture"}}))
+                paired = json.loads(fixture.recv(timeout=10))
+                self.assertEqual("pair_result", paired.get("type"))
+                self.assertIs(paired.get("success"), True)
+                self.assertEqual(user, paired.get("userId"))
+            with connect(f"ws://127.0.0.1:{port}/ws", proxy=None,
+                         ping_interval=None, open_timeout=10) as fixture:
+                fixture.send(json.dumps({"type": "auth", "protocolVersion": 1,
+                                         "deviceId": device_id, "token": paired.pop("token"),
+                                         "subscriptions": ["chat"]}))
+                seeded = json.loads(fixture.recv(timeout=10))
+                self.assertEqual("auth_result", seeded.get("type"))
+                self.assertIs(seeded.get("success"), True)
+                self.assertEqual(1, len(seeded.get("sessionKeys", [])))
+                return seeded["sessionKeys"][0]
+
+        session_key = seed_session()
         initial = gateway.read("work-items")
         self.assertTrue(initial.complete, "initial work-item inventory incomplete")
         self.assertEqual([], initial.rows)
@@ -99,6 +121,18 @@ class OperatorInteropTest(unittest.TestCase):
             read = gateway.read(resource)
             self.assertTrue(read.complete, f"incomplete {resource} inventory")
             counts[resource] = len(read.rows)
+
+        sessions = gateway.read("sessions")
+        self.assertTrue(sessions.complete)
+        self.assertIn(session_key, {row["sessionKey"] for row in sessions.rows})
+        session = gateway.detail("sessions", session_key)
+        self.assertTrue(session.complete)
+        self.assertEqual(session_key, session.rows[0]["sessionKey"])
+        history_counts = {}
+        for resource in ("turns", "wakes", "messages"):
+            history = gateway.read(resource, session_key)
+            self.assertTrue(history.complete, f"incomplete per-session {resource}")
+            history_counts[resource] = len(history.rows)
 
         with connect(f"ws://127.0.0.1:{port}/ws/changes?protocolVersion=2",
                      proxy=None, ping_interval=None, max_size=None, open_timeout=10) as stream:
@@ -117,9 +151,14 @@ class OperatorInteropTest(unittest.TestCase):
             for title in ("Scratch inventory one", "Scratch inventory two"):
                 row = command("work-item-create", "--title", title)
                 identifiers.add(row["id"])
+            # A future wake is a real history row without running a provider turn.
+            wake = command("wake", "--session", session_key, "--after", "1h",
+                           "--prompt", "Scratch deferred history fixture")
+            wake_id = wake["wakeId"]
             observed = set()
+            wake_observed = False
             deadline = time.monotonic() + 15
-            while observed != identifiers and time.monotonic() < deadline:
+            while (observed != identifiers or not wake_observed) and time.monotonic() < deadline:
                 event = json.loads(stream.recv(timeout=max(0.1, deadline - time.monotonic())))
                 cursor.accept(event, time.monotonic())
                 if event.get("type") == "change" and event.get("resource") == "work-items":
@@ -127,6 +166,11 @@ class OperatorInteropTest(unittest.TestCase):
                     if key in identifiers:
                         self.assertEqual("upsert", event.get("op"))
                         observed.add(key)
+                if event.get("type") == "change" and event.get("resource") == "wakes":
+                    if event.get("refs", {}).get("wakeId") == wake_id:
+                        self.assertEqual("upsert", event.get("op"))
+                        wake_observed = True
+            self.assertTrue(wake_observed, "org-wide stream missed seeded session wake")
             self.assertEqual(identifiers, observed, "org-wide stream missed seeded work items")
         final = gateway.read("work-items")
         self.assertTrue(final.complete)
@@ -135,12 +179,20 @@ class OperatorInteropTest(unittest.TestCase):
             detail = gateway.detail("work-items", key)
             self.assertTrue(detail.complete)
             self.assertEqual(key, detail.rows[0]["id"])
+        wakes = gateway.read("wakes", session_key)
+        self.assertTrue(wakes.complete)
+        self.assertIn(wake_id, {row["wakeId"] for row in wakes.rows})
+        wake_detail = gateway.detail("wakes", wake_id)
+        self.assertTrue(wake_detail.complete)
+        self.assertEqual(wake_id, wake_detail.rows[0]["wakeId"])
+        history_counts["wakes"] = len(wakes.rows)
         # Emit only nonsecret version/count evidence, never auth frames or raw responses.
         print("ATC_INTEROP_EVIDENCE=" + json.dumps({
             "gateway": version, "gatewaySource": expected_sha,
             "collectionsComplete": True, "initialCounts": counts,
             "workItemsRead": len(final.rows), "workItemDetailsRead": len(identifiers),
             "protocolVersion": 2, "orgWideSubscription": True,
-            "matchingEvents": len(observed), "deviceTokenUsed": False,
-            "sessionHistoriesExercised": False,
+            "matchingWorkItemEvents": len(observed), "matchingWakeEvents": int(wake_observed),
+            "adapterDeviceTokenUsed": False, "scratchDeviceFixtureUsed": True,
+            "sessionHistoriesExercised": True, "sessionHistoryCounts": history_counts,
         }, sort_keys=True), flush=True)
