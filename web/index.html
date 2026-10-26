@@ -422,7 +422,9 @@ layerCards.addEventListener('click', ev => {
 renderLayerCards();
 
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
-let streamState = 'connecting', streamError = null, modelEventSource = null, resyncTimer = null;
+let streamState = 'connecting', streamError = null, startupWarning = null,
+    modelEventSource = null, resyncTimer = null, startupStatusChecked = false,
+    startupStatusPending = null;
 let agentSamples = new Map();
 const itemEvidencePages = new Map();
 const itemEvidenceNotices = new Map();
@@ -2171,7 +2173,7 @@ function validModelRows(model){
 }
 function renderModelStatus(now=Date.now()){
   return renderModelStatusElement(document.getElementById('mode'), {
-    model: DATA, streamState, streamError,
+    model: DATA, streamState, streamError, startupWarning,
   }, now);
 }
 function focusedItemId(){
@@ -2305,10 +2307,33 @@ function forceModelResync(reason){
   if (resyncTimer!==null) return;
   resyncTimer=setTimeout(()=>{ resyncTimer=null; startModelStream(); }, 250);
 }
-function startModelStream(){
+async function startModelStream(){
   if (typeof EventSource!=='function'){
     streamState='stale'; streamError='this browser does not support EventSource';
     renderModelStatus(); return;
+  }
+  if (modelEventSource) return;
+  if (!startupStatusChecked){
+    if (!startupStatusPending){
+      startupStatusPending = apiFetch('/status').then(status=>{
+        startupStatusChecked = true;
+        startupWarning = typeof status.warning==='string' && status.warning.trim()
+          ? status.warning : null;
+        return status;
+      }).catch(()=>{
+        /* An older or temporarily unavailable status route must not block the
+           established event-stream connection and its local disconnect path. */
+        startupStatusChecked = true;
+        return null;
+      }).finally(()=>{ startupStatusPending = null; });
+    }
+    const status = await startupStatusPending;
+    if (status?.liveAvailable === false){
+      streamState='stale';
+      streamError=startupWarning || 'live model is unavailable';
+      renderModelStatus();
+      return;
+    }
   }
   if (modelEventSource) return;
   modelEventSource = new EventSource('./api/events');

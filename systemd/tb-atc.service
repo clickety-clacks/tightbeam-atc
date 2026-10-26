@@ -6,7 +6,7 @@ After=network.target
 Environment=TB_ATC_HOST=127.0.0.1
 Environment=TB_ATC_PORT=8787
 Environment=TB_ATC_WEB=%h/.local/share/tb-atc/web
-EnvironmentFile=%h/.config/tb-atc/service.env
+EnvironmentFile=-%h/.config/tb-atc/service.env
 ExecStart=%h/.local/share/tb-atc/.venv/bin/python %h/.local/share/tb-atc/server/tb-atc-api.py
 Restart=always
 RestartSec=2

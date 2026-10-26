@@ -51,6 +51,29 @@ assert.match(hud.title, /estimated rotation 20d/);
 assert.match(hud.title, /last sweep 4d ago/);
 assert.match(hud.title, /no separate gaze signal/);
 
+const offlineHud = {textContent: '', className: '', title: ''};
+renderModelStatusElement(offlineHud, {
+  model: null, streamState: 'stale', streamError: 'event stream disconnected; reconnecting',
+});
+assert.equal(offlineHud.textContent, 'stale · live model unavailable',
+  'ordinary feed disconnect wording stays unchanged');
+assert.equal(offlineHud.title, 'event stream disconnected; reconnecting');
+
+renderModelStatusElement(offlineHud, {
+  model: null, streamState: 'stale', streamError: 'missing configuration',
+  startupWarning: 'Live model unavailable: missing TB_ATC_GATEWAY.',
+});
+assert.equal(offlineHud.textContent,
+  'Warning: Live model unavailable: missing TB_ATC_GATEWAY.');
+assert.equal(offlineHud.className, 'stale');
+
+renderModelStatusElement(offlineHud, {
+  model: statusModel, streamState: 'connected', streamError: null,
+  startupWarning: 'Live feed is unavailable; using periodic snapshots.',
+}, now);
+assert.match(offlineHud.textContent, /Warning: Live feed is unavailable; using periodic snapshots\.$/);
+assert.match(offlineHud.title, /^Warning: Live feed is unavailable/);
+
 const facts = renderEvidenceMarkup({evidence: {
   stage: {status: 'unknown', freshness: 'stale', observedAt: now - 90_000,
     source: ['work-items'], complete: false},
