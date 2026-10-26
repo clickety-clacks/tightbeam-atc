@@ -29,6 +29,8 @@ function listedFields(fields, label) {
 
 function modelMetadataWarnings(model) {
   const warnings = [];
+  if (model.schemaVersion !== 1)
+    warnings.push('Warning: model schema version is unknown; known entity fields are still displayed.');
   const unknownModelFields = Object.keys(model).filter(key => !MODEL_FIELDS.has(key));
   const modelFieldWarning = listedFields(unknownModelFields, 'model field(s)');
   if (modelFieldWarning) warnings.push(modelFieldWarning);
@@ -101,8 +103,9 @@ function uniqueWarnings(warnings) {
 }
 
 function hasModelIdentity(model) {
-  return Boolean(isRecord(model) && model.schemaVersion === 1
-    && typeof model.generation === 'string' && model.generation.length > 0
+  /* Generation and revision preserve ordering; schema and diagnostics do not
+     gate rows whose known entity fields can still be rendered. */
+  return Boolean(isRecord(model) && typeof model.generation === 'string' && model.generation.length > 0
     && Number.isInteger(model.revision) && model.revision >= 0);
 }
 
@@ -146,8 +149,7 @@ export function prepareModelSnapshot(model, previousModel = null) {
 }
 
 export function isModelDelta(delta) {
-  if (!isRecord(delta) || delta.schemaVersion !== 1
-      || typeof delta.generation !== 'string' || !delta.generation.length
+  if (!isRecord(delta) || typeof delta.generation !== 'string' || !delta.generation.length
       || !Number.isInteger(delta.baseRevision) || delta.baseRevision < 0
       || !Number.isInteger(delta.revision) || delta.revision <= delta.baseRevision
       || !isRecord(delta.changes)) return false;
@@ -248,6 +250,8 @@ export function applyModelDelta(current, delta) {
   const next = {...current, ...metadata};
   const warnings = [...(Array.isArray(current.viewerWarnings) ? current.viewerWarnings : []),
     ...modelMetadataWarnings(next)];
+  if (delta.schemaVersion !== 1)
+    warnings.push('Warning: model schema version is unknown; known entity fields are still displayed.');
   const unknownChangeFields = Object.keys(changes).filter(key => !MODEL_COLLECTIONS.includes(key));
   const changeFieldWarning = listedFields(unknownChangeFields, 'update collection(s)');
   if (changeFieldWarning) warnings.push(changeFieldWarning);

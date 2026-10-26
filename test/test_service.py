@@ -571,19 +571,36 @@ class ServiceRecoveryTest(unittest.TestCase):
                              "refs": {"artifactId": "artifact"}, "payload": dict(artifact, rowVersion=2)})
         self.assertIn(("artifacts", None, "artifact"), self.service.reads.pending)
 
-    def test_unknown_build_keeps_payload_policies_but_unsupported_class_uses_targeted_path(self):
-        from atc_payloads import BUILD_ID, PAYLOAD_POLICIES, policies_for, payload_policy_warning
-        version = dict(zip(("version", "build", "sha"), BUILD_ID))
-        self.assertEqual(PAYLOAD_POLICIES, policies_for(version))
-        self.assertIsNone(payload_policy_warning(version))
-        for patch_values in ({"version": "0.1.11"}, {"build": 2909}, {"sha": "different"}, {"sha": None}):
-            self.assertEqual(PAYLOAD_POLICIES, policies_for(version | patch_values))
-            self.assertIsNotNone(payload_policy_warning(version | patch_values))
-        self.service.policies = policies_for(version)
+    def test_payloads_apply_across_gateway_versions_with_warning_and_targeted_fallback(self):
+        from atc_payloads import BUILD_ID, PAYLOAD_POLICIES, policies_for
+        audited = dict(zip(("version", "build", "sha"), BUILD_ID))
+        versions = [audited, audited | {"version": "0.1.11"}, audited | {"build": 2909},
+                    audited | {"sha": "different"}, None]
+        for index, version in enumerate(versions, start=2):
+            self.assertEqual(PAYLOAD_POLICIES, policies_for(version))
+            self.service._handle("ready", version)
+            self.drain()
+            self.assertEqual(PAYLOAD_POLICIES, self.service.policies)
+            before = self.gateway.read_count
+            title = f"Version {index}"
+            self.service.change({"resource": "work-items", "op": "upsert",
+                                 "class": "work_item.updated", "refs": {"workItemId": "work"},
+                                 "payload": work(title, index)})
+            self.assertEqual(title, self.item()["title"])
+            self.assertEqual(before, self.gateway.read_count)
+            self.assertFalse(self.service.reads.pending)
+            self.service._publish()
+            published = self.service.snapshot()
+            self.assertEqual(version, published["gatewayVersion"])
+            if version == audited:
+                self.assertIsNone(published["payloadWarning"])
+            else:
+                self.assertIn("unverified", published["payloadWarning"])
+
         self.service.change({"resource": "work-items", "op": "upsert", "class": "unknown.class",
-                             "refs": {"workItemId": "work"}, "payload": work("Invalid class", 5)})
+                             "refs": {"workItemId": "work"}, "payload": work("Invalid class", 99)})
         self.assertIn(("work-items", None, "work"), self.service.reads.pending)
-        self.assertEqual("First", self.item()["title"])
+        self.assertEqual("Version 6", self.item()["title"])
 
     def test_active_budget_expiry_publishes_stale_without_clock_only_deltas(self):
         from atc_reconciliation import ACTIVE_BUDGET_MS

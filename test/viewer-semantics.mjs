@@ -3,7 +3,8 @@ import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts, evid
          evidencePageQuery, evidenceRecordAuthor,
          factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, isModelEnvelope, knownStage,
-         reconciliationFreshness, ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from '../web/viewer-semantics.mjs';
+         prepareModelSnapshot, reconciliationFreshness, renderModelStatusElement,
+         ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from '../web/viewer-semantics.mjs';
 
 /* A ghost is still present in the map and remains available for inspection.
    Hiding the node layer or hovering non-node geometry removes that path. */
@@ -32,11 +33,37 @@ assert.equal(shouldAcceptModel(model, null), true);
 assert.equal(shouldAcceptModel({...model, revision: 8}, model), false);
 assert.equal(shouldAcceptModel({...model, revision: 9}, model), true);
 assert.equal(shouldAcceptModel({...model, generation: 'service-b', revision: 1}, model), true);
-assert.equal(shouldAcceptModel({...model, schemaVersion: 2}, model), false);
+assert.equal(shouldAcceptModel({...model, schemaVersion: 2, revision: 9}, model), true);
 assert.equal(shouldAcceptSnapshot(model, model), true);
 assert.equal(shouldAcceptSnapshot({...model, generatedAt: 3000}, model), false);
 assert.equal(shouldAcceptSnapshot({...model, generatedAt: 1000}, model), false);
 assert.equal(shouldAcceptSnapshot({...model, revision: 7, generatedAt: 3000}, model), false);
+
+/* Unknown envelope metadata warns while valid entities survive malformed peers. */
+const incompleteSnapshot = {...model,
+  schemaVersion: 2, generatedAt: null,
+  futureModelField: 'kept as unknown metadata',
+  gatewayVersion: {...model.gatewayVersion, futureGatewayField: true},
+  freshness: {...model.freshness, futureFreshnessField: true},
+  agents: [{id: 'valid-agent'}, null, {id: 'valid-agent'}, {name: 'missing id'}],
+  items: null,
+};
+const preparedSnapshot = prepareModelSnapshot(incompleteSnapshot, model);
+assert.equal(isModelEnvelope(preparedSnapshot), true);
+assert.deepEqual(preparedSnapshot.agents, [{id: 'valid-agent'}]);
+assert.deepEqual(preparedSnapshot.items, model.items, 'missing same-generation collections retain known rows');
+const snapshotWarnings = preparedSnapshot.viewerWarnings.join(' ');
+assert.match(snapshotWarnings, /schema version is unknown/);
+assert.match(snapshotWarnings, /futureModelField/);
+assert.match(snapshotWarnings, /futureGatewayField/);
+assert.match(snapshotWarnings, /futureFreshnessField/);
+assert.match(snapshotWarnings, /skipped 3 malformed agents entries/);
+assert.match(snapshotWarnings, /items collection is unavailable/);
+assert.match(snapshotWarnings, /snapshot timestamp is unavailable/);
+const snapshotStatus = {textContent: '', className: '', title: ''};
+renderModelStatusElement(snapshotStatus, {model: preparedSnapshot, streamState: 'connected'}, 2000);
+assert.match(snapshotStatus.textContent, /Warning: unknown model field/);
+assert.match(snapshotStatus.title, /schema version is unknown/);
 
 const backstop = reconciliationFreshness({
   announcedChanges: 'live', unannouncedChanges: 'swept', activeBudgetMs: 1_800_000,
@@ -117,9 +144,39 @@ assert.equal(deltaModel.metrics.pendingScopes, 2);
 assert.equal(applyModelDelta(deltaBase, {...delta, baseRevision: 7}), null);
 assert.equal(applyModelDelta(deltaBase, {...delta, generation: 'service-b'}), null);
 assert.equal(isModelDelta({...delta, changes: {...delta.changes,
-  agents: {upsert: [{id: 'agent-1'}, {id: 'agent-1'}], remove: []}}}), false);
+  agents: {upsert: [{id: 'agent-1'}, {id: 'agent-1'}], remove: []}}}), true);
 assert.equal(isModelDelta({...delta, changes: {...delta.changes,
-  items: {upsert: [{id: 'wi-1'}], remove: ['wi-1']}}}), false);
+  items: {upsert: [{id: 'wi-1'}], remove: ['wi-1']}}}), true);
+const conflictingDelta = applyModelDelta(deltaBase, {...delta, changes: {...delta.changes,
+  items: {upsert: [{id: 'wi-1', title: 'ambiguous'}], remove: ['wi-1']}}});
+assert.deepEqual(conflictingDelta.items, deltaBase.items,
+  'a conflicting row is skipped without discarding other collection updates');
+assert.match(conflictingDelta.viewerWarnings.join(' '), /skipped 1 malformed items update entry/);
+
+const partialDelta = {...delta, schemaVersion: 2, generatedAt: null,
+  changes: {
+    agents: {upsert: [{id: 'agent-2', name: 'valid'}, null,
+      {id: 'agent-2', name: 'duplicate'}, {name: 'missing id'}], remove: []},
+    items: {upsert: [{id: 'wi-2', title: 'valid'}], remove: []},
+    links: null,
+    wakes: {upsert: [], remove: []},
+    futureCollection: {upsert: [], remove: []},
+  },
+};
+assert.equal(isModelDelta(partialDelta), true);
+const partialDeltaModel = applyModelDelta(deltaBase, partialDelta);
+assert.equal(partialDeltaModel.revision, 9);
+assert.deepEqual(partialDeltaModel.agents.map(row => row.id), ['agent-1', 'agent-2']);
+assert.deepEqual(partialDeltaModel.items.map(row => row.id), ['wi-1', 'wi-2']);
+assert.deepEqual(partialDeltaModel.links, deltaBase.links, 'malformed collection updates retain known rows');
+assert.deepEqual(partialDeltaModel.messages, deltaBase.messages, 'missing collection updates retain known rows');
+const deltaWarnings = partialDeltaModel.viewerWarnings.join(' ');
+assert.match(deltaWarnings, /schema version is unknown/);
+assert.match(deltaWarnings, /skipped 3 malformed agents entries/);
+assert.match(deltaWarnings, /links update is unavailable/);
+assert.match(deltaWarnings, /messages update is unavailable/);
+assert.match(deltaWarnings, /futureCollection/);
+assert.match(deltaWarnings, /snapshot timestamp is unavailable/);
 
 const oldSamples = new Map([['agent-1', 2000], ['removed-agent', 1800]]);
 assert.deepEqual([...agentSampleTimes(oldSamples, {...deltaModel, generatedAt: 3000},
