@@ -26,14 +26,15 @@ live read-only step.
 | Canonical merges | Explicit canonical repository/branch registry, ancestry and patch equivalence | Recheck changed commit references asynchronously; expire resolver caches | Git failure is unknown. A removed checkout can recover only through proof in a registered canonical repository. |
 | Annotations and saved cards | ATC-owned JSON persistence | Existing annotation APIs with author attribution | Rebuilding upstream evidence does not replace authored marks. |
 
-`PAYLOAD_BUILDS` selects source-qualified policies only for the exact
-`("0.1.9", 2908, "8433d22f")` identity. A different build uses targeted reads.
-The [per-resource guarantee inventory](payload-guarantees.md) cites the precise
-field, ordering and deletion guarantees or missing guarantees for every resource
-ATC maintains. All policies still require the expected class, operation, primary
-identity and complete field set; none permits direct deletion. These authored
-policies are based on published source, **not real-feed acceptance evidence**.
-The passing mock suite does not establish those live-feed guarantees.
+The payload policies apply across Gateway builds; the exact
+`("0.1.9", 2908, "8433d22f")` identity remains the source audit behind their
+field and ordering assumptions, not a runtime allowlist. A different or unknown
+build produces a visible compatibility warning while payload processing
+continues. All policies still require the expected class, operation, primary
+identity and complete field set; missing or conflicting facts use targeted reads,
+and no payload permits direct deletion. These authored policies are based on
+published source, **not real-feed acceptance evidence**. Their behavior on other
+Gateway builds remains unverified.
 
 All gateway reads use the existing operator login and the configured user.
 At runtime, the service consumes `cliToken` in place from the target base
@@ -47,10 +48,11 @@ gateways predating the 0.1.11 operator-read change. There is no alternate auth p
 
 The credential-consumer source is the packaged CLI
 [`endpoint_from_gateway_file`](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/cli/src/dispatch.rs#L1743).
-The payload policies above remain pinned to their audited source version; the
-authentication change does not qualify another gateway build for payload use.
-Operator-login real-response acceptance remains unproved until the gateway read
-change is merged and exercised with a fresh scratch base and scratch login.
+The payload policies above are no longer gated by their audited source version;
+the warning preserves the remaining uncertainty while per-payload checks remain
+active. Operator-login real-response acceptance remains unproved until the
+gateway read change is merged and exercised with a fresh scratch base and scratch
+login.
 
 The CLI source exposes every required inventory above, including commit-reference
 corrections. This is a source finding; an exact-package execution remains pending.

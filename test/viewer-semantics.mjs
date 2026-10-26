@@ -14,7 +14,7 @@ assert.equal(canInspectNode({type: null, layerVisible: true}), false);
 
 const model = {
   schemaVersion: 1, generation: 'service-a', revision: 8, generatedAt: 2000,
-  gatewayVersion: null, metrics: null,
+  gatewayVersion: {version: '0.1.9', build: 2908, sha: '8433d22f'}, metrics: null,
   agents: [{id: 'agent-1', evidence: {parent: {status: 'known'}}}],
   items: [{id: 'wi-1', stage: null, ring: null,
     evidence: {stage: {status: 'unknown'}, ring: {status: 'unknown'}}}],
@@ -24,10 +24,10 @@ const model = {
 };
 
 assert.equal(isModelEnvelope(model), true);
-assert.equal(isModelEnvelope({...model, items: [null]}), false);
-assert.equal(isModelEnvelope({...model, items: [model.items[0], model.items[0]]}), false);
-assert.equal(isModelEnvelope({...model, freshness: {...model.freshness, reconciliation: undefined}}), false);
-assert.equal(isModelEnvelope((({metrics, ...rest}) => rest)(model)), false);
+assert.equal(isModelEnvelope({...model, items: [null]}), true);
+assert.equal(isModelEnvelope({...model, items: [model.items[0], model.items[0]]}), true);
+assert.equal(isModelEnvelope({...model, freshness: {...model.freshness, reconciliation: undefined}}), true);
+assert.equal(isModelEnvelope((({metrics, ...rest}) => rest)(model)), true);
 assert.equal(shouldAcceptModel(model, null), true);
 assert.equal(shouldAcceptModel({...model, revision: 8}, model), false);
 assert.equal(shouldAcceptModel({...model, revision: 9}, model), true);
@@ -92,7 +92,7 @@ const deltaBase = {...model,
 const delta = {
   schemaVersion: 1, generation: 'service-a', baseRevision: 8, revision: 9,
   generatedAt: 3000, freshness: {...model.freshness, state: 'live'},
-  gatewayVersion: '0.1.9+2908', metrics: {pendingScopes: 2},
+  gatewayVersion: {version: '0.1.9', build: 2908, sha: '8433d22f'}, metrics: {pendingScopes: 2},
   changes: {
     agents: {upsert: [{id: 'agent-1', name: 'new', idleFor: 31,
       evidence: {idleFor: {status: 'known', freshness: 'live', complete: true}}}], remove: []},
@@ -112,7 +112,7 @@ assert.equal(deltaModel.items[0].oldField, undefined);
 assert.deepEqual(deltaModel.links, []);
 assert.equal(deltaModel.wakes[0].oldField, true);
 assert.equal(deltaModel.messages[0].oldField, true);
-assert.equal(deltaModel.gatewayVersion, '0.1.9+2908');
+assert.deepEqual(deltaModel.gatewayVersion, {version: '0.1.9', build: 2908, sha: '8433d22f'});
 assert.equal(deltaModel.metrics.pendingScopes, 2);
 assert.equal(applyModelDelta(deltaBase, {...delta, baseRevision: 7}), null);
 assert.equal(applyModelDelta(deltaBase, {...delta, generation: 'service-b'}), null);

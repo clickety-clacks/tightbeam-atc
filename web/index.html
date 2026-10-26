@@ -318,8 +318,8 @@
 import * as THREE from 'three';
 import { agentSampleTimes, applyModelDelta, canInspectNode, evidencePageQuery,
          evidencePageFreshness, evidenceRecordAuthor, factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
-         isEvidencePage, isModelDelta, isModelEnvelope, knownStage,
-         rebuildWithViewerState, renderEvidenceMarkup, renderModelStatusElement,
+         isEvidencePage, isModelDelta, knownStage,
+         prepareModelSnapshot, rebuildWithViewerState, renderEvidenceMarkup, renderModelStatusElement,
          captureViewerState, restoreViewerState, ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
 import { OrbitControls } from './addons/controls/OrbitControls.js';
 import { LineSegments2 } from './addons/lines/LineSegments2.js';
@@ -2162,13 +2162,6 @@ function restoreViewerModelState(saved){
     restoreCameraPose: restoreModelPose,
   });
 }
-function validModelRows(model){
-  return model.agents.every(a=>a && typeof a.id==='string' && a.id)
-    && model.items.every(w=>w && typeof w.id==='string' && w.id)
-    && model.links.every(l=>l && typeof l==='object')
-    && model.wakes.every(w=>w && typeof w==='object')
-    && model.messages.every(m=>m && typeof m==='object');
-}
 function renderModelStatus(now=Date.now()){
   return renderModelStatusElement(document.getElementById('mode'), {
     model: DATA, streamState, streamError,
@@ -2205,12 +2198,13 @@ function refreshModelReferences(model){
   selectables().forEach(mesh=>shadeSelected(mesh, view.selection.has(selKey(mesh))));
 }
 function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
+  model = prepareModelSnapshot(model, lastModel);
+  if (!model){
+    streamState='stale'; streamError='invalid model envelope ignored'; renderModelStatus(); return false;
+  }
   const acceptedByOrder = fullSnapshot
     ? shouldAcceptSnapshot(model, lastModel) : shouldAcceptModel(model, lastModel);
   if (!acceptedByOrder) return false;
-  if (!validModelRows(model)){
-    streamState='stale'; streamError='invalid model rows ignored'; renderModelStatus(); return false;
-  }
   const previous = DATA, previousSignature = lastSceneSignature;
   const previousSamples = agentSamples;
   const previousEvidencePages = new Map(itemEvidencePages);
@@ -2325,13 +2319,11 @@ function startModelStream(){
     let model;
     try { model = JSON.parse(event.data); }
     catch (error){ forceModelResync('invalid JSON model event'); return; }
-    if (!isModelEnvelope(model)){
-      forceModelResync('unsupported or incomplete model snapshot'); return;
-    }
-    if (lastModel && model.generation===lastModel.generation && model.revision<lastModel.revision){
+    if (model && lastModel && model.generation===lastModel.generation && model.revision<lastModel.revision){
       forceModelResync('older model snapshot received; requesting current snapshot'); return;
     }
-    if (lastModel && model.generation===lastModel.generation && model.revision===lastModel.revision
+    if (model && lastModel && model.generation===lastModel.generation && model.revision===lastModel.revision
+        && Number.isFinite(model.generatedAt) && Number.isFinite(lastModel.generatedAt)
         && model.generatedAt!==lastModel.generatedAt){
       forceModelResync('conflicting equal-revision snapshot; requesting current snapshot'); return;
     }
@@ -2344,8 +2336,13 @@ function startModelStream(){
     catch (error){ forceModelResync('invalid JSON delta event'); return; }
     const next = applyModelDelta(lastModel, delta);
     if (!next){ forceModelResync('model revision gap or invalid delta; requesting full snapshot'); return; }
+    const agentUpserts = delta.changes?.agents?.upsert;
+    const upsertedAgentIds = Array.isArray(agentUpserts)
+      ? agentUpserts.filter(agent=>agent && typeof agent.id==='string' && agent.id.length)
+        .map(agent=>agent.id)
+      : [];
     const accepted = receiveModel(next, {fullSnapshot:false,
-      upsertedAgentIds:delta.changes.agents.upsert.map(agent=>agent.id)});
+      upsertedAgentIds});
     if (!accepted || lastModel?.revision!==delta.revision)
       forceModelResync('delta could not be applied; requesting full snapshot');
   });

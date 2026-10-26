@@ -163,11 +163,13 @@ absence; a failed or partial read removes nothing. Last-known rows remain stale,
 and facts that cannot be established remain unknown. The viewer's camera, selection,
 focus, scope, pan and layers stay local through model changes and recovery.
 
-Payloads update only resource classes whose guarantees are qualified against the
-connected gateway's exact source build. The current table covers selected
-0.1.9 build 2908 upserts; real-feed verification remains pending. See the
+Payload processing is not gated by the connected Gateway build. ATC applies its
+audited per-resource field and version checks across builds; an unaudited or
+unknown build shows a warning while incomplete or conflicting payloads continue
+to use targeted reads. The source audit covers selected 0.1.9 build 2908
+upserts, and real-feed verification on other builds remains pending. See the
 [per-resource guarantee inventory](docs/payload-guarantees.md) for the exact
-field/version guarantees, exclusions and targeted-read gaps.
+field/version checks, exclusions and targeted-read gaps.
 Other notices trigger a background read of the affected row or scope. Sequence
 gaps, lost heartbeats and disconnected feeds trigger complete recovery. Normal
 intervals refresh base inventories and rotate through a bounded batch of terminal
@@ -301,7 +303,12 @@ carry `generation`, `baseRevision`, `revision`, `generatedAt`, complete replacem
 `items`, `links`, `wakes` and `messages` has `{upsert: [...], remove: [...]}`.
 An upsert replaces the entire stable-ID row; removes contain IDs. Apply a delta
 atomically only when its generation matches, its base equals the current revision,
-and its revision advances. Malformed or mismatched deltas require reconnect.
+and its revision advances. Malformed rows are skipped individually, with a plain
+warning; valid rows in the same snapshot or delta remain available. Unknown model
+fields and unsupported freshness metadata also warn without hiding entities. A
+missing collection retains its last known same-generation rows, or stays unknown
+when no earlier rows exist. Invalid revision identity or a mismatched delta base
+still requires a full resync while the current map remains visible.
 Only the latest delta is retained; slower subscribers receive a full model resync.
 Transport loss is shown stale locally until a full snapshot arrives. Status-only
 deltas can have empty collection changes.

@@ -2,9 +2,13 @@
 
 This inventory audits **0.1.9 build 2908**, source
 [`8433d22fdf86027d62a34e9923501775225813ad`](https://github.com/clickety-clacks/tightbeam/tree/8433d22fdf86027d62a34e9923501775225813ad).
-It is a source audit. **No real-feed acceptance test has run.** The authored
-policy table selects only `/version` identity `("0.1.9", 2908, "8433d22f")`;
-other identities use targeted reads. The compile-time stamp is defined in
+It is a source audit. **No real-feed acceptance test has run.** Its field and
+ordering policies apply across Gateway builds; `/version` identity
+`("0.1.9", 2908, "8433d22f")` identifies the audited source and no longer gates
+payload use. ATC warns when the connected build is different or unknown, while
+each payload still has to pass its class, operation, identity, field and version
+checks. A gap uses a targeted read. Behavior on other Gateway builds remains
+unverified. The compile-time stamp is defined in
 [build_stamp.ex](https://github.com/clickety-clacks/tightbeam/blob/8433d22fdf86027d62a34e9923501775225813ad/lib/tightbeam/build_stamp.ex#L1).
 Package/runtime identity must still be reconfirmed before acceptance execution.
 
