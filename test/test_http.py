@@ -45,6 +45,12 @@ class HttpTest(unittest.TestCase):
         except HTTPError as error:
             return error.code, json.load(error)
 
+    def test_javascript_module_has_browser_module_mime_type(self):
+        with urlopen(self.url + "/viewer-semantics.mjs", timeout=3) as response:
+            self.assertEqual(200, response.status)
+            self.assertEqual("text/javascript", response.headers.get_content_type())
+            self.assertIn(b"export function renderModelStatusElement", response.read())
+
     def test_stream_starts_full_then_sends_delta_and_retains_partial_rows(self):
         self.live.model.accept("work-items", None, Read(
             [{"id": "item", "title": "Visible", "state": "open"}], True, 1, "test-read"))

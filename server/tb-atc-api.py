@@ -421,7 +421,8 @@ class Handler(BaseHTTPRequestHandler):
             target = target / "index.html"
         if not target.is_file():
             return self._send({"error": "not found"}, 404)
-        ctype = {".html":"text/html", ".js":"text/javascript", ".json":"application/json",
+        ctype = {".html":"text/html", ".js":"text/javascript", ".mjs":"text/javascript",
+                 ".json":"application/json",
                  ".css":"text/css", ".png":"image/png", ".svg":"image/svg+xml"}.get(
                      target.suffix, "application/octet-stream")
         body = target.read_bytes()
