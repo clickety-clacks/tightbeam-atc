@@ -1,16 +1,18 @@
-"""Payload policies established from the pinned published source.
+"""Payload policies established from the last audited published source.
 
-See docs/payload-guarantees.md for exact sources and remaining runtime evidence.
-This table does not claim that a gateway acceptance test has run.
+The audited build is diagnostic only: it no longer gates whether feed payloads
+are considered. Each payload still has to satisfy its resource's field and
+version checks; uncertain payloads use targeted reads. See
+docs/payload-guarantees.md for source coverage and remaining runtime evidence.
 """
 
 SOURCE_SHA = "8433d22fdf86027d62a34e9923501775225813ad"
 BUILD_ID = ("0.1.9", 2908, "8433d22f")
-PAYLOAD_BUILDS = {BUILD_ID: {
+PAYLOAD_POLICIES = {
     "work-items": "strict-version", "sessions": "strict-version",
     "attests": "immutable", "decision requests": "strict-version",
     "artifacts": "strict-version",
-}}
+}
 
 WORK_ITEM_FIELDS = frozenset("""
     id title specRefName specRefSha256 isBug ownerUserId state failReason routingWakeId
@@ -61,5 +63,16 @@ def required_fields(resource, payload, attest_fields):
             "artifacts": ARTIFACT_FIELDS}.get(resource)
 
 
-def policies_for(version):
-    return PAYLOAD_BUILDS.get((version.get("version"), version.get("build"), version.get("sha")), {})
+def policies_for(_version):
+    """Return payload policies without making Gateway identity a feature gate."""
+    return PAYLOAD_POLICIES
+
+
+def payload_policy_warning(version):
+    """Warn when runtime payloads come from a build beyond the audited source."""
+    if not isinstance(version, dict):
+        return "Gateway payload compatibility is unverified; per-payload checks remain active."
+    identity = (version.get("version"), version.get("build"), version.get("sha"))
+    if identity != BUILD_ID:
+        return "Gateway payload compatibility is unverified; per-payload checks remain active."
+    return None

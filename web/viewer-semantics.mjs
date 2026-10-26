@@ -7,67 +7,154 @@ const RING_VALUES = new Set(['black', 'green', 'light-gray', 'yellow']);
 const FRESHNESS_VALUES = new Set(['live', 'stale', 'rebuilding']);
 const MODEL_COLLECTIONS = ['agents', 'items', 'links', 'wakes', 'messages'];
 const owns = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
-const rowsHaveStableIds = rows => {
-  const ids = new Set();
-  return rows.every(row => {
-    if (!row || typeof row.id !== 'string' || !row.id.length || ids.has(row.id)) return false;
-    ids.add(row.id); return true;
-  });
-};
+const MODEL_FIELDS = new Set([
+  'schemaVersion', 'generation', 'revision', 'generatedAt', 'freshness',
+  'gatewayVersion', 'payloadWarning', 'metrics', 'viewerWarnings', ...MODEL_COLLECTIONS,
+]);
+const METRICS_FIELDS = new Set([
+  'bootstrapReads', 'bootstrapMs', 'payloads', 'bootstrapComplete', 'targetedReads', 'rebuilds',
+]);
+const FRESHNESS_FIELDS = new Set([
+  'state', 'since', 'reason', 'rebuildIntervalMs', 'lastCompleteAt', 'reconciliation',
+]);
+const GATEWAY_VERSION_FIELDS = new Set(['version', 'build', 'sha']);
+const isRecord = value => Boolean(value && typeof value === 'object' && !Array.isArray(value));
+
+function listedFields(fields, label) {
+  if (!fields.length) return null;
+  const shown = fields.slice(0, 5).join(', ');
+  const rest = fields.length > 5 ? `, and ${fields.length - 5} more` : '';
+  return `Warning: unknown ${label} ignored (${shown}${rest}).`;
+}
+
+function modelMetadataWarnings(model) {
+  const warnings = [];
+  if (model.schemaVersion !== 1)
+    warnings.push('Warning: model schema version is unknown; known entity fields are still displayed.');
+  const unknownModelFields = Object.keys(model).filter(key => !MODEL_FIELDS.has(key));
+  const modelFieldWarning = listedFields(unknownModelFields, 'model field(s)');
+  if (modelFieldWarning) warnings.push(modelFieldWarning);
+  if (!Number.isFinite(model.generatedAt))
+    warnings.push('Warning: snapshot timestamp is unavailable.');
+
+  if (!owns(model, 'gatewayVersion') || model.gatewayVersion === null
+      || (typeof model.gatewayVersion !== 'string' && !isRecord(model.gatewayVersion))) {
+    warnings.push('Warning: Gateway version metadata is unknown.');
+  } else if (isRecord(model.gatewayVersion)) {
+    if (typeof model.gatewayVersion.version !== 'string'
+        || !Number.isFinite(model.gatewayVersion.build)
+        || typeof model.gatewayVersion.sha !== 'string')
+      warnings.push('Warning: Gateway version metadata is incomplete.');
+    const unknownVersionFields = Object.keys(model.gatewayVersion)
+      .filter(key => !GATEWAY_VERSION_FIELDS.has(key));
+    const versionFieldWarning = listedFields(unknownVersionFields, 'Gateway version field(s)');
+    if (versionFieldWarning) warnings.push(versionFieldWarning);
+  }
+
+  if (!isRecord(model.freshness)) {
+    warnings.push('Warning: freshness metadata is unknown.');
+  } else {
+    if (!FRESHNESS_VALUES.has(model.freshness.state))
+      warnings.push('Warning: freshness metadata is unknown.');
+    const missingFreshnessFields = ['since', 'reason', 'rebuildIntervalMs', 'lastCompleteAt', 'reconciliation']
+      .filter(key => !owns(model.freshness, key));
+    const missingFreshnessWarning = listedFields(missingFreshnessFields, 'unavailable freshness field(s)');
+    if (missingFreshnessWarning) warnings.push(missingFreshnessWarning);
+    if (!Number.isFinite(model.freshness.since))
+      warnings.push('Warning: freshness start time is unavailable.');
+    if (model.freshness.lastCompleteAt !== null
+        && !Number.isFinite(model.freshness.lastCompleteAt))
+      warnings.push('Warning: last complete-read time is unavailable.');
+    if (model.freshness.reason !== null && typeof model.freshness.reason !== 'string')
+      warnings.push('Warning: freshness reason is unavailable.');
+    if (!Number.isFinite(model.freshness.rebuildIntervalMs) || model.freshness.rebuildIntervalMs < 0)
+      warnings.push('Warning: rebuild interval metadata is unavailable.');
+    if (!isRecord(model.freshness.reconciliation))
+      warnings.push('Warning: reconciliation metadata is unavailable.');
+    const unknownFreshnessFields = Object.keys(model.freshness)
+      .filter(key => !FRESHNESS_FIELDS.has(key));
+    const freshnessFieldWarning = listedFields(unknownFreshnessFields, 'freshness field(s)');
+    if (freshnessFieldWarning) warnings.push(freshnessFieldWarning);
+  }
+
+  if (!owns(model, 'metrics') || model.metrics === null || !isRecord(model.metrics)) {
+    warnings.push('Warning: metrics metadata is unavailable.');
+  } else if (isRecord(model.metrics)) {
+    const metricFieldWarning = listedFields(
+      Object.keys(model.metrics).filter(key => !METRICS_FIELDS.has(key)), 'metrics field(s)');
+    if (metricFieldWarning) warnings.push(metricFieldWarning);
+  }
+  if (owns(model, 'viewerWarnings') && !Array.isArray(model.viewerWarnings))
+    warnings.push('Warning: viewer warning metadata is unavailable.');
+  if (typeof model.payloadWarning === 'string' && model.payloadWarning.trim())
+    warnings.push(model.payloadWarning);
+  else if (model.payloadWarning !== undefined && model.payloadWarning !== null
+      && typeof model.payloadWarning !== 'string')
+    warnings.push('Warning: payload compatibility metadata is unknown.');
+  return warnings;
+}
+
+function validEntity(row) {
+  return isRecord(row) && typeof row.id === 'string' && row.id.length > 0;
+}
+
+function uniqueWarnings(warnings) {
+  return [...new Set(warnings.filter(value => typeof value === 'string' && value.trim()))];
+}
+
+function hasModelIdentity(model) {
+  /* Generation and revision preserve ordering; schema and diagnostics do not
+     gate rows whose known entity fields can still be rendered. */
+  return Boolean(isRecord(model) && typeof model.generation === 'string' && model.generation.length > 0
+    && Number.isInteger(model.revision) && model.revision >= 0);
+}
 
 export function isModelEnvelope(model) {
-  return Boolean(model && model.schemaVersion === 1
-    && typeof model.generation === 'string' && model.generation.length > 0
-    && Number.isInteger(model.revision) && model.revision >= 0
-    && Number.isFinite(model.generatedAt)
-    && ['agents', 'items', 'links', 'wakes', 'messages'].every(k => Array.isArray(model[k]))
-    && MODEL_COLLECTIONS.every(k => rowsHaveStableIds(model[k]))
-    && model.freshness && !Array.isArray(model.freshness)
-    && FRESHNESS_VALUES.has(model.freshness.state)
-    && ['since', 'reason', 'rebuildIntervalMs', 'lastCompleteAt', 'reconciliation']
-      .every(key => owns(model.freshness, key))
-    && (model.freshness.reconciliation === null
-      || (model.freshness.reconciliation && typeof model.freshness.reconciliation === 'object'
-        && !Array.isArray(model.freshness.reconciliation)))
-    && owns(model, 'gatewayVersion')
-    && (model.gatewayVersion === null || typeof model.gatewayVersion === 'string')
-    && owns(model, 'metrics')
-    && (model.metrics === null || (model.metrics && typeof model.metrics === 'object'
-      && !Array.isArray(model.metrics))));
+  return hasModelIdentity(model) && MODEL_COLLECTIONS.every(key => Array.isArray(model[key]));
+}
+
+/* Keep valid rows in a snapshot even when a sibling row or diagnostic field is
+   malformed. Unknown metadata remains available to the view and is reported
+   through a plain warning instead of rejecting the whole model. */
+export function prepareModelSnapshot(model, previousModel = null) {
+  if (!hasModelIdentity(model)) return null;
+  const next = {...model};
+  const warnings = [
+    ...(Array.isArray(model.viewerWarnings) ? model.viewerWarnings : []),
+    ...modelMetadataWarnings(model),
+  ];
+  for (const name of MODEL_COLLECTIONS) {
+    if (!Array.isArray(model[name])) {
+      const sameGeneration = previousModel?.generation === model.generation;
+      const retained = sameGeneration && Array.isArray(previousModel[name]);
+      next[name] = retained ? previousModel[name] : [];
+      warnings.push(`Warning: ${name} collection is unavailable; `
+        + (retained ? 'last known entities were retained.' : 'absence is unknown.'));
+      continue;
+    }
+    const ids = new Set();
+    let skipped = 0;
+    next[name] = model[name].filter(row => {
+      if (!validEntity(row) || ids.has(row.id)) {
+        skipped++;
+        return false;
+      }
+      ids.add(row.id);
+      return true;
+    });
+    if (skipped) warnings.push(`Warning: skipped ${skipped} malformed ${name} entr${skipped === 1 ? 'y' : 'ies'}.`);
+  }
+  next.viewerWarnings = uniqueWarnings(warnings);
+  return isModelEnvelope(next) ? next : null;
 }
 
 export function isModelDelta(delta) {
-  if (!delta || delta.schemaVersion !== 1
-      || typeof delta.generation !== 'string' || !delta.generation.length
+  if (!isRecord(delta) || typeof delta.generation !== 'string' || !delta.generation.length
       || !Number.isInteger(delta.baseRevision) || delta.baseRevision < 0
       || !Number.isInteger(delta.revision) || delta.revision <= delta.baseRevision
-      || !Number.isFinite(delta.generatedAt)
-      || !delta.freshness || Array.isArray(delta.freshness) || !FRESHNESS_VALUES.has(delta.freshness.state)
-      || !owns(delta.freshness, 'reconciliation')
-      || (delta.freshness.reconciliation !== null
-        && (!delta.freshness.reconciliation || typeof delta.freshness.reconciliation !== 'object'
-          || Array.isArray(delta.freshness.reconciliation)))
-      || !owns(delta, 'gatewayVersion')
-      || (delta.gatewayVersion !== null && typeof delta.gatewayVersion !== 'string')
-      || !owns(delta, 'metrics')
-      || (delta.metrics !== null && (!delta.metrics || typeof delta.metrics !== 'object' || Array.isArray(delta.metrics)))
-      || !delta.changes || typeof delta.changes !== 'object') return false;
+      || !isRecord(delta.changes)) return false;
 
-  return MODEL_COLLECTIONS.every(name => {
-    const change = delta.changes[name];
-    if (!change || !Array.isArray(change.upsert) || !Array.isArray(change.remove)) return false;
-    const ids = new Set();
-    for (const row of change.upsert) {
-      if (!row || typeof row.id !== 'string' || !row.id.length || ids.has(row.id)) return false;
-      ids.add(row.id);
-    }
-    const removed = new Set();
-    for (const id of change.remove) {
-      if (typeof id !== 'string' || !id.length || removed.has(id) || ids.has(id)) return false;
-      removed.add(id);
-    }
-    return true;
-  });
+  return true;
 }
 
 /* Reconciliation timestamps are the last successful complete read for each
@@ -123,13 +210,37 @@ export function reconciliationFreshness(reconciliation, now = Date.now()) {
 
 function applyCollection(rows, change) {
   const next = new Map(rows.map(row => [row.id, row]));
-  change.remove.forEach(id => next.delete(id));
-  change.upsert.forEach(row => next.set(row.id, row));
-  return [...next.values()];
+  const remove = new Set();
+  const upsert = new Map();
+  let skipped = 0;
+  for (const id of change.remove) {
+    if (typeof id !== 'string' || !id.length || remove.has(id)) {
+      skipped++;
+      continue;
+    }
+    remove.add(id);
+  }
+  for (const row of change.upsert) {
+    if (!validEntity(row) || upsert.has(row.id)) {
+      skipped++;
+      continue;
+    }
+    upsert.set(row.id, row);
+  }
+  for (const id of upsert.keys()) {
+    if (remove.has(id)) {
+      remove.delete(id);
+      upsert.delete(id);
+      skipped++;
+    }
+  }
+  remove.forEach(id => next.delete(id));
+  upsert.forEach((row, id) => next.set(id, row));
+  return {rows: [...next.values()], skipped};
 }
 
-/* A delta is atomic: reject the entire envelope unless it is based on the
-   exact model currently held by the viewer. Upserts replace complete rows. */
+/* Revision identity remains atomic. Malformed collection entries are skipped
+   locally while other valid changes in the same delta can advance. */
 export function applyModelDelta(current, delta) {
   if (!isModelEnvelope(current) || !isModelDelta(delta)
       || delta.generation !== current.generation
@@ -137,8 +248,29 @@ export function applyModelDelta(current, delta) {
 
   const {baseRevision, changes, ...metadata} = delta;
   const next = {...current, ...metadata};
-  for (const name of MODEL_COLLECTIONS)
-    next[name] = applyCollection(current[name], changes[name]);
+  const warnings = [...(Array.isArray(current.viewerWarnings) ? current.viewerWarnings : []),
+    ...modelMetadataWarnings(next)];
+  if (delta.schemaVersion !== 1)
+    warnings.push('Warning: model schema version is unknown; known entity fields are still displayed.');
+  const unknownChangeFields = Object.keys(changes).filter(key => !MODEL_COLLECTIONS.includes(key));
+  const changeFieldWarning = listedFields(unknownChangeFields, 'update collection(s)');
+  if (changeFieldWarning) warnings.push(changeFieldWarning);
+  for (const name of MODEL_COLLECTIONS) {
+    const change = changes[name];
+    if (!isRecord(change) || !Array.isArray(change.upsert) || !Array.isArray(change.remove)) {
+      next[name] = current[name];
+      warnings.push(`Warning: ${name} update is unavailable; last known entities were retained.`);
+      continue;
+    }
+    const result = applyCollection(current[name], change);
+    next[name] = result.rows;
+    if (result.skipped)
+      warnings.push(`Warning: skipped ${result.skipped} malformed ${name} update entr${result.skipped === 1 ? 'y' : 'ies'}.`);
+    const unknownFields = Object.keys(change).filter(key => !['upsert', 'remove'].includes(key));
+    const fieldWarning = listedFields(unknownFields, `${name} update field(s)`);
+    if (fieldWarning) warnings.push(fieldWarning);
+  }
+  next.viewerWarnings = uniqueWarnings(warnings);
   return isModelEnvelope(next) ? next : null;
 }
 
@@ -218,7 +350,8 @@ export function shouldAcceptSnapshot(next, current) {
   if (!isModelEnvelope(next)) return false;
   return !current || next.generation !== current.generation
     || next.revision > current.revision
-    || (next.revision === current.revision && next.generatedAt === current.generatedAt);
+    || (next.revision === current.revision
+      && (!Number.isFinite(next.generatedAt) || next.generatedAt === current.generatedAt));
 }
 
 /* Clock, freshness, and evidence-age repaints do not change scene geometry.
@@ -372,6 +505,17 @@ export function rebuildWithViewerState(saved, rebuild, restore) {
   }
 }
 
+function gatewayVersionLabel(value) {
+  if (typeof value === 'string') return value || 'unknown';
+  if (!isRecord(value)) return 'unknown';
+  const parts = [];
+  if (typeof value.version === 'string' && value.version) parts.push(value.version);
+  if ((typeof value.build === 'string' && value.build)
+      || (Number.isFinite(value.build) && value.build >= 0)) parts.push(`build ${value.build}`);
+  if (typeof value.sha === 'string' && value.sha) parts.push(`sha ${value.sha.slice(0, 8)}`);
+  return parts.length ? parts.join(' · ') : 'unknown';
+}
+
 function durationLabel(milliseconds) {
   if (!Number.isFinite(milliseconds) || milliseconds < 0) return 'unknown';
   if (milliseconds < 60_000) return Math.round(milliseconds / 1000) + 's';
@@ -395,11 +539,14 @@ export function renderModelStatusElement(element, {model, streamState, streamErr
   const freshness = model.freshness || {};
   const backstop = reconciliationFreshness(freshness.reconciliation, now);
   const state = streamState === 'stale' || backstop?.announcedChanges === 'stale'
-    || backstop?.active.stale ? 'stale' : (freshness.state || 'unknown');
+    || backstop?.active.stale ? 'stale'
+    : (FRESHNESS_VALUES.has(freshness.state) ? freshness.state : 'unknown');
   const counts = evidenceCounts(model);
   const age = factAge(model.generatedAt, now);
+  const warnings = Array.isArray(model.viewerWarnings) ? model.viewerWarnings : [];
   element.textContent = `${state} · ${model.agents.length} agents · ${model.items.length} items · `
-    + `${counts.stale} stale · ${counts.rebuilding} rebuilding · ${counts.unknown} unknown · snapshot age ${age}`;
+    + `${counts.stale} stale · ${counts.rebuilding} rebuilding · ${counts.unknown} unknown · snapshot age ${age}`
+    + (warnings.length ? ` · ${warnings.join(' · ')}` : '');
   element.className = state === 'live' ? 'live' : state === 'stale' ? 'stale'
     : state === 'rebuilding' ? 'rebuilding' : 'unknown';
 
@@ -438,8 +585,8 @@ export function renderModelStatusElement(element, {model, streamState, streamErr
       + `last sweep ${sweepAge === 'unknown' ? 'unknown' : sweepAge + ' ago'}`
     : 'Reconciliation: unknown';
   element.title = [
-    `Gateway version: ${model.gatewayVersion || 'unknown'}`,
-    `Service freshness: ${freshness.state || 'unknown'}`,
+    `Gateway version: ${gatewayVersionLabel(model.gatewayVersion)}`,
+    `Service freshness: ${FRESHNESS_VALUES.has(freshness.state) ? freshness.state : 'unknown'}`,
     `Announced changes: ${backstop?.announcedChanges || 'unknown'} at the latest service publication (feed delivery, not proof that unannounced changes are absent)`,
     `Unannounced changes: ${backstop?.unannouncedChanges || 'unknown'} by background confirmation sweeps`,
     activeBackstop,
@@ -449,6 +596,7 @@ export function renderModelStatusElement(element, {model, streamState, streamErr
     Number.isFinite(freshness.rebuildIntervalMs) ? `Rebuild interval: ${Math.round(freshness.rebuildIntervalMs / 1000)}s` : 'Rebuild interval: unknown',
     reconciliation,
     freshness.reason ? `Reason: ${freshness.reason}` : null,
+    ...warnings,
     streamError ? `Connection: ${streamError}` : 'Connection: event stream open',
     'Input: pointer and touch events; no separate gaze signal is exposed to this page.',
   ].filter(Boolean).join('\n');

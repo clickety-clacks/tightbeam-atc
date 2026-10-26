@@ -438,9 +438,9 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual(["s_author"], delta["changes"]["agents"]["remove"])
 
     def test_published_build_policy_applies_full_attest_without_reading_history(self):
-        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS
+        from atc_payloads import PAYLOAD_POLICIES
         from atc_upstream import ATTEST_FIELDS
-        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        self.service.policies = PAYLOAD_POLICIES
         row = dict.fromkeys(ATTEST_FIELDS) | {
             "id": "new-progress", "assignmentId": "assignment", "kind": "progress",
             "note": "Original note", "bySession": "agent s_author", "ts": 15,
@@ -457,9 +457,9 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertTrue(self.service.model.inventory("attests", "assignment").complete)
 
     def test_completion_payload_reads_only_assignment_side_effect(self):
-        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS
+        from atc_payloads import PAYLOAD_POLICIES
         from atc_upstream import ATTEST_FIELDS
-        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        self.service.policies = PAYLOAD_POLICIES
         row = dict.fromkeys(ATTEST_FIELDS) | {
             "id": "completed", "assignmentId": "assignment", "kind": "completion",
             "ts": 15, "bySession": "agent s_author", "commitRefs": [],
@@ -473,9 +473,9 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual("closed", self.service.model.inventory("assignments").rows["assignment"]["state"])
         self.assertIn("completed", self.service.model.inventory("attests", "assignment").rows)
 
-    def test_source_qualified_session_payload_preserves_topology_and_order(self):
-        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS, SESSION_FIELDS
-        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+    def test_gateway_payload_policy_preserves_topology_and_order(self):
+        from atc_payloads import PAYLOAD_POLICIES, SESSION_FIELDS
+        self.service.policies = PAYLOAD_POLICIES
         row = dict.fromkeys(SESSION_FIELDS) | {
             "sessionKey": "agent s_author", "displayName": "Old", "state": "active",
             "rowVersion": 10, "capabilities": {},
@@ -493,9 +493,9 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual([], self.gateway.calls)
 
     def test_review_attest_reads_producer_assignment_without_recrawling_evidence(self):
-        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS
+        from atc_payloads import PAYLOAD_POLICIES
         from atc_upstream import ATTEST_FIELDS
-        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        self.service.policies = PAYLOAD_POLICIES
         self.service.model.inventory("assignments").rows["assignment"]["reviewsAssignmentId"] = "producer"
         row = dict.fromkeys(ATTEST_FIELDS) | {
             "id": "review", "assignmentId": "assignment", "kind": "verdict",
@@ -507,9 +507,9 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertIn("review", self.service.model.inventory("attests", "assignment").rows)
 
     def test_attest_side_effect_invalidates_an_older_assignment_read(self):
-        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS
+        from atc_payloads import PAYLOAD_POLICIES
         from atc_upstream import ATTEST_FIELDS
-        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        self.service.policies = PAYLOAD_POLICIES
         entered, release = threading.Event(), threading.Event()
         original = self.gateway.detail
 
@@ -539,8 +539,8 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual("closed", self.service.model.inventory("assignments").rows["assignment"]["state"])
 
     def test_decision_and_artifact_payloads_require_versioned_complete_projections(self):
-        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS, DECISION_FIELDS, ARTIFACT_FIELDS
-        self.service.policies = PAYLOAD_BUILDS[BUILD_ID]
+        from atc_payloads import PAYLOAD_POLICIES, DECISION_FIELDS, ARTIFACT_FIELDS
+        self.service.policies = PAYLOAD_POLICIES
         decision = dict.fromkeys(DECISION_FIELDS) | {
             "id": "decision", "kind": "statute", "status": "open", "rowVersion": 1,
             "question": "Ship?", "options": [], "context": {}, "deadlineAt": 100,
@@ -571,17 +571,36 @@ class ServiceRecoveryTest(unittest.TestCase):
                              "refs": {"artifactId": "artifact"}, "payload": dict(artifact, rowVersion=2)})
         self.assertIn(("artifacts", None, "artifact"), self.service.reads.pending)
 
-    def test_unknown_build_or_unsupported_payload_projection_uses_targeted_path(self):
-        from atc_payloads import BUILD_ID, PAYLOAD_BUILDS, policies_for
-        version = dict(zip(("version", "build", "sha"), BUILD_ID))
-        self.assertEqual(PAYLOAD_BUILDS[BUILD_ID], policies_for(version))
-        for patch_values in ({"version": "0.1.11"}, {"build": 2909}, {"sha": "different"}, {"sha": None}):
-            self.assertEqual({}, policies_for(version | patch_values))
-        self.service.policies = policies_for(version)
+    def test_payloads_apply_across_gateway_versions_with_warning_and_targeted_fallback(self):
+        from atc_payloads import BUILD_ID, PAYLOAD_POLICIES, policies_for
+        audited = dict(zip(("version", "build", "sha"), BUILD_ID))
+        versions = [audited, audited | {"version": "0.1.11"}, audited | {"build": 2909},
+                    audited | {"sha": "different"}, None]
+        for index, version in enumerate(versions, start=2):
+            self.assertEqual(PAYLOAD_POLICIES, policies_for(version))
+            self.service._handle("ready", version)
+            self.drain()
+            self.assertEqual(PAYLOAD_POLICIES, self.service.policies)
+            before = self.gateway.read_count
+            title = f"Version {index}"
+            self.service.change({"resource": "work-items", "op": "upsert",
+                                 "class": "work_item.updated", "refs": {"workItemId": "work"},
+                                 "payload": work(title, index)})
+            self.assertEqual(title, self.item()["title"])
+            self.assertEqual(before, self.gateway.read_count)
+            self.assertFalse(self.service.reads.pending)
+            self.service._publish()
+            published = self.service.snapshot()
+            self.assertEqual(version, published["gatewayVersion"])
+            if version == audited:
+                self.assertIsNone(published["payloadWarning"])
+            else:
+                self.assertIn("unverified", published["payloadWarning"])
+
         self.service.change({"resource": "work-items", "op": "upsert", "class": "unknown.class",
-                             "refs": {"workItemId": "work"}, "payload": work("Invalid class", 5)})
+                             "refs": {"workItemId": "work"}, "payload": work("Invalid class", 99)})
         self.assertIn(("work-items", None, "work"), self.service.reads.pending)
-        self.assertEqual("First", self.item()["title"])
+        self.assertEqual("Version 6", self.item()["title"])
 
     def test_active_budget_expiry_publishes_stale_without_clock_only_deltas(self):
         from atc_reconciliation import ACTIVE_BUDGET_MS

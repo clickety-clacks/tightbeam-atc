@@ -15,9 +15,12 @@ from atc_reconciliation import ActiveBackstop
 from atc_upstream import ATTEST_FIELDS, attest_row, now_ms
 
 
-# Per-resource source qualification for the published build; runtime/feed
-# verification remains separately reported and cannot be inferred from this map.
-from atc_payloads import PAYLOAD_BUILDS, WORK_ITEM_FIELDS, CLASSES, required_fields, policies_for
+# Per-resource field and ordering policies come from the audited published build.
+# Runtime applies them across Gateway builds, with an explicit warning when the
+# connected identity differs; this is not runtime/feed acceptance evidence.
+from atc_payloads import (
+    WORK_ITEM_FIELDS, CLASSES, required_fields, policies_for, payload_policy_warning,
+)
 
 BASE_SCOPES = (("work-items", None), ("sessions", None), ("assignments", None),
                ("roles", None), ("decision-requests", None), ("artifacts", None))
@@ -108,6 +111,7 @@ class LiveService:
         self.state, self.since, self.reason = "stale", now_ms(), "initial state unavailable"
         self.last_complete, self.last_rebuild = None, 0
         self.version = None
+        self.payload_warning = None
         self.policies = {}
         self.metrics = {"bootstrapReads": None, "bootstrapMs": None, "payloads": 0,
                         "bootstrapComplete": None, "targetedReads": 0, "rebuilds": 0}
@@ -236,7 +240,7 @@ class LiveService:
                 "lastCompleteAt": self.last_complete,
                 "reconciliation": self._reconciliation(),
             },
-            "gatewayVersion": self.version, **data,
+            "gatewayVersion": self.version, "payloadWarning": self.payload_warning, **data,
         }
         # idleFor is sampled at generatedAt; viewers advance it from idleSince.
         # A ticking clock or diagnostic counter alone is not a model change.
@@ -612,6 +616,7 @@ class LiveService:
             self.connected = True
             self.version = value
             self.policies = policies_for(value)
+            self.payload_warning = payload_policy_warning(value)
             self.rebuild()
         elif kind == "lost":
             changed = self.connected
