@@ -315,6 +315,7 @@ def help_json():
         },
         "endpoints": [
             {"method": "GET", "path": "/api/help", "does": "this document"},
+            {"method": "GET", "path": "/api/status", "does": "live-data availability and startup warning"},
             {"method": "GET", "path": "/api/state", "does": "viewer reports, tags, arrows, searches"},
             {"method": "GET", "path": "/api/selection", "does": "per-client selection, focus, camera"},
             {"method": "GET", "path": "/data.json", "does": "the population and its derived state"},
