@@ -57,7 +57,7 @@ assert.match(snapshotWarnings, /schema version is unknown/);
 assert.match(snapshotWarnings, /futureModelField/);
 assert.match(snapshotWarnings, /futureGatewayField/);
 assert.match(snapshotWarnings, /futureFreshnessField/);
-assert.match(snapshotWarnings, /skipped 3 malformed agents entries/);
+assert.match(snapshotWarnings, /skipped 3 malformed agents update entries/);
 assert.match(snapshotWarnings, /items collection is unavailable/);
 assert.match(snapshotWarnings, /snapshot timestamp is unavailable/);
 const snapshotStatus = {textContent: '', className: '', title: ''};
@@ -172,7 +172,7 @@ assert.deepEqual(partialDeltaModel.links, deltaBase.links, 'malformed collection
 assert.deepEqual(partialDeltaModel.messages, deltaBase.messages, 'missing collection updates retain known rows');
 const deltaWarnings = partialDeltaModel.viewerWarnings.join(' ');
 assert.match(deltaWarnings, /schema version is unknown/);
-assert.match(deltaWarnings, /skipped 3 malformed agents entries/);
+assert.match(deltaWarnings, /skipped 3 malformed agents update entries/);
 assert.match(deltaWarnings, /links update is unavailable/);
 assert.match(deltaWarnings, /messages update is unavailable/);
 assert.match(deltaWarnings, /futureCollection/);
