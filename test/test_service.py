@@ -353,6 +353,7 @@ class ServiceRecoveryTest(unittest.TestCase):
                 self.assertEqual(15, self.service._wait_timeout())
         self.service.connected = False
         self.service.model.next_expiry = None
+        self.service.last_rebuild = time.monotonic()
         # Confirmation-age and recent-activity transitions remain visible offline.
         self.assertGreater(self.service._wait_timeout(), 0)
 
