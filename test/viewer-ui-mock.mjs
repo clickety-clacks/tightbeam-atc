@@ -56,7 +56,10 @@ assert.match(hud.title, /no separate gaze signal/);
    the entire map status red. */
 const partialModel = structuredClone(statusModel);
 partialModel.freshness.state = 'rebuilding';
-partialModel.freshness.reason = 'published read incomplete';
+partialModel.freshness.reason = 'reading published state: recovery';
+partialModel.freshness.reconciliation.mode = 'recovery';
+partialModel.freshness.reconciliation.pendingScopes = 11;
+partialModel.freshness.reconciliation.totalScopes = 788;
 partialModel.freshness.reconciliation.active.overBudgetScopes = 0;
 partialModel.freshness.reconciliation.active.oldestConfirmedAt = now - 5 * 60_000;
 partialModel.items[0].evidence.identity = {status: 'known', freshness: 'stale',
@@ -67,8 +70,9 @@ renderModelStatusElement(partialHud, {model: partialModel,
 assert.equal(partialHud.className, 'rebuilding');
 assert.match(partialHud.textContent, /^rebuilding ·/);
 assert.match(partialHud.textContent, /2 stale/);
+assert.match(partialHud.title, /Reconciliation: recovery · 11 pending \/ 788 cycle scopes/);
 assert.match(partialHud.title, /Service freshness: rebuilding/);
-assert.match(partialHud.title, /Reason: published read incomplete/);
+assert.match(partialHud.title, /Reason: reading published state: recovery/);
 assert.match(renderEvidenceMarkup(partialModel.items[0], now),
   /identity<\/b> · known · stale · observed 30s ago · work-items · incomplete/);
 

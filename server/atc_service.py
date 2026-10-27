@@ -452,6 +452,8 @@ class LiveService:
                 for resource, scope in self.model.inventories:
                     self.reads.touch(resource, scope)
                 self._cycle_add(BASE_SCOPES, repeat=True)
+                if self.connected:
+                    self._incomplete_state("reading published state: " + self.cycle["mode"])
             return
         mode = ("bootstrap" if self.metrics["bootstrapReads"] is None else "recovery") if recovery else "interval"
         self.cycle = {"mode": mode, "pending": set(), "seen": set(),

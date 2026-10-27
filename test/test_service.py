@@ -177,6 +177,27 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertIsNotNone(service.last_complete)
         self.assertEqual("live", service.state)
 
+    def test_reconnected_partial_recovery_keeps_stale_on_only_pending_scope(self):
+        self.gateway.partial.add(("attests", "assignment"))
+        self.service._handle("lost", "feed disconnected: transport closed")
+        self.assertEqual("stale", self.service.state)
+        self.assertIsNotNone(self.service.cycle)
+
+        self.service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+        self.assertTrue(self.service.connected)
+        self.assertEqual("rebuilding", self.service.state)
+
+        self.drain()
+        self.assertEqual("rebuilding", self.service.state)
+        self.assertEqual({("attests", "assignment")}, self.service.cycle["pending"])
+        self.assertFalse(self.service.model.inventory("work-items").stale)
+        self.assertFalse(self.service.model.inventory("assignments").stale)
+        self.assertTrue(self.service.model.inventory("attests", "assignment").stale)
+
+        reconciliation = self.service.snapshot()["freshness"]["reconciliation"]
+        self.assertGreater(reconciliation["totalScopes"], reconciliation["pendingScopes"])
+        self.assertEqual(1, reconciliation["pendingScopes"])
+
     def test_repeated_lost_after_healthy_offline_settle_waits_for_interval(self):
         rebuilds = self.service.metrics["rebuilds"]
         self.service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
