@@ -249,7 +249,13 @@ class LiveService:
     def _incomplete_state(self, reason):
         # A connected feed with a failed read is still rebuilding; the
         # affected inventories carry stale evidence individually. Disconnects
-        # and over-budget active scopes remain a global stale condition.
+        # and over-budget active scopes remain a global stale condition. An
+        # uncorrelated change has no inventory to mark stale, so retain its
+        # global warning until a full sweep or recovery resolves the gap.
+        if self.correlation_gaps:
+            resource = min(resource for resource, _ in self.correlation_gaps)
+            self._state("stale", "uncorrelated " + resource + " change")
+            return
         self._state("rebuilding" if self.connected else "stale", reason)
 
     def _publish(self, *, classified=False):

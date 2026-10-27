@@ -498,6 +498,31 @@ class ServiceRecoveryTest(unittest.TestCase):
             seen.update(histories)
         self.assertEqual(self.service.backstop.history, seen)
 
+    def test_unplaced_change_stays_stale_after_interval_without_full_sweep(self):
+        self.gateway.rows[("assignments", None)][0]["state"] = "closed"
+        self.service.rebuild()
+        self.drain()
+        self.service._update_backstop(20)
+        self.assertIn(("attests", "assignment"), self.service.backstop.history)
+
+        self.service.scope_budget = 1
+        self.service.change({"resource": "messages", "refs": {"messageId": "unplaced"}})
+        gap = ("messages", "unplaced")
+        self.assertIn(gap, self.service.correlation_gaps)
+        self.assertEqual("stale", self.service.state)
+
+        sweep = set(self.service.sweep_remaining)
+        self.assertTrue(sweep)
+        self.service.rebuild(recovery=False)
+        self.drain()
+
+        self.assertIsNone(self.service.cycle)
+        self.assertTrue(self.service.sweep_remaining)
+        self.assertLess(len(self.service.sweep_remaining), len(sweep))
+        self.assertIn(gap, self.service.correlation_gaps)
+        self.assertEqual("stale", self.service.state)
+        self.assertEqual("uncorrelated messages change", self.service.reason)
+
     def test_background_history_read_does_not_block_targeted_change(self):
         entered, release = threading.Event(), threading.Event()
         original = self.gateway.read
