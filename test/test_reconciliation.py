@@ -134,3 +134,24 @@ class ActiveBackstopTest(unittest.TestCase):
             self.reads.finish(job, epoch)
         self.assertEqual([("assignments", None, "notice"), ("attests", "open", None),
                           ("attests", "old", None)], dispatched)
+
+    def test_epoch_retry_preserves_dispatch_priority(self):
+        class Gateway:
+            def read(self, resource, scope):
+                return Read([], True, 100, "read")
+
+            def detail(self, resource, key, scope=None):
+                return Read([], True, 100, "detail")
+
+        self.reads.gateway = Gateway()
+        self.reads.workers = 1
+        for expected, options in ((2, {"priority": True}), (1, {"active": True})):
+            scope = f"retry-{expected}"
+            self.reads.schedule("attests", scope, **options)
+            self.reads.pump()
+            kind, (job, epoch, _) = self.reads.events.get(timeout=2)
+            self.assertEqual("read", kind)
+            self.reads.touch(*job[:2])
+            self.assertFalse(self.reads.finish(job, epoch))
+            self.assertEqual(expected, self.reads.pending[job])
+            self.reads.pending.clear()
