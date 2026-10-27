@@ -332,7 +332,13 @@ class ServiceRecoveryTest(unittest.TestCase):
         reads_before_reconnect = gateway.read_count
         service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
         self.assertEqual(reads_before_reconnect, gateway.read_count)
-        self.assertEqual({retry}, set(service.reads.pending))
+        pending_scopes = {job[:2] for job in service.reads.pending if job[2] is None}
+        stale_scopes = {scope for scope in offline_cycle["seen"]
+                        if (not service.model.inventory(*scope).complete
+                            or service.model.inventory(*scope).stale
+                            or service.model.inventory(*scope).budget_stale)}
+        self.assertEqual(stale_scopes, pending_scopes)
+        self.assertIn(retry[:2], pending_scopes)
         self.drain(service)
         self.assertIsNone(service.cycle)
         self.assertFalse(service.model.inventory(*retry[:2]).stale)
