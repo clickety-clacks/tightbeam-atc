@@ -63,7 +63,8 @@ partialModel.freshness.reconciliation.totalScopes = 788;
 partialModel.freshness.reconciliation.active.overBudgetScopes = 0;
 partialModel.freshness.reconciliation.active.oldestConfirmedAt = now - 5 * 60_000;
 partialModel.items[0].evidence.identity = {status: 'known', freshness: 'stale',
-  observedAt: now - 30_000, source: ['work-items'], complete: false};
+  observedAt: now - 30_000, unconfirmedSince: now - 120_000,
+  source: ['work-items'], complete: false};
 const partialHud = {textContent: '', className: '', title: ''};
 renderModelStatusElement(partialHud, {model: partialModel,
   streamState: 'connected', streamError: null}, now);
@@ -74,7 +75,7 @@ assert.match(partialHud.title, /Reconciliation: recovery · 11 pending \/ 788 cy
 assert.match(partialHud.title, /Service freshness: rebuilding/);
 assert.match(partialHud.title, /Reason: reading published state: recovery/);
 assert.match(renderEvidenceMarkup(partialModel.items[0], now),
-  /identity<\/b> · known · stale · observed 30s ago · work-items · incomplete/);
+  new RegExp(`identity<\\/b> · known · stale · unconfirmed since ${new Date(now - 120_000).toISOString()} · observed 30s ago · work-items · incomplete`));
 
 const offlineHud = {textContent: '', className: '', title: ''};
 renderModelStatusElement(offlineHud, {
@@ -102,11 +103,14 @@ assert.match(offlineHud.title, /^Warning: Live feed is unavailable/);
 const facts = renderEvidenceMarkup({evidence: {
   stage: {status: 'unknown', freshness: 'stale', observedAt: now - 90_000,
     source: ['work-items'], complete: false},
+  outage: {status: 'known', freshness: 'unconfirmed', unconfirmedSince: now,
+    observedAt: now - 120_000, source: ['assignments'], complete: true},
   ring: {status: 'known', freshness: 'rebuilding', observedAt: null,
     source: ['attests'], complete: true},
 }}, now);
 assert.match(facts, /stage<\/b> · unknown · stale · observed 1m ago · work-items · incomplete/);
 assert.match(facts, /ring<\/b> · known · rebuilding · observed unknown · attests · complete/);
+assert.match(facts, new RegExp(`outage<\\/b> · known · unconfirmed since ${new Date(now).toISOString()} · observed 2m ago · assignments · complete`));
 
 /* A feed delta changes scene data, then the same preservation boundary used by
    receiveModel must restore camera and every user-owned scope through rebuild. */

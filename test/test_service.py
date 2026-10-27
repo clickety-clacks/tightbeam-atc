@@ -191,8 +191,66 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertIsNotNone(service.last_complete)
         self.assertEqual("live", service.state)
 
-    def test_reconnected_partial_recovery_keeps_stale_on_only_pending_scope(self):
+    def test_completed_scopes_keep_credit_and_show_outage_until_validated(self):
+        completed = {
+            scope: (deepcopy(inventory.rows), inventory.confirmed_at)
+            for scope, inventory in self.service.model.inventories.items()
+            if inventory.complete
+        }
+        self.assertTrue(completed)
+        reads_before_outage = self.gateway.read_count
+        last_complete_before = self.service.last_complete
+        outage_at = 1000
+
+        with patch("atc_service.now_ms", return_value=outage_at):
+            self.service._handle("lost", "feed disconnected: transport closed")
+        self.assertIsNotNone(self.service.cycle)
+        self.assertEqual(set(), self.service.cycle["pending"])
+        self.assertEqual(reads_before_outage, self.gateway.read_count)
+        for scope, (rows, confirmed_at) in completed.items():
+            inventory = self.service.model.inventory(*scope)
+            self.assertEqual(rows, inventory.rows)
+            self.assertTrue(inventory.complete)
+            self.assertFalse(inventory.stale)
+            self.assertEqual(confirmed_at, inventory.confirmed_at)
+            self.assertEqual(outage_at, inventory.unconfirmed_since)
+            self.assertEqual("unconfirmed", inventory.evidence()["freshness"])
+
+        with patch("atc_service.now_ms", return_value=1100):
+            self.service._handle(
+                "ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+            self.service._publish()
+        self.assertTrue(self.service.connected)
+        self.assertIsNone(self.service.cycle)
+        self.assertTrue(self.service.metrics["bootstrapComplete"])
+        self.assertNotEqual(last_complete_before, self.service.last_complete)
+        self.assertEqual(1100, self.service.last_complete)
+        self.assertEqual("live", self.service.state)
+        self.assertEqual(reads_before_outage, self.gateway.read_count)
+        item = self.service.snapshot()["items"][0]
+        self.assertEqual("unconfirmed", item["evidence"]["identity"]["freshness"])
+        self.assertEqual(outage_at, item["evidence"]["identity"]["unconfirmedSince"])
+        self.assertEqual("unconfirmed", item["evidence"]["stage"]["freshness"])
+        status, page = self.service.evidence_page("work")
+        self.assertEqual(200, status)
+        self.assertEqual("unconfirmed", page["freshness"]["freshness"])
+        self.assertEqual(outage_at, page["freshness"]["unconfirmedSince"])
+
+        work_rows = list(self.service.model.inventory("work-items").rows.values())
+        self.service.model.accept("work-items", None,
+                                  Read(work_rows, True, 1200, "validating-read"))
+        with patch("atc_service.now_ms", return_value=1200):
+            self.service._publish()
+        item = self.service.snapshot()["items"][0]
+        self.assertEqual("live", item["evidence"]["identity"]["freshness"])
+        self.assertIsNone(item["evidence"]["identity"]["unconfirmedSince"])
+        self.assertEqual("unconfirmed", item["evidence"]["stage"]["freshness"])
+        self.assertEqual(outage_at,
+                         self.service.model.inventory("assignments").unconfirmed_since)
+
+    def test_reconnected_partial_recovery_keeps_stale_on_genuinely_incomplete_scope(self):
         self.gateway.partial.add(("attests", "assignment"))
+        self.service.model.inventory("attests", "assignment").invalidate()
         self.service._handle("lost", "feed disconnected: transport closed")
         self.assertEqual("stale", self.service.state)
         self.assertIsNotNone(self.service.cycle)
@@ -207,18 +265,24 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertFalse(self.service.model.inventory("work-items").stale)
         self.assertFalse(self.service.model.inventory("assignments").stale)
         self.assertTrue(self.service.model.inventory("attests", "assignment").stale)
+        self.assertEqual("unconfirmed", self.service.model.inventory("work-items").evidence()["freshness"])
+        self.assertEqual("unconfirmed", self.service.model.inventory("assignments").evidence()["freshness"])
+        self.assertIsNotNone(self.service.model.inventory("attests", "assignment").unconfirmed_since)
 
         self.service._publish()
         reconciliation = self.service.snapshot()["freshness"]["reconciliation"]
         self.assertGreater(reconciliation["totalScopes"], reconciliation["pendingScopes"])
         self.assertEqual(1, reconciliation["pendingScopes"])
+        self.assertEqual("stale", self.service.snapshot()["items"][0]["evidence"]["stage"]["freshness"])
+        self.assertIsNotNone(self.service.snapshot()["items"][0]["evidence"]["stage"]["unconfirmedSince"])
 
     def test_repeated_lost_events_do_not_rebuild_after_disconnect_transition(self):
         self.service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
         cycle = self.service.cycle
         self.assertIsNotNone(cycle)
         self.drain()
-        self.assertIsNone(self.service.cycle)
+        self.assertIs(cycle, self.service.cycle,
+                      "an offline recovery keeps completion credit but waits to settle until reconnect")
         rebuilds = self.service.metrics["rebuilds"]
         reads = self.gateway.read_count
         epochs = dict(self.service.reads.epochs)
@@ -226,7 +290,7 @@ class ServiceRecoveryTest(unittest.TestCase):
         for reason in ("feed disconnected: retry 1", "feed disconnected: retry 2"):
             self.service._handle("lost", reason)
             self.assertEqual(reason, self.service.reason)
-            self.assertIsNone(self.service.cycle)
+            self.assertIs(cycle, self.service.cycle)
             self.assertEqual(rebuilds, self.service.metrics["rebuilds"])
             self.assertEqual(epochs, dict(self.service.reads.epochs))
             self.assertEqual(reads, self.gateway.read_count)

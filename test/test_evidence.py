@@ -37,6 +37,29 @@ class EvidenceTest(unittest.TestCase):
                           at=2, source="feed", policy="immutable")
         self.assertFalse(inventory.complete)
 
+    def test_unconfirmed_scope_clears_only_after_a_complete_read(self):
+        inventory = Inventory()
+        inventory.read([{"id": "one", "rowVersion": 1}],
+                       complete=True, at=10, source="read")
+        inventory.mark_unconfirmed(20)
+        self.assertEqual(10, inventory.confirmed_at)
+        self.assertEqual(20, inventory.evidence()["unconfirmedSince"])
+        self.assertEqual("unconfirmed", inventory.evidence()["freshness"])
+
+        inventory.payload({"id": "one", "rowVersion": 2}, at=21,
+                          source="feed", policy="strict-version")
+        self.assertEqual(20, inventory.unconfirmed_since)
+        inventory.read([{"id": "one", "rowVersion": 3}],
+                       complete=False, at=22, source="partial-read")
+        self.assertEqual(20, inventory.unconfirmed_since)
+        self.assertEqual("stale", inventory.evidence()["freshness"])
+
+        inventory.read([{"id": "one", "rowVersion": 4}],
+                       complete=True, at=30, source="validating-read")
+        self.assertIsNone(inventory.unconfirmed_since)
+        self.assertEqual(30, inventory.confirmed_at)
+        self.assertEqual("live", inventory.evidence()["freshness"])
+
     def test_unknown_is_not_stage_zero(self):
         self.assertIsNone(evidence_stage({"state": "open"}, [], [], complete=False))
         self.assertEqual(0, evidence_stage({"state": "open"}, [], [], complete=True))

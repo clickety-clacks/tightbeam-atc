@@ -19,6 +19,7 @@ class Inventory:
     complete: bool = False
     observed_at: int | None = None
     confirmed_at: int | None = None
+    unconfirmed_since: int | None = None
     budget_stale: bool = False
     stale: bool = True
     source: str = ""
@@ -36,6 +37,7 @@ class Inventory:
             self.rows = incoming
             self.observations = {}
             self.confirmed_at = at
+            self.unconfirmed_since = None
             self.budget_stale = False
         else:
             self.rows.update(incoming)
@@ -55,6 +57,11 @@ class Inventory:
         self.stale = True
         for observation in self.observations.values():
             observation["freshness"] = "stale"
+
+    def mark_unconfirmed(self, at):
+        """Keep completed data while recording that its feed missed an outage."""
+        if self.complete and self.unconfirmed_since is None:
+            self.unconfirmed_since = at
 
     def payload(self, row, *, at, source, policy):
         """Only the follower's version-verified resource policy calls this.
@@ -95,25 +102,45 @@ class Inventory:
         return True
 
     def evidence(self):
+        freshness = ("stale" if self.stale or self.budget_stale else
+                     "unconfirmed" if self.unconfirmed_since is not None else "live")
         return {
             "status": "known" if self.complete else "unknown",
-            "freshness": "stale" if self.stale or self.budget_stale else "live",
+            "freshness": freshness,
             "observedAt": self.observed_at, "source": self.source,
-            "complete": self.complete,
+            "complete": self.complete, "unconfirmedSince": self.unconfirmed_since,
         }
+
+    def evidence_for(self, row_id):
+        """Return row evidence with inventory-wide stale/outage state applied."""
+        observation = self.observations.get(str(row_id))
+        fact = dict(observation) if observation is not None else self.evidence()
+        if self.stale or self.budget_stale:
+            fact["freshness"] = "stale"
+        elif self.unconfirmed_since is not None:
+            fact["freshness"] = "unconfirmed"
+        fact["unconfirmedSince"] = self.unconfirmed_since
+        return fact
 
 
 def combined_evidence(*facts):
     known = bool(facts) and all(f["status"] == "known" for f in facts)
     times = [f["observedAt"] for f in facts if f.get("observedAt") is not None]
+    unconfirmed = [f["unconfirmedSince"] for f in facts
+                   if isinstance(f.get("unconfirmedSince"), (int, float))]
+    if any(f["freshness"] == "stale" for f in facts):
+        freshness = "stale"
+    elif unconfirmed or any(f["freshness"] == "unconfirmed" for f in facts):
+        freshness = "unconfirmed"
+    else:
+        freshness = "live" if facts and all(f["freshness"] == "live" for f in facts) else "stale"
     return {
         "status": "known" if known else "unknown",
-        "freshness": "live" if facts and all(
-            f["freshness"] == "live" for f in facts) else "stale",
+        "freshness": freshness,
         "observedAt": min(times) if times else None,
         "source": sorted({s for f in facts for s in (
             f["source"] if isinstance(f["source"], list) else [f["source"]]) if s}),
-        "complete": known,
+        "complete": known, "unconfirmedSince": min(unconfirmed) if unconfirmed else None,
     }
 
 

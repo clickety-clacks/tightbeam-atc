@@ -308,16 +308,29 @@ export function isEvidencePage(page, {itemId, generation, revision, offset=0} = 
     && typeof page.complete === 'boolean'
     && freshness && typeof freshness === 'object' && !Array.isArray(freshness)
     && ['known', 'unknown'].includes(freshness.status)
-    && ['live', 'stale'].includes(freshness.freshness)
+    && ['live', 'stale', 'unconfirmed'].includes(freshness.freshness)
     && (freshness.observedAt === null || Number.isFinite(freshness.observedAt))
+    && (freshness.unconfirmedSince === undefined || freshness.unconfirmedSince === null
+      || Number.isFinite(freshness.unconfirmedSince))
+    && (freshness.freshness !== 'unconfirmed' || Number.isFinite(freshness.unconfirmedSince))
     && Array.isArray(freshness.source) && freshness.source.every(source => typeof source === 'string')
     && typeof freshness.complete === 'boolean' && freshness.complete === page.complete);
 }
 
 export function evidencePageFreshness(freshness) {
   return freshness && typeof freshness === 'object' && !Array.isArray(freshness)
-    && ['live', 'stale'].includes(freshness.freshness)
+    && ['live', 'stale', 'unconfirmed'].includes(freshness.freshness)
     ? freshness.freshness : 'unknown freshness';
+}
+
+export function evidenceFreshnessLabel(evidence) {
+  const freshness = ['live', 'stale', 'rebuilding', 'unconfirmed'].includes(evidence?.freshness)
+    ? evidence.freshness : 'unknown freshness';
+  if (Number.isFinite(evidence?.unconfirmedSince)) {
+    const outage = `unconfirmed since ${timestampLabel(evidence.unconfirmedSince)}`;
+    return freshness === 'unconfirmed' ? outage : `${freshness} · ${outage}`;
+  }
+  return freshness === 'unconfirmed' ? 'unconfirmed since unknown time' : freshness;
 }
 
 export function evidenceRecordAuthor(record) {
@@ -363,7 +376,7 @@ export function sceneSignature(model) {
     const facts = evidence && typeof evidence==='object'
       ? Object.fromEntries(Object.entries(evidence).map(([name, value])=>{
           if (!value || typeof value!=='object') return [name, value];
-          const {observedAt, freshness, ...stable} = value;
+          const {observedAt, freshness, unconfirmedSince, ...stable} = value;
           return [name, stable];
         })) : evidence;
     return {...rest, ...(agent ? {} : {idleFor, idleSince}), evidence:facts};
@@ -397,6 +410,11 @@ export function factAge(observedAt, now = Date.now()) {
   const hours = Math.floor(minutes / 60);
   if (hours < 48) return `${hours}h`;
   return `${Math.floor(hours / 24)}d`;
+}
+
+function timestampLabel(at) {
+  const value = new Date(at);
+  return Number.isNaN(value.getTime()) ? 'unknown time' : value.toISOString();
 }
 
 export function factValue(entity, fact, value) {
@@ -622,14 +640,13 @@ export function renderEvidenceMarkup(entity, now = Date.now()) {
     if (!evidence || typeof evidence !== 'object')
       return `<span class="evidence-row"><b>${escapeMarkup(name)}</b> · unknown · age unknown · source unknown</span>`;
     const status = evidence.status === 'known' ? 'known' : 'unknown';
-    const freshness = ['live', 'stale', 'rebuilding'].includes(evidence.freshness)
-      ? evidence.freshness : 'unknown freshness';
+    const freshnessLabel = evidenceFreshnessLabel(evidence);
     const observed = factAge(evidence.observedAt, now);
     const source = Array.isArray(evidence.source) ? evidence.source.join(', ')
       : (evidence.source || 'unknown source');
     const complete = evidence.complete === true ? 'complete'
       : evidence.complete === false ? 'incomplete' : 'unknown completeness';
-    return `<span class="evidence-row"><b>${escapeMarkup(name)}</b> · ${status} · ${freshness} · observed ${observed}${observed === 'unknown' ? '' : ' ago'} · ${escapeMarkup(source)} · ${complete}</span>`;
+    return `<span class="evidence-row"><b>${escapeMarkup(name)}</b> · ${status} · ${escapeMarkup(freshnessLabel)} · observed ${observed}${observed === 'unknown' ? '' : ' ago'} · ${escapeMarkup(source)} · ${complete}</span>`;
   });
   return '<span class="seg">' + rows.join('') + '</span>';
 }
