@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
-  applyModelDelta, captureViewerState, clientToNdc, ndcToClient, rebuildWithViewerState,
+  applyModelDelta, captureHoverScroll, captureViewerState, clientToNdc, ndcToClient,
+  fitHoverCard, hoverCardLimits, rebuildWithViewerState, restoreHoverScroll,
   renderEvidenceMarkup, renderModelStatusElement, restoreViewerState, sceneSignature,
   resolveHoverNodes,
 } from '../web/viewer-semantics.mjs';
@@ -29,6 +30,27 @@ for (const rect of [
   assert.ok(Math.abs(roundTrip.x - point.x) < 1e-9);
   assert.ok(Math.abs(roundTrip.y - point.y) < 1e-9);
 }
+
+const nativeViewport = {left: 0, top: 0, width: 1234, height: 846};
+assert.deepEqual(hoverCardLimits(nativeViewport), {width: 1214, height: 826});
+assert.deepEqual(fitHoverCard(1100, 1161, 290, 3021, nativeViewport),
+  {x: 934, y: 10, width: 290, height: 826},
+  'a 3021px hint stays scroll-bounded and its visible card box stays in the viewport');
+const smallViewport = {left: 0, top: 0, width: 1024, height: 720};
+assert.deepEqual(fitHoverCard(800, 916, 290, 2384, smallViewport),
+  {x: 724, y: 10, width: 290, height: 700},
+  'a long hint also fits a smaller viewport with its leader anchor in view');
+assert.deepEqual(fitHoverCard(0, 900, 180, 120, nativeViewport),
+  {x: 10, y: 716, width: 180, height: 120},
+  'a short card remains bounded at viewport edges');
+const hoverScroll = captureHoverScroll([
+  {key: 'i:wi-1', el: {scrollTop: 430}},
+  {key: 'a:agent-1', el: {scrollTop: 92}},
+]);
+const rebuiltHoverCard = {scrollTop: 0};
+restoreHoverScroll('i:wi-1', rebuiltHoverCard, hoverScroll);
+assert.equal(rebuiltHoverCard.scrollTop, 430,
+  'a long card retains its reading position when a model rebuild replaces its mesh');
 
 const rebuiltMeshes = new Map([
   ['i:wi-1', {id: 'replacement-item'}],

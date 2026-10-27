@@ -18,6 +18,39 @@ export function ndcToClient(ndcX, ndcY, rect, out = {x: 0, y: 0}) {
   return out;
 }
 
+/* Keep hover cards and the point where their leader leaves the card inside
+   the rendered viewport, even when the card content is taller than it. */
+export function hoverCardLimits(viewport, padding = 10) {
+  return {
+    width: Math.max(1, viewport.width - 2 * padding),
+    height: Math.max(1, viewport.height - 2 * padding),
+  };
+}
+
+export function fitHoverCard(x, y, width, height, viewport, padding = 10) {
+  const limit = hoverCardLimits(viewport, padding);
+  const fittedWidth = Math.min(Math.max(1, width), limit.width);
+  const fittedHeight = Math.min(Math.max(1, height), limit.height);
+  return {
+    x: Math.max(viewport.left + padding,
+      Math.min(viewport.left + viewport.width - padding - fittedWidth, x)),
+    y: Math.max(viewport.top + padding,
+      Math.min(viewport.top + viewport.height - padding - fittedHeight, y)),
+    width: fittedWidth,
+    height: fittedHeight,
+  };
+}
+
+export function captureHoverScroll(hoverLeaders) {
+  return new Map(hoverLeaders
+    .filter(L => L.key && L.el)
+    .map(L => [L.key, L.el.scrollTop]));
+}
+
+export function restoreHoverScroll(key, element, offsets) {
+  if (offsets?.has(key)) element.scrollTop = offsets.get(key);
+}
+
 /* Scene rebuilds replace meshes; resolve the visible hover keys against the
    current scene and leave removed entities behind. */
 export function resolveHoverNodes(keys, resolveByKey) {

@@ -131,7 +131,8 @@
     border:1px solid #3a3d42; border-left:3px solid #b08d57; border-radius:4px;
     padding:7px 11px; font-size:12.5px; line-height:1.5;
     width:min(300px, calc(100vw - 24px)); box-sizing:border-box;
-    overflow-wrap:anywhere; }
+    overflow-wrap:anywhere; overflow-y:auto; overscroll-behavior:contain;
+    scrollbar-width:thin; -webkit-overflow-scrolling:touch; pointer-events:auto; }
   #hovercards .hc .t { color:#b08d57; font-weight:600; }
   #hovercards .hc .k { color:#7c8188; text-transform:uppercase; letter-spacing:.12em;
     font-size:9.5px; display:block; margin:6px 0 2px; }
@@ -321,7 +322,9 @@ import { agentSampleTimes, applyModelDelta, canInspectNode, evidencePageQuery,
          evidenceFreshnessLabel, evidenceRecordAuthor, factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, knownStage,
          prepareModelSnapshot, rebuildWithViewerState, renderEvidenceMarkup, renderModelStatusElement,
-         captureViewerState, clientToNdc, ndcToClient, resolveHoverNodes, restoreViewerState,
+         captureHoverScroll, captureViewerState, clientToNdc, ndcToClient,
+         hoverCardLimits, fitHoverCard, resolveHoverNodes, restoreHoverScroll,
+         restoreViewerState,
          ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
 import { OrbitControls } from './addons/controls/OrbitControls.js';
 import { LineSegments2 } from './addons/lines/LineSegments2.js';
@@ -2217,6 +2220,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
   const previousEvidencePages = new Map(itemEvidencePages);
   const previousEvidenceNotices = new Map(itemEvidenceNotices);
   const previousHoverKeys = hoverLeaders.map(L => L.key).filter(Boolean);
+  const previousHoverScroll = captureHoverScroll(hoverLeaders);
   const versionChanged = Boolean(lastModel && (model.generation!==lastModel.generation
     || model.revision!==lastModel.revision));
   const nextSamples = agentSampleTimes(agentSamples, model,
@@ -2261,7 +2265,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
       orbitAngle = Math.atan2(d.x, d.z);
       controls.target.copy(orbitTgt);
     } else restoreModelPose(pose);
-    if (sceneChanged) restoreHoverByKey(previousHoverKeys);
+    if (sceneChanged) restoreHoverByKey(previousHoverKeys, previousHoverScroll);
     lastModel = model;
     lastSceneSignature = nextSignature;
     streamState='connected'; streamError=null;
@@ -2292,7 +2296,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
         }, restoreViewerModelState);
       } catch (rollbackError){ restoredPrevious = false; }
     }
-    if (restoredPrevious) restoreHoverByKey(previousHoverKeys);
+    if (restoredPrevious) restoreHoverByKey(previousHoverKeys, previousHoverScroll);
     lastSceneSignature = restoredPrevious ? previousSignature : null;
     if (view.focus.stage===1) renderDetail();
     streamState='stale'; streamError=previous && restoredPrevious
@@ -3046,7 +3050,8 @@ function clearHover(){
   tip.style.display = 'none';
 }
 
-function showHover(nodes, ev){
+function showHover(nodes, ev, restoredScroll = null){
+  const scrollByKey = restoredScroll ?? captureHoverScroll(hoverLeaders);
   hoverLayer.textContent = ''; leaderSvg.textContent = '';
   hoverKeys.clear(); hoverLeaders.length = 0;
   nodes.forEach(n => { const k = selKey(n); if (k) hoverKeys.add(k); });
@@ -3054,7 +3059,9 @@ function showHover(nodes, ev){
 
   const {left, top, width:W, height:H} = canvasBounds;
   const PAD = 10;
-  const CARD = Math.min(290, W - 2 * PAD);
+  const viewport = {left, top, width:W, height:H};
+  const limits = hoverCardLimits(viewport, PAD);
+  const CARD = Math.max(1, Math.min(290, limits.width));
   /* Where each node actually is on screen. Nodes found together are stacked
      along one line of sight, so these are close and often identical — the
      cards cannot be placed AT them, they have to be placed AROUND them. */
@@ -3065,9 +3072,14 @@ function showHover(nodes, ev){
   const cards = nodes.map((node, i) => {
     const el = document.createElement('div');
     el.className = 'hc';
+    el.style.width = CARD + 'px';
+    el.style.maxWidth = limits.width + 'px';
+    el.style.maxHeight = limits.height + 'px';
     el.innerHTML = nodeContent(node.userData, true);
     hoverLayer.appendChild(el);
-    return {el, pt: pts[i], h: el.getBoundingClientRect().height};
+    const key = selKey(node);
+    restoreHoverScroll(key, el, scrollByKey);
+    return {el, key, pt: pts[i], w:CARD, h: el.getBoundingClientRect().height};
   });
 
   /* Fan them around the cluster, starting up-right and going clockwise, far
@@ -3082,9 +3094,8 @@ function showHover(nodes, ev){
     const a = spread[i];
     let x = cx + Math.cos(a) * (reach + CARD * 0.5) - CARD / 2;
     let y = cy + Math.sin(a) * (reach + c.h * 0.5) - c.h / 2;
-    x = Math.max(left + PAD, Math.min(left + W - PAD - CARD, x));
-    y = Math.max(top + PAD, Math.min(top + H - PAD - c.h, y));
-    c.x = x; c.y = y;
+    const fitted = fitHoverCard(x, y, c.w, c.h, viewport, PAD);
+    c.x = fitted.x; c.y = fitted.y; c.w = fitted.width; c.h = fitted.height;
   });
 
   /* Nudge apart anything that still overlaps after clamping — the viewport
@@ -3093,12 +3104,14 @@ function showHover(nodes, ev){
     for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++){
       const a = cards[i], b = cards[j];
       const overlapY = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
-      const overlapX = Math.min(a.x + CARD, b.x + CARD) - Math.max(a.x, b.x);
+      const overlapX = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
       if (overlapX <= 0 || overlapY <= 0) continue;
       const push = (overlapY + 8) / 2;
       if (a.y < b.y){ a.y -= push; b.y += push; } else { a.y += push; b.y -= push; }
-      a.y = Math.max(top + PAD, Math.min(top + H - PAD - a.h, a.y));
-      b.y = Math.max(top + PAD, Math.min(top + H - PAD - b.h, b.y));
+      const fittedA = fitHoverCard(a.x, a.y, a.w, a.h, viewport, PAD);
+      const fittedB = fitHoverCard(b.x, b.y, b.w, b.h, viewport, PAD);
+      a.x = fittedA.x; a.y = fittedA.y; a.w = fittedA.width; a.h = fittedA.height;
+      b.x = fittedB.x; b.y = fittedB.y; b.w = fittedB.width; b.h = fittedB.height;
     }
   }
 
@@ -3108,20 +3121,20 @@ function showHover(nodes, ev){
     const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
     dot.setAttribute('r', 3);
     leaderSvg.appendChild(ln); leaderSvg.appendChild(dot);
-    hoverLeaders.push({node: nodes[i], key:selKey(nodes[i]), el:cards[i].el,
-                       ln, dot, x:c.x, y:c.y, w:CARD, h:c.h});
+    hoverLeaders.push({node: nodes[i], key:c.key, el:c.el,
+                       ln, dot, x:c.x, y:c.y, w:c.w, h:c.h});
   });
   aimLeaders();
 }
 
-function restoreHoverByKey(keys){
+function restoreHoverByKey(keys, scrollByKey = null){
   if (!keys.length) return;
   const nodes = resolveHoverNodes(keys, meshForKey);
   if (!nodes.length) return;
   if (hoverGrace !== null) clearTimeout(hoverGrace);
   hoverGrace = null;
   camera.updateMatrixWorld(true);
-  showHover(nodes);
+  showHover(nodes, undefined, scrollByKey);
 }
 
 /* Point every leader at where its node is NOW. The line leaves the card at the
@@ -3150,7 +3163,9 @@ function refreshInspectionAges(now=Date.now()){
     const mesh = meshForKey(L.key);
     if (!mesh){ clearHover(); return; }
     L.node = mesh;
+    const scrollTop = L.el.scrollTop;
     L.el.innerHTML = nodeContent(mesh.userData, true);
+    L.el.scrollTop = scrollTop;
     L.h = L.el.getBoundingClientRect().height;
     L.w = L.el.getBoundingClientRect().width;
   }
@@ -3159,6 +3174,10 @@ function refreshInspectionAges(now=Date.now()){
 
 addEventListener('pointermove', e => {
   if (e.pointerType === 'touch') return;
+  if (hoverLayer.contains(e.target)){
+    clearTimeout(hoverGrace); hoverGrace = null;
+    return;
+  }
   if (!onCanvas(e)){ clearTimeout(hoverGrace); hoverGrace = null; return clearHover(); }
   const nodes = pickAllHover(e);
   if (!nodes.length){
