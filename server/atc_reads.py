@@ -12,6 +12,8 @@ class ReadQueue:
         self.executor = ThreadPoolExecutor(max_workers=workers)
         self.pending = OrderedDict()
         self.active = {}
+        # Epoch-invalidated reads must keep their original scheduling urgency.
+        self.active_priorities = {}
         self.epochs = defaultdict(int)
         self.dispatched = 0
 
@@ -41,10 +43,12 @@ class ReadQueue:
             choices = background if background and self.dispatched % 4 == 3 else eligible
             job = max(choices, key=lambda candidate: self.pending[candidate])
             inventory = job[:2]
+            priority = self.pending[job]
             del self.pending[job]
             self.dispatched += 1
             epoch = self.epochs[inventory]
             self.active[inventory] = job, epoch
+            self.active_priorities[inventory] = priority
             future = self.executor.submit(self._read, job)
             future.add_done_callback(
                 lambda done, job=job, epoch=epoch:
@@ -62,9 +66,11 @@ class ReadQueue:
             return Read([], False, now_ms(), resource, type(error).__name__)
 
     def finish(self, job, epoch):
-        self.active.pop(job[:2])
+        inventory = job[:2]
+        self.active.pop(inventory)
+        priority = self.active_priorities.pop(inventory)
         if epoch != self.epochs[job[:2]]:
-            self.schedule(*job)
+            self.schedule(*job, priority=priority == 2, active=priority == 1)
             return False
         return True
 

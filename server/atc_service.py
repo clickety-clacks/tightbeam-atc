@@ -11,7 +11,7 @@ import uuid
 from atc_model import EvidenceModel
 from atc_evidence import combined_evidence
 from atc_reads import ReadQueue
-from atc_reconciliation import ActiveBackstop
+from atc_reconciliation import ActiveBackstop, RETRY_MS
 from atc_upstream import ATTEST_FIELDS, attest_row, now_ms
 
 
@@ -98,6 +98,7 @@ class LiveService:
         self.last_sweep = None
         self.sweep_remaining = set()
         self.read_failures = set()
+        self.read_retries = {}
         self.correlation_gaps = set()
         self.merge_jobs = queue.Queue()
         self.merge_pending = {}
@@ -403,7 +404,18 @@ class LiveService:
             if repeat or inventory not in self.cycle["seen"]:
                 self.cycle["seen"].add(inventory)
                 self.cycle["pending"].add(inventory)
+                self.read_retries.pop((resource, scope, None), None)
                 self.reads.schedule(resource, scope)
+
+    def _retry_incomplete_reads(self):
+        if not (self.connected or not self.feed_available):
+            return
+        now = time.monotonic()
+        for job, (deadline, priority) in list(self.read_retries.items()):
+            if deadline > now:
+                continue
+            self.read_retries.pop(job, None)
+            self.reads.schedule(*job, priority=priority == 2, active=priority == 1)
 
     def _expand_cycle(self):
         cycle = self.cycle
@@ -463,6 +475,7 @@ class LiveService:
     def _read_done(self, value):
         job, epoch, result = value
         resource, scope, key = job
+        priority = self.reads.active_priorities.get(job[:2], 0)
         if not self.reads.finish(job, epoch):
             return False
         if resource in HISTORIES and scope is None:
@@ -486,10 +499,16 @@ class LiveService:
         if result.complete:
             self.read_failures.discard(job[:2])
             if key is None:
+                self.read_retries.pop(job, None)
                 self.sweep_remaining.discard(job[:2])
         else:
             self.read_failures.add(job[:2])
             self._state("stale", "published read incomplete")
+            if key is None:
+                # Keep a failed collection in the current recovery cycle and
+                # retry it after a bounded pause instead of waiting for the
+                # next full sweep to revisit the scope.
+                self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, priority)
         if ((resource == "assignments" and self.model.inventory("sessions").complete)
                 or (resource == "sessions" and key is None and result.complete)):
             known_sessions = self.model.inventory("sessions").rows
@@ -509,7 +528,8 @@ class LiveService:
                     else:
                         self._refresh(nested, holder)
         if self.cycle and key is None:
-            self.cycle["pending"].discard(job[:2])
+            if result.complete or self.cycle["mode"] == "interval":
+                self.cycle["pending"].discard(job[:2])
             self.cycle["complete"] = self.cycle["complete"] and result.complete
             self._settle_cycle()
         elif not self.cycle and self.connected and not self.read_failures and not self.correlation_gaps:
@@ -693,6 +713,7 @@ class LiveService:
         clock = time.monotonic()
         if clock < self._next_maintenance:
             return
+        self._retry_incomplete_reads()
         if ((self.connected or not self.feed_available) and self.cycle is None and
                 clock - self.last_rebuild >= self.rebuild_interval):
             self.rebuild(recovery=self.metrics["bootstrapReads"] is None)
@@ -720,6 +741,9 @@ class LiveService:
         backstop_deadline = self.backstop.deadline(self.model, self.reads, now_ms(), self.connected)
         if backstop_deadline is not None:
             deadlines.append((backstop_deadline - now_ms()) / 1000)
+        if self.connected or not self.feed_available:
+            deadlines.extend(due - time.monotonic()
+                             for due, _ in self.read_retries.values())
         return max(0, min(deadlines)) if deadlines else None
 
     def _feed(self):
