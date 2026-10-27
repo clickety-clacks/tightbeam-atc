@@ -244,16 +244,17 @@ class ServiceRecoveryTest(unittest.TestCase):
             self.assertFalse(service.reads.pending)
         self.assertEqual(reads, gateway.read_count)
 
-        # Its scheduled retry still completes bootstrap while disconnected.
+        # Its scheduled retry still runs while disconnected; the model remains
+        # stale until the feed reconnects and can establish live freshness.
         gateway.partial.clear()
         service.read_retries[retry] = (time.monotonic() - 1, retry_state[1])
         service._retry_incomplete_reads()
         self.assertIn(retry, service.reads.pending)
         self.drain(service)
         self.assertIsNone(service.cycle)
-        self.assertTrue(service.metrics["bootstrapComplete"])
-        self.assertEqual("stale", service.state)
+        self.assertEqual(1, service.retry_counters["completed"])
         self.assertTrue(service.last_retry_outcome["complete"])
+        self.assertEqual("stale", service.state)
 
     def test_status_exposes_sanitized_page_retry_epoch_and_feed_lag_details(self):
         job = ("work-items", None, None)
