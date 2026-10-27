@@ -675,7 +675,8 @@ class ServiceRecoveryTest(unittest.TestCase):
 
         self.assertIsNone(self.service.cycle)
         self.assertNotIn(gap, self.service.correlation_gaps)
-        self.assertEqual("live", self.service.state)
+        self.assertTrue(self.service.model.inventory("messages", "agent s_author").stale,
+                        "a detail read correlates the event but does not validate the full scope")
 
     def test_background_history_read_does_not_block_targeted_change(self):
         entered, release = threading.Event(), threading.Event()
