@@ -3,6 +3,7 @@
 from collections import deque
 from copy import deepcopy
 import json
+import logging
 import queue
 import threading
 import time
@@ -29,6 +30,7 @@ PUBLICATION_INTERVAL = 0.25
 EVENT_BATCH_LIMIT = 128
 
 COLLECTIONS = ("agents", "items", "links", "wakes", "messages")
+LOG = logging.getLogger("atc.recovery")
 
 RESOURCE_REFS = {
     "work-items": "workItemId", "assignments": "assignmentId",
@@ -99,6 +101,17 @@ class LiveService:
         self.sweep_remaining = set()
         self.read_failures = set()
         self.read_retries = {}
+        self.retry_in_flight = set()
+        self.retry_counters = {"scheduled": 0, "completed": 0, "incomplete": 0,
+                               "epochDiscarded": 0}
+        self.last_incomplete_read = None
+        self.last_retry_outcome = None
+        self.feed_lock = threading.Lock()
+        self.feed_received = 0
+        self.feed_processed = 0
+        self.feed_queued = 0
+        self.feed_last_lag_ms = None
+        self.feed_max_lag_ms = None
         self.correlation_gaps = set()
         self.merge_jobs = queue.Queue()
         self.merge_pending = {}
@@ -128,7 +141,9 @@ class LiveService:
 
     def snapshot(self):
         with self.condition:
-            return deepcopy(self.current)
+            value = deepcopy(self.current)
+        value["freshness"]["reconciliation"]["readDiagnostics"] = self._read_diagnostics()
+        return value
 
     def next_snapshot(self, revision, timeout=15):
         with self.condition:
@@ -261,6 +276,10 @@ class LiveService:
         comparison = dict(candidate, agents=[
             {key: value for key, value in agent.items() if key != "idleFor"}
             for agent in data["agents"]])
+        comparison["freshness"] = dict(candidate["freshness"])
+        comparison["freshness"]["reconciliation"] = dict(
+            candidate["freshness"]["reconciliation"])
+        comparison["freshness"]["reconciliation"].pop("readDiagnostics", None)
         self._dirty = False
         self._last_publication = time.monotonic()
         if comparison == self._comparison and self.model.details_revision == self._published_details:
@@ -368,7 +387,43 @@ class LiveService:
                 "estimatedSweepMs": ((terminal + self.scope_budget - 1) // self.scope_budget
                                      * self.rebuild_interval * 1000),
                 "lastSweepAt": self.last_sweep,
+                "readDiagnostics": self._read_diagnostics(),
                 **self.backstop.metadata(self.model, self.connected)}
+
+    def _read_diagnostics(self):
+        with self.feed_lock:
+            feed = {"received": self.feed_received, "processed": self.feed_processed,
+                    "queued": self.feed_queued,
+                    "lastReceiveToProcessMs": self.feed_last_lag_ms,
+                    "maxReceiveToProcessMs": self.feed_max_lag_ms}
+        return {
+            "lastIncompleteRead": deepcopy(self.last_incomplete_read),
+            "lastRetryOutcome": deepcopy(self.last_retry_outcome),
+            "gatewayReadRequests": getattr(self.gateway, "read_count", None),
+            "readQueue": {"pending": len(self.reads.pending),
+                          "active": len(self.reads.active)},
+            "retry": {**self.retry_counters, "waiting": len(self.read_retries),
+                      "inProgress": len(self.retry_in_flight)},
+            "epochDiscards": {"total": self.reads.epoch_discards,
+                              "byResource": dict(self.reads.epoch_discards_by_resource)},
+            "feed": feed,
+        }
+
+    def _record_feed_processed(self, received_at):
+        lag_ms = max(0, round((time.monotonic() - received_at) * 1000))
+        with self.feed_lock:
+            self.feed_processed += 1
+            self.feed_queued = max(0, self.feed_queued - 1)
+            self.feed_last_lag_ms = lag_ms
+            self.feed_max_lag_ms = (lag_ms if self.feed_max_lag_ms is None
+                                    else max(self.feed_max_lag_ms, lag_ms))
+
+    def _queue_feed_change(self, message, received_at=None):
+        received_at = time.monotonic() if received_at is None else received_at
+        with self.feed_lock:
+            self.feed_received += 1
+            self.feed_queued += 1
+        self.events.put(("change", (message, received_at)))
 
     def rebuild(self, *, recovery=True):
         """Schedule work, never perform upstream I/O on the model worker.
@@ -408,13 +463,12 @@ class LiveService:
                 self.reads.schedule(resource, scope)
 
     def _retry_incomplete_reads(self):
-        if not (self.connected or not self.feed_available):
-            return
         now = time.monotonic()
         for job, (deadline, priority) in list(self.read_retries.items()):
             if deadline > now:
                 continue
             self.read_retries.pop(job, None)
+            self.retry_in_flight.add(job)
             self.reads.schedule(*job, priority=priority == 2, active=priority == 1)
 
     def _expand_cycle(self):
@@ -460,6 +514,10 @@ class LiveService:
             self.metrics["bootstrapReads"] = self.gateway.read_count - cycle["reads"]
             self.metrics["bootstrapMs"] = round((time.monotonic() - cycle["started"]) * 1000)
             self.metrics["bootstrapComplete"] = complete
+        elif complete:
+            # A failed first pass must not permanently latch the bootstrap as
+            # incomplete after a later recovery cycle finishes successfully.
+            self.metrics["bootstrapComplete"] = True
         if cycle["mode"] != "interval" and complete:
             self.last_complete = self.last_sweep = now_ms()
             self.sweep_remaining = set(self._history_scopes())
@@ -476,8 +534,24 @@ class LiveService:
         job, epoch, result = value
         resource, scope, key = job
         priority = self.reads.active_priorities.get(job[:2], 0)
+        retry = job in self.retry_in_flight
         if not self.reads.finish(job, epoch):
+            if retry:
+                self.retry_counters["epochDiscarded"] += 1
+                self.last_retry_outcome = {
+                    "resource": resource, "readKind": self._read_kind(scope, key),
+                    "result": "epoch-discarded", "at": now_ms(),
+                }
             return False
+        if retry:
+            self.retry_in_flight.discard(job)
+            self.retry_counters["completed" if result.complete else "incomplete"] += 1
+            self.last_retry_outcome = self._read_outcome(resource, scope, key, result)
+        if not result.complete:
+            self.last_incomplete_read = self._read_outcome(resource, scope, key, result)
+            LOG.warning("published read incomplete resource=%s readKind=%s page=%s error=%s",
+                        resource, self._read_kind(scope, key), result.page,
+                        self._error_category(result.error))
         if resource in HISTORIES and scope is None:
             # Correlation reads establish where the scoped read belongs. They
             # never establish completeness of an unknown history inventory.
@@ -509,6 +583,7 @@ class LiveService:
                 # retry it after a bounded pause instead of waiting for the
                 # next full sweep to revisit the scope.
                 self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, priority)
+                self.retry_counters["scheduled"] += 1
         if ((resource == "assignments" and self.model.inventory("sessions").complete)
                 or (resource == "sessions" and key is None and result.complete)):
             known_sessions = self.model.inventory("sessions").rows
@@ -538,6 +613,21 @@ class LiveService:
                    for s in required):
                 self._state("live")
         return True
+
+    @staticmethod
+    def _read_kind(scope, key):
+        if key is not None:
+            return "detail"
+        return "scoped-history" if scope is not None else "collection"
+
+    @staticmethod
+    def _error_category(error):
+        return error if isinstance(error, str) and error.isidentifier() else "read-failed"
+
+    def _read_outcome(self, resource, scope, key, result):
+        return {"resource": resource, "readKind": self._read_kind(scope, key),
+                "page": result.page, "complete": result.complete,
+                "error": self._error_category(result.error), "at": result.at}
 
     def _resolve_merges(self):
         if self.resolver is None:
@@ -652,17 +742,28 @@ class LiveService:
             self.payload_warning = payload_policy_warning(value)
             self.rebuild()
         elif kind == "lost":
-            changed = self.connected
+            was_connected = self.connected
             self.connected = False
-            changed = self._state("stale", value) or changed
-            if changed:
-                self.model.invalidate()
-                for resource, scope in self.model.inventories:
-                    self.reads.touch(resource, scope)
+            changed = self._state("stale", value) or was_connected
+            if was_connected:
+                if self.cycle is None:
+                    self.model.invalidate()
+                    for resource, scope in self.model.inventories:
+                        self.reads.touch(resource, scope)
+                # Start recovery once per outage. Repeated lost notifications
+                # can follow local read-state changes; they must not invalidate
+                # epochs or bypass an incomplete read's retry deadline.
+                self.rebuild()
+                self._state("stale", value)
             return changed
         elif kind == "read":
             return self._read_done(value)
         elif kind == "change":
+            if (isinstance(value, tuple) and len(value) == 2
+                    and isinstance(value[0], dict)):
+                notice, received_at = value
+                self._record_feed_processed(received_at)
+                return self.change(notice)
             return self.change(value)
         elif kind == "merged":
             wid, refs, merged, at = value
@@ -714,8 +815,7 @@ class LiveService:
         if clock < self._next_maintenance:
             return
         self._retry_incomplete_reads()
-        if ((self.connected or not self.feed_available) and self.cycle is None and
-                clock - self.last_rebuild >= self.rebuild_interval):
+        if self.cycle is None and clock - self.last_rebuild >= self.rebuild_interval:
             self.rebuild(recovery=self.metrics["bootstrapReads"] is None)
             self._dirty = True
         at = now_ms()
@@ -734,16 +834,15 @@ class LiveService:
 
     def _wait_timeout(self):
         deadlines = []
-        if (self.connected or not self.feed_available) and self.cycle is None:
+        if self.cycle is None:
             deadlines.append(self.last_rebuild + self.rebuild_interval - time.monotonic())
         if self.model.next_expiry is not None:
             deadlines.append((self.model.next_expiry - now_ms()) / 1000)
         backstop_deadline = self.backstop.deadline(self.model, self.reads, now_ms(), self.connected)
         if backstop_deadline is not None:
             deadlines.append((backstop_deadline - now_ms()) / 1000)
-        if self.connected or not self.feed_available:
-            deadlines.extend(due - time.monotonic()
-                             for due, _ in self.read_retries.values())
+        deadlines.extend(due - time.monotonic()
+                         for due, _ in self.read_retries.values())
         return max(0, min(deadlines)) if deadlines else None
 
     def _feed(self):
@@ -772,7 +871,7 @@ class LiveService:
                         kind = message.get("type")
                         cursor.accept(message, time.monotonic())
                         if kind == "change":
-                            self.events.put(("change", message))
+                            self._queue_feed_change(message)
             except Exception as error:
                 # Exception bodies can contain server responses. The category
                 # and close code suffice for recovery and never expose tokens.

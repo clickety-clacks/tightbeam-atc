@@ -30,6 +30,7 @@ class ReadCompletionTest(unittest.TestCase):
         result = self.gateway.collection("/api/work-items")
         self.assertFalse(result.complete)
         self.assertEqual([{"id": "a"}], result.rows)
+        self.assertEqual(2, result.page)
 
     def test_missing_or_repeated_cursor_cannot_certify_absence(self):
         self.gateway.request = Mock(side_effect=[

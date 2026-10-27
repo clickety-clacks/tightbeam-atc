@@ -71,13 +71,14 @@ class ServiceRecoveryTest(unittest.TestCase):
     def tearDown(self):
         self.service.stop()
 
-    def drain(self):
+    def drain(self, service=None):
+        service = service or self.service
         deadline = time.monotonic() + 5
-        while self.service.reads.pending or self.service.reads.active:
-            self.service.reads.pump()
-            kind, value = self.service.events.get(timeout=max(0.01, deadline - time.monotonic()))
+        while service.reads.pending or service.reads.active:
+            service.reads.pump()
+            kind, value = service.events.get(timeout=max(0.01, deadline - time.monotonic()))
             self.assertEqual("read", kind)
-            self.service._read_done(value)
+            service._read_done(value)
             self.assertLess(time.monotonic(), deadline)
 
     def item(self):
@@ -128,6 +129,179 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertIsNone(service.cycle)
         self.assertTrue(service.metrics["bootstrapComplete"])
         self.assertEqual("live", service.state)
+
+    def test_disconnect_restarts_pending_bootstrap_and_reconnect_can_complete_it(self):
+        gateway = PublishedReads()
+        gateway.partial.add(("work-items", None))
+        service = LiveService(gateway)
+        service.connected = True
+        self.addCleanup(service.stop)
+        service.rebuild()
+        self.drain(service)
+
+        retry = ("work-items", None, None)
+        self.assertIn(retry, service.read_retries)
+        self.assertIsNone(service.metrics["bootstrapReads"])
+
+        reads_before_disconnect = gateway.read_count
+        service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
+        self.assertEqual("recovery", service.cycle["mode"])
+        self.assertEqual("feed disconnected: ConnectionClosedError (4008)", service.reason)
+        gateway.partial.clear()
+        self.drain(service)
+
+        self.assertIsNone(service.cycle)
+        self.assertFalse(service.metrics["bootstrapComplete"])
+        self.assertEqual("stale", service.state)
+        self.assertGreater(gateway.read_count, reads_before_disconnect)
+
+        service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+        self.drain(service)
+        self.assertTrue(service.metrics["bootstrapComplete"])
+        self.assertIsNotNone(service.last_complete)
+        self.assertEqual("live", service.state)
+
+    def test_repeated_lost_after_healthy_offline_settle_waits_for_interval(self):
+        rebuilds = self.service.metrics["rebuilds"]
+        self.service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
+        self.drain()
+        self.assertIsNone(self.service.cycle)
+        self.assertTrue(self.service.metrics["bootstrapComplete"])
+        rebuilds += 1
+        reads = self.gateway.read_count
+        epochs = dict(self.service.reads.epochs)
+
+        for reason in ("feed disconnected: retry 1", "feed disconnected: retry 2"):
+            self.service._handle("lost", reason)
+            self.assertEqual(reason, self.service.reason)
+            self.assertIsNone(self.service.cycle)
+            self.assertEqual(rebuilds, self.service.metrics["rebuilds"])
+            self.assertEqual(epochs, dict(self.service.reads.epochs))
+        self.assertEqual(reads, self.gateway.read_count)
+
+    def test_incomplete_read_retry_deadline_runs_while_feed_is_disconnected(self):
+        gateway = PublishedReads()
+        gateway.partial.add(("work-items", None))
+        service = LiveService(gateway)
+        service.connected = True
+        service.last_rebuild = time.monotonic()
+        self.addCleanup(service.stop)
+        service.reads.schedule("work-items", None, None)
+        service.reads.pump()
+        kind, value = service.events.get(timeout=2)
+        self.assertEqual("read", kind)
+        service._read_done(value)
+        retry = ("work-items", None, None)
+        self.assertIn(retry, service.read_retries)
+
+        service.connected = False
+        gateway.partial.clear()
+        retry_delay = service._wait_timeout()
+        self.assertIsNotNone(retry_delay)
+        self.assertGreater(retry_delay, 0)
+        self.assertLessEqual(retry_delay, 60)
+        _, priority = service.read_retries[retry]
+        service.read_retries[retry] = (time.monotonic() - 1, priority)
+        service._retry_incomplete_reads()
+        self.assertIn(retry, service.reads.pending)
+        self.drain(service)
+        self.assertEqual(1, service.retry_counters["completed"])
+        self.assertTrue(service.last_retry_outcome["complete"])
+
+    def test_repeated_lost_events_preserve_offline_retry_and_rebuild_cadence(self):
+        gateway = PublishedReads()
+        gateway.partial.add(("work-items", None))
+        service = LiveService(gateway)
+        service.connected = True
+        self.addCleanup(service.stop)
+        service.rebuild()
+        self.drain(service)
+
+        retry = ("work-items", None, None)
+        self.assertIsNotNone(service.cycle)
+        self.assertIn(retry[:2], service.cycle["pending"])
+        self.assertIn(retry, service.read_retries)
+        service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
+        self.assertEqual("recovery", service.cycle["mode"])
+        self.drain(service)
+
+        offline_cycle = service.cycle
+        self.assertIsNotNone(offline_cycle)
+        self.assertIn(retry[:2], offline_cycle["pending"])
+        self.assertIn(retry, service.read_retries)
+        retry_state = service.read_retries[retry]
+        self.assertGreater(retry_state[0], time.monotonic())
+        epochs = dict(service.reads.epochs)
+        reads = gateway.read_count
+        cycle_state = {
+            "mode": offline_cycle["mode"],
+            "pending": set(offline_cycle["pending"]),
+            "seen": set(offline_cycle["seen"]),
+            "expanded": offline_cycle["expanded"],
+        }
+
+        # Feed loss is reported repeatedly. Local read-state transitions can
+        # change the stale reason between notifications without starting a
+        # fresh full recovery cycle or consuming the bounded retry delay.
+        for reason in ("feed disconnected: retry 1", "feed disconnected: retry 2"):
+            service._handle("lost", reason)
+            self.assertEqual(reason, service.reason)
+            self.assertIs(offline_cycle, service.cycle)
+            self.assertEqual(cycle_state["mode"], offline_cycle["mode"])
+            self.assertEqual(cycle_state["pending"], offline_cycle["pending"])
+            self.assertEqual(cycle_state["seen"], offline_cycle["seen"])
+            self.assertEqual(cycle_state["expanded"], offline_cycle["expanded"])
+            self.assertEqual(epochs, dict(service.reads.epochs))
+            self.assertEqual(retry_state, service.read_retries[retry])
+            self.assertFalse(service.reads.pending)
+            self.assertGreater(retry_state[0], time.monotonic())
+        self.assertEqual(reads, gateway.read_count)
+
+        # Its scheduled retry still runs while disconnected; the model remains
+        # stale until the feed reconnects and can establish live freshness.
+        gateway.partial.clear()
+        service.read_retries[retry] = (time.monotonic() - 1, retry_state[1])
+        service._retry_incomplete_reads()
+        self.assertIn(retry, service.reads.pending)
+        self.drain(service)
+        self.assertIsNone(service.cycle)
+        self.assertEqual(1, service.retry_counters["completed"])
+        self.assertTrue(service.last_retry_outcome["complete"])
+        self.assertEqual("stale", service.state)
+
+    def test_status_exposes_sanitized_page_retry_epoch_and_feed_lag_details(self):
+        job = ("work-items", None, None)
+        self.service.reads.schedule(*job)
+        self.gateway.read = lambda resource, scope: Read(
+            [], False, 25, "/api/work-items?after=private-cursor", "TimeoutError", 3)
+        self.service.reads.pump()
+        kind, value = self.service.events.get(timeout=2)
+        self.assertEqual("read", kind)
+        self.service._read_done(value)
+
+        before = time.monotonic() - 0.25
+        self.service._queue_feed_change({"resource": "unknown"}, received_at=before)
+        kind, value = self.service.events.get(timeout=2)
+        self.assertEqual("change", kind)
+        self.service._handle(kind, value)
+
+        self.service.reads.schedule("roles", None, None)
+        self.service.reads.pump()
+        self.service.reads.touch("roles", None)
+        kind, value = self.service.events.get(timeout=2)
+        self.assertEqual("read", kind)
+        self.assertFalse(self.service._read_done(value))
+
+        diagnostic = self.service.snapshot()["freshness"]["reconciliation"]["readDiagnostics"]
+        self.assertEqual({"resource": "work-items", "readKind": "collection", "page": 3,
+                          "complete": False, "error": "TimeoutError", "at": 25},
+                         diagnostic["lastIncompleteRead"])
+        self.assertEqual(1, diagnostic["retry"]["waiting"])
+        self.assertEqual(1, diagnostic["feed"]["received"])
+        self.assertEqual(1, diagnostic["feed"]["processed"])
+        self.assertGreaterEqual(diagnostic["feed"]["lastReceiveToProcessMs"], 200)
+        self.assertEqual({"total": 1, "byResource": {"roles": 1}}, diagnostic["epochDiscards"])
+        self.assertNotIn("private-cursor", json.dumps(diagnostic))
 
     def test_failed_rebuild_retains_rows_and_recovery_can_establish_absence(self):
         self.gateway.rows[("work-items", None)] = []
@@ -258,6 +432,7 @@ class ServiceRecoveryTest(unittest.TestCase):
                 self.assertEqual(15, self.service._wait_timeout())
         self.service.connected = False
         self.service.model.next_expiry = None
+        self.service.last_rebuild = time.monotonic()
         # Confirmation-age and recent-activity transitions remain visible offline.
         self.assertGreater(self.service._wait_timeout(), 0)
 

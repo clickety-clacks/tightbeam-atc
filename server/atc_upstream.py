@@ -22,6 +22,7 @@ class Read:
     at: int
     source: str
     error: str | None = None
+    page: int | None = None
 
 
 # These are the evidence fields shared by the published attest read and feed.
@@ -126,9 +127,10 @@ class Gateway:
         return self.cli.read(verb, **params)
 
     def collection(self, path):
-        rows, cursor, seen = [], None, set()
+        rows, cursor, seen, page_number = [], None, set(), 0
         try:
             while True:
+                page_number += 1
                 query = {"limit": 500}
                 if cursor is not None:
                     query["after"] = cursor
@@ -144,7 +146,7 @@ class Gateway:
                 if page["hasMoreAfter"] is False:
                     # Starting at the head and walking forward is complete;
                     # a server unexpectedly returning a tail is not.
-                    return Read(rows, True, now_ms(), path)
+                    return Read(rows, True, now_ms(), path, page=page_number)
                 if page["hasMoreAfter"] is not True:
                     raise ValueError("invalid page completion")
                 cursor = page["newestCursor"]
@@ -153,7 +155,7 @@ class Gateway:
                 seen.add(cursor)
         except Exception as error:
             # Keep partial pages, but never expose response bodies or tokens.
-            return Read(rows, False, now_ms(), path, type(error).__name__)
+            return Read(rows, False, now_ms(), path, type(error).__name__, page_number)
 
     def read(self, resource, scope=None):
         if resource in {"work-items", "sessions", "decision-requests"}:
