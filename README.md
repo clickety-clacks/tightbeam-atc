@@ -317,7 +317,9 @@ fields and unsupported freshness metadata also warn without hiding entities. A
 missing collection retains its last known same-generation rows, or stays unknown
 when no earlier rows exist. Invalid revision identity or a mismatched delta base
 still requires a full resync while the current map remains visible.
-Only the latest delta is retained; slower subscribers receive a full model resync.
+The service retains up to 64 recent deltas, bounded to 16 MiB of encoded event
+data. A subscriber receives the missing delta frames in order when its revision
+is still in that history; otherwise it receives a full model resync.
 Transport loss is shown stale locally until a full snapshot arrives. Status-only
 deltas can have empty collection changes.
 
@@ -383,6 +385,10 @@ Each entity's `evidence` maps fact names to `status` (`known` or `unknown`),
 `freshness`, `observedAt`, `source` and `complete`. Fact age is measured from
 `observedAt`, never from the model's publication time. A full model can contain
 retained stale rows after an incomplete rebuild; clients must keep them in scope.
+Item-level turns evidence remains unknown or incomplete while any visible
+session's turns inventory is unread, uses the stable source label `["turns"]`,
+and leaves `observedAt` null. Per-session sources and timestamps remain on each
+agent's turns evidence; aggregate `unconfirmedSince` remains on the item.
 
 ## Tests
 

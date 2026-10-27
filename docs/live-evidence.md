@@ -108,8 +108,10 @@ Viewer publication compares derived model content and evidence state before
 advancing the revision. Raw attest rows/notes stay internal; snapshots carry
 actual evidence kinds, nullable counts, commit references and corrections.
 Changes stream as ordered stable-ID upsert/remove deltas with full replacement
-metadata. A new or lagging subscriber receives a full model snapshot; the service
-retains only the latest delta. Full encoding is lazy and shared across subscribers.
+metadata. A new subscriber or one outside the retained history receives a full
+model snapshot; otherwise it receives the missed delta frames in order. The
+service retains up to 64 deltas, bounded to 16 MiB of encoded event data. Full
+encoding is lazy and shared across subscribers.
 Partial inventories cannot remove entities from uncertain projections. Timed
 recent-mark expiry removes a visual mark, not its underlying source record.
 Original notes and correction reasons are available through revision-pinned
