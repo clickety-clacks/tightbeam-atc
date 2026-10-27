@@ -71,13 +71,14 @@ class ServiceRecoveryTest(unittest.TestCase):
     def tearDown(self):
         self.service.stop()
 
-    def drain(self):
+    def drain(self, service=None):
+        service = service or self.service
         deadline = time.monotonic() + 5
-        while self.service.reads.pending or self.service.reads.active:
-            self.service.reads.pump()
-            kind, value = self.service.events.get(timeout=max(0.01, deadline - time.monotonic()))
+        while service.reads.pending or service.reads.active:
+            service.reads.pump()
+            kind, value = service.events.get(timeout=max(0.01, deadline - time.monotonic()))
             self.assertEqual("read", kind)
-            self.service._read_done(value)
+            service._read_done(value)
             self.assertLess(time.monotonic(), deadline)
 
     def item(self):
@@ -128,6 +129,79 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertIsNone(service.cycle)
         self.assertTrue(service.metrics["bootstrapComplete"])
         self.assertEqual("live", service.state)
+
+    def test_disconnect_does_not_pause_bootstrap_retry_and_reconnect_can_complete_it(self):
+        gateway = PublishedReads()
+        gateway.partial.add(("work-items", None))
+        service = LiveService(gateway)
+        service.connected = True
+        self.addCleanup(service.stop)
+        service.rebuild()
+        self.drain(service)
+
+        retry = ("work-items", None, None)
+        self.assertIn(retry, service.read_retries)
+        self.assertIsNone(service.metrics["bootstrapReads"])
+
+        service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
+        self.assertEqual("recovery", service.cycle["mode"])
+        self.assertEqual("feed disconnected: ConnectionClosedError (4008)", service.reason)
+        gateway.partial.clear()
+        self.drain(service)
+        retry_delay = service._wait_timeout()
+        self.assertIsNotNone(retry_delay)
+        self.assertGreater(retry_delay, 0)
+        self.assertLessEqual(retry_delay, 60)
+        _, priority = service.read_retries[retry]
+        service.read_retries[retry] = (time.monotonic() - 1, priority)
+        service._retry_incomplete_reads()
+        self.drain(service)
+
+        self.assertIsNone(service.cycle)
+        self.assertFalse(service.metrics["bootstrapComplete"])
+        self.assertEqual("stale", service.state)
+        self.assertEqual(1, service.retry_counters["completed"])
+        self.assertEqual("work-items", service.last_retry_outcome["resource"])
+
+        service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+        self.drain(service)
+        self.assertTrue(service.metrics["bootstrapComplete"])
+        self.assertIsNotNone(service.last_complete)
+        self.assertEqual("live", service.state)
+
+    def test_status_exposes_sanitized_page_retry_epoch_and_feed_lag_details(self):
+        job = ("work-items", None, None)
+        self.service.reads.schedule(*job)
+        self.gateway.read = lambda resource, scope: Read(
+            [], False, 25, "/api/work-items?after=private-cursor", "TimeoutError", 3)
+        self.service.reads.pump()
+        kind, value = self.service.events.get(timeout=2)
+        self.assertEqual("read", kind)
+        self.service._read_done(value)
+
+        before = time.monotonic() - 0.25
+        self.service._queue_feed_change({"resource": "unknown"}, received_at=before)
+        kind, value = self.service.events.get(timeout=2)
+        self.assertEqual("change", kind)
+        self.service._handle(kind, value)
+
+        self.service.reads.schedule("roles", None, None)
+        self.service.reads.pump()
+        self.service.reads.touch("roles", None)
+        kind, value = self.service.events.get(timeout=2)
+        self.assertEqual("read", kind)
+        self.assertFalse(self.service._read_done(value))
+
+        diagnostic = self.service.snapshot()["freshness"]["reconciliation"]["readDiagnostics"]
+        self.assertEqual({"resource": "work-items", "readKind": "collection", "page": 3,
+                          "complete": False, "error": "TimeoutError", "at": 25},
+                         diagnostic["lastIncompleteRead"])
+        self.assertEqual(1, diagnostic["retry"]["waiting"])
+        self.assertEqual(1, diagnostic["feed"]["received"])
+        self.assertEqual(1, diagnostic["feed"]["processed"])
+        self.assertGreaterEqual(diagnostic["feed"]["lastReceiveToProcessMs"], 200)
+        self.assertEqual({"total": 1, "byResource": {"roles": 1}}, diagnostic["epochDiscards"])
+        self.assertNotIn("private-cursor", json.dumps(diagnostic))
 
     def test_failed_rebuild_retains_rows_and_recovery_can_establish_absence(self):
         self.gateway.rows[("work-items", None)] = []

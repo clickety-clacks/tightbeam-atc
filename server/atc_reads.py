@@ -16,6 +16,8 @@ class ReadQueue:
         self.active_priorities = {}
         self.epochs = defaultdict(int)
         self.dispatched = 0
+        self.epoch_discards = 0
+        self.epoch_discards_by_resource = defaultdict(int)
 
     def touch(self, resource, scope):
         # A notice received during a read can describe a change after that
@@ -70,6 +72,8 @@ class ReadQueue:
         self.active.pop(inventory)
         priority = self.active_priorities.pop(inventory)
         if epoch != self.epochs[job[:2]]:
+            self.epoch_discards += 1
+            self.epoch_discards_by_resource[job[0]] += 1
             self.schedule(*job, priority=priority == 2, active=priority == 1)
             return False
         return True
