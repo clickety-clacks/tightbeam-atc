@@ -742,17 +742,17 @@ class LiveService:
             self.payload_warning = payload_policy_warning(value)
             self.rebuild()
         elif kind == "lost":
-            changed = self.connected
+            was_connected = self.connected
             self.connected = False
-            changed = self._state("stale", value) or changed
-            if changed:
+            changed = self._state("stale", value) or was_connected
+            if was_connected:
                 if self.cycle is None:
                     self.model.invalidate()
                     for resource, scope in self.model.inventories:
                         self.reads.touch(resource, scope)
-                # A feed outage leaves the existing snapshot useful but stale.
-                # Start or resume gateway reads so recovery does not depend on
-                # the socket reconnecting first.
+                # Start recovery once per outage. Repeated lost notifications
+                # can follow local read-state changes; they must not invalidate
+                # epochs or bypass an incomplete read's retry deadline.
                 self.rebuild()
                 self._state("stale", value)
             return changed

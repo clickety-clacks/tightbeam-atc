@@ -161,6 +161,22 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertIsNotNone(service.last_complete)
         self.assertEqual("live", service.state)
 
+    def test_repeated_lost_after_healthy_offline_settle_waits_for_interval(self):
+        rebuilds = self.service.metrics["rebuilds"]
+        self.service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
+        self.drain()
+        self.assertIsNone(self.service.cycle)
+        self.assertTrue(self.service.metrics["bootstrapComplete"])
+        rebuilds += 1
+        reads = self.gateway.read_count
+
+        for reason in ("feed disconnected: retry 1", "feed disconnected: retry 2"):
+            self.service._handle("lost", reason)
+            self.assertEqual(reason, self.service.reason)
+            self.assertIsNone(self.service.cycle)
+            self.assertEqual(rebuilds, self.service.metrics["rebuilds"])
+        self.assertEqual(reads, self.gateway.read_count)
+
     def test_incomplete_read_retry_deadline_runs_while_feed_is_disconnected(self):
         gateway = PublishedReads()
         gateway.partial.add(("work-items", None))
@@ -189,6 +205,52 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.drain(service)
         self.assertEqual(1, service.retry_counters["completed"])
         self.assertTrue(service.last_retry_outcome["complete"])
+
+    def test_repeated_lost_events_preserve_offline_retry_and_rebuild_cadence(self):
+        gateway = PublishedReads()
+        gateway.partial.add(("work-items", None))
+        service = LiveService(gateway)
+        service.connected = True
+        self.addCleanup(service.stop)
+        service.rebuild()
+        self.drain(service)
+
+        retry = ("work-items", None, None)
+        self.assertIsNone(service.cycle)
+        self.assertIn(retry, service.read_retries)
+        service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
+        self.assertEqual("recovery", service.cycle["mode"])
+        self.drain(service)
+
+        self.assertIsNone(service.cycle)
+        self.assertIn(retry, service.read_retries)
+        retry_state = service.read_retries[retry]
+        epochs = dict(service.reads.epochs)
+        reads = gateway.read_count
+        rebuilds = service.metrics["rebuilds"]
+
+        # Feed loss is reported repeatedly. Local read-state transitions can
+        # change the stale reason between notifications without starting a
+        # fresh full recovery cycle or consuming the bounded retry delay.
+        for reason in ("feed disconnected: retry 1", "feed disconnected: retry 2"):
+            service._handle("lost", reason)
+            self.assertEqual(reason, service.reason)
+            self.assertIsNone(service.cycle)
+            self.assertEqual(rebuilds, service.metrics["rebuilds"])
+            self.assertEqual(epochs, dict(service.reads.epochs))
+            self.assertEqual(retry_state, service.read_retries[retry])
+        self.assertEqual(reads, gateway.read_count)
+
+        # Periodic recovery remains active offline and can finish the
+        # incomplete bootstrap once the upstream read succeeds.
+        gateway.partial.clear()
+        service.last_rebuild = time.monotonic() - service.rebuild_interval
+        service._next_maintenance = 0
+        service._maintenance()
+        self.assertEqual("recovery", service.cycle["mode"])
+        self.drain(service)
+        self.assertTrue(service.metrics["bootstrapComplete"])
+        self.assertEqual("stale", service.state)
 
     def test_status_exposes_sanitized_page_retry_epoch_and_feed_lag_details(self):
         job = ("work-items", None, None)
