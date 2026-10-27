@@ -527,12 +527,14 @@ function durationLabel(milliseconds) {
 
 /* This writes the same user-facing fields that the HUD displays. Keeping the
    presentation at a small DOM seam lets mock models verify visible wording. */
-export function renderModelStatusElement(element, {model, streamState, streamError}, now = Date.now()) {
+export function renderModelStatusElement(element,
+  {model, streamState, streamError, startupWarning}, now = Date.now()) {
   if (!model) {
-    element.textContent = streamState === 'stale'
-      ? 'stale · live model unavailable' : 'connecting to live model…';
+    element.textContent = startupWarning
+      ? `Warning: ${startupWarning}`
+      : streamState === 'stale' ? 'stale · live model unavailable' : 'connecting to live model…';
     element.className = streamState === 'stale' ? 'stale' : 'sample';
-    element.title = streamError || 'Waiting for the service model event stream.';
+    element.title = startupWarning || streamError || 'Waiting for the service model event stream.';
     return element;
   }
 
@@ -600,6 +602,10 @@ export function renderModelStatusElement(element, {model, streamState, streamErr
     streamError ? `Connection: ${streamError}` : 'Connection: event stream open',
     'Input: pointer and touch events; no separate gaze signal is exposed to this page.',
   ].filter(Boolean).join('\n');
+  if (startupWarning) {
+    element.textContent += ` · Warning: ${startupWarning}`;
+    element.title = `Warning: ${startupWarning}\n${element.title}`;
+  }
   return element;
 }
 

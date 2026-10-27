@@ -93,6 +93,7 @@ CMD_HISTORY = 200
 # silently skip commands.
 GENERATION = uuid.uuid4().hex[:12]
 live_service = None
+live_warning = None
 
 lock = threading.Lock()
 state = {
@@ -117,6 +118,74 @@ state = {
 }
 
 
+LIVE_SETTINGS = ("TB_ATC_GATEWAY", "TB_ATC_CLI",
+                 "TB_ATC_CLI_BASE_DIR", "TB_ATC_USER")
+DEFAULT_REBUILD_SECONDS = 300.0
+
+
+def build_live_service(environ=None):
+    """Start optional live data without making it a prerequisite for the viewer."""
+    settings = os.environ if environ is None else environ
+    missing = [key for key in LIVE_SETTINGS if not settings.get(key)]
+    if missing:
+        return None, ("Live model unavailable: missing settings " + ", ".join(missing)
+                      + ". The map, annotations, searches, and controls remain available.")
+
+    warnings = []
+    try:
+        cli = PackagedCLI(settings["TB_ATC_CLI"], settings["TB_ATC_CLI_BASE_DIR"],
+                          settings["TB_ATC_USER"])
+        gateway = Gateway(settings["TB_ATC_GATEWAY"], cli)
+    except (OSError, TypeError, ValueError):
+        return None, ("Live model unavailable: invalid CLI or gateway settings. "
+                      "The map, annotations, searches, and controls remain available.")
+
+    try:
+        routes = json.loads(settings.get("TB_ATC_HOST_ROUTES", "{}"))
+        if (not isinstance(routes, dict) or
+                any(not isinstance(host, str) or not host.strip() or
+                    not isinstance(destination, str) or not destination.strip()
+                    for host, destination in routes.items())):
+            raise ValueError("invalid host routes")
+    except (TypeError, ValueError):
+        routes = {}
+        warnings.append("Git host routes are disabled because TB_ATC_HOST_ROUTES is malformed.")
+
+    cache = settings.get("TB_ATC_GIT_CACHE", str(STATE_FILE.parent / "git-cache"))
+    try:
+        if not isinstance(cache, str) or not cache.strip() or "\x00" in cache:
+            raise ValueError("invalid Git cache path")
+        resolver = GitResolver(cache, host_routes=routes)
+    except (OSError, TypeError, ValueError):
+        resolver = None
+        warnings.append("Git history checks are disabled because TB_ATC_GIT_CACHE is invalid.")
+
+    try:
+        rebuild_interval = float(settings.get("TB_ATC_REBUILD_SECONDS", DEFAULT_REBUILD_SECONDS))
+        if not math.isfinite(rebuild_interval) or rebuild_interval <= 0:
+            raise ValueError("invalid rebuild interval")
+    except (TypeError, ValueError):
+        rebuild_interval = DEFAULT_REBUILD_SECONDS
+        warnings.append(
+            "TB_ATC_REBUILD_SECONDS is invalid; using the default 300-second interval.")
+
+    service = None
+    try:
+        service = LiveService(gateway, resolver, rebuild_interval=rebuild_interval)
+        service.start()
+    except Exception as error:
+        if service is not None:
+            service.stop()
+        return None, ("Live model unavailable: the live service could not start (" +
+                      type(error).__name__ + "). The map, annotations, searches, and "
+                      "controls remain available.")
+
+    if service.feed_warning:
+        warnings.append(service.feed_warning)
+    warning = " ".join(warnings) if warnings else None
+    return service, warning
+
+
 HELP = """# Tightbeam Air Traffic Control — operating the view
 
 A live 3D display of this org. You are reading its own documentation; this
@@ -130,6 +199,7 @@ about provenance and cleanup is about not trampling each other.
 
 ## What you can do
 
+  read live-service status             GET  /api/status
   read what viewers are looking at    GET  /api/selection
   read everything at once             GET  /api/state
   read the population                 GET  /data.json
@@ -245,6 +315,7 @@ def help_json():
         },
         "endpoints": [
             {"method": "GET", "path": "/api/help", "does": "this document"},
+            {"method": "GET", "path": "/api/status", "does": "live-data availability and startup warning"},
             {"method": "GET", "path": "/api/state", "does": "viewer reports, tags, arrows, searches"},
             {"method": "GET", "path": "/api/selection", "does": "per-client selection, focus, camera"},
             {"method": "GET", "path": "/data.json", "does": "the population and its derived state"},
@@ -437,6 +508,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path)
+        if u.path == "/api/status":
+            return self._send({"liveAvailable": live_service is not None,
+                               "warning": live_warning})
         if u.path in ("/api/model", "/data.json"):
             if live_service is None:
                 return self._send({"error": "live service not configured"}, 503)
@@ -874,25 +948,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    required = ("TB_ATC_GATEWAY", "TB_ATC_CLI",
-                "TB_ATC_CLI_BASE_DIR", "TB_ATC_USER")
-    missing = [key for key in required if not os.environ.get(key)]
-    if missing:
-        raise SystemExit("Missing service configuration: " + ", ".join(missing))
     load_tags()
-    cli = PackagedCLI(os.environ["TB_ATC_CLI"], os.environ["TB_ATC_CLI_BASE_DIR"],
-                      os.environ["TB_ATC_USER"])
-    gateway = Gateway(os.environ["TB_ATC_GATEWAY"], cli)
-    resolver = GitResolver(
-        os.environ.get("TB_ATC_GIT_CACHE", str(STATE_FILE.parent / "git-cache")),
-        host_routes=json.loads(os.environ.get("TB_ATC_HOST_ROUTES", "{}")))
-    live_service = LiveService(gateway, resolver,
-                              rebuild_interval=float(os.environ.get("TB_ATC_REBUILD_SECONDS", "300")))
-    live_service.start()
+    live_service, live_warning = build_live_service()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"tb-atc on http://{HOST}:{PORT}/  (web root: {WEB})", flush=True)
     try:
         srv.serve_forever()
     finally:
-        live_service.stop()
+        if live_service is not None:
+            live_service.stop()
         srv.server_close()

@@ -108,6 +108,8 @@ class LiveService:
         self._last_publication = 0
         self.stop_event = threading.Event()
         self.connected = False
+        self.feed_available = True
+        self.feed_warning = None
         self.state, self.since, self.reason = "stale", now_ms(), "initial state unavailable"
         self.last_complete, self.last_rebuild = None, 0
         self.version = None
@@ -195,9 +197,20 @@ class LiveService:
             })
 
     def start(self):
-        # Fail startup visibly when the runtime dependency isn't installed.
-        from websockets.sync.client import connect  # noqa: F401
-        for target in (self._worker, self._feed, self._git_worker):
+        try:
+            from websockets.sync.client import connect  # noqa: F401
+        except ImportError:
+            # The feed is optional. Keep published reads and the viewer alive;
+            # periodic snapshots still provide a useful, explicitly stale map.
+            self.feed_available = False
+            self.feed_warning = (
+                "Live feed is unavailable because the optional websockets library "
+                "is missing; ATC will use periodic gateway snapshots.")
+            self.rebuild()
+            targets = (self._worker, self._git_worker)
+        else:
+            targets = (self._worker, self._feed, self._git_worker)
+        for target in targets:
             threading.Thread(target=target, daemon=True).start()
 
     def stop(self):
@@ -680,9 +693,9 @@ class LiveService:
         clock = time.monotonic()
         if clock < self._next_maintenance:
             return
-        if (self.connected and self.cycle is None and
+        if ((self.connected or not self.feed_available) and self.cycle is None and
                 clock - self.last_rebuild >= self.rebuild_interval):
-            self.rebuild(recovery=False)
+            self.rebuild(recovery=self.metrics["bootstrapReads"] is None)
             self._dirty = True
         at = now_ms()
         expired = self.model.next_expiry is not None and self.model.next_expiry <= at
@@ -700,7 +713,7 @@ class LiveService:
 
     def _wait_timeout(self):
         deadlines = []
-        if self.connected and self.cycle is None:
+        if (self.connected or not self.feed_available) and self.cycle is None:
             deadlines.append(self.last_rebuild + self.rebuild_interval - time.monotonic())
         if self.model.next_expiry is not None:
             deadlines.append((self.model.next_expiry - now_ms()) / 1000)

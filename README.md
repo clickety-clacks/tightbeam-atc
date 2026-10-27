@@ -99,7 +99,12 @@ for something you typed. Emptying the box releases either kind.
 ## Requirements
 
 - Python 3.10 or newer, Git, and the pinned dependency in `requirements.txt`.
-- A Tightbeam gateway with protocol-2 change feed and published state reads.
+- A Tightbeam gateway with protocol-2 change feed and published state reads for
+  the live model. Without live settings, the map, annotations, searches, and
+  controls still start and remain available.
+- The `websockets` dependency enables live change-feed updates. If it is
+  unavailable, ATC keeps published reads active, uses periodic snapshots, and
+  shows a feed warning.
 - An existing Tightbeam operator login in the target base directory and the
   published Tightbeam CLI for complete inventory reads. At runtime, ATC consumes
   the provisioned login in place from `gateway.json`, as the CLI does. HTTP reads
@@ -118,14 +123,16 @@ static snapshot file.
 
     python3 -m venv .venv
     .venv/bin/pip install -r requirements.txt
-    # Supply TB_ATC_GATEWAY, TB_ATC_CLI,
+    # For the live model, supply TB_ATC_GATEWAY, TB_ATC_CLI,
     # TB_ATC_CLI_BASE_DIR and TB_ATC_USER for the same target gateway.
     .venv/bin/python server/tb-atc-api.py
     # http://127.0.0.1:8787/
 
 `systemd/tb-atc.service` is an example user unit. It expects the checkout and
-virtual environment in `~/.local/share/tb-atc` and service configuration in
-`~/.config/tb-atc/service.env`. Configure only paths, the gateway URL and user;
+virtual environment in `~/.local/share/tb-atc`; service configuration in
+`~/.config/tb-atc/service.env` is optional. If it is absent or live settings are
+incomplete, the viewer and control APIs still start and the map shows a warning
+that live data is unavailable. Configure only paths, the gateway URL and user;
 never copy login tokens into the environment or unit file. Credential bytes stay
 in the runtime credential consumer and authenticated gateway requests; they do
 not enter command arguments, logs, model snapshots or viewer data. Existing
@@ -136,17 +143,17 @@ are retired; they are not part of this service.
 
 | variable | meaning | default |
 |---|---|---|
-| `TB_ATC_GATEWAY` | gateway HTTP(S) base URL | required |
-| `TB_ATC_CLI` | absolute path to the published package's `bin/tightbeam` | required |
-| `TB_ATC_CLI_BASE_DIR` | absolute target gateway base containing the existing operator login | required |
-| `TB_ATC_USER` | explicit user for all gateway reads (`asUser` / `--as-user`) | required |
+| `TB_ATC_GATEWAY` | gateway HTTP(S) base URL | required for live model |
+| `TB_ATC_CLI` | absolute path to the published package's `bin/tightbeam` | required for live model |
+| `TB_ATC_CLI_BASE_DIR` | absolute target gateway base containing the existing operator login | required for live model |
+| `TB_ATC_USER` | explicit user for all gateway reads (`asUser` / `--as-user`) | required for live model |
 | `TB_ATC_HOST` | viewer bind address | `127.0.0.1` |
 | `TB_ATC_PORT` | viewer port | `8787` |
 | `TB_ATC_WEB` | directory holding `index.html` | `../web` |
 | `TB_ATC_STATE` | ATC-owned annotations and saved searches | `<web>/../tags.json` |
 | `TB_ATC_GIT_CACHE` | service-owned canonical Git cache | beside the annotation file |
-| `TB_ATC_HOST_ROUTES` | JSON mapping of recorded checkout hosts to existing SSH destinations | `{}` |
-| `TB_ATC_REBUILD_SECONDS` | full reconciliation interval, shown in the viewer | `300` |
+| `TB_ATC_HOST_ROUTES` | JSON mapping of recorded checkout hosts to existing SSH destinations; malformed values disable remote host routes | `{}` |
+| `TB_ATC_REBUILD_SECONDS` | full reconciliation interval, shown in the viewer; malformed values use the default | `300` |
 
 The read-only bridge invokes `assignments --state all`, `attests <assignmentId>`,
 `assignment-get <assignmentId>`, `list` (for its complete roles array), and
@@ -217,6 +224,7 @@ work with it.
 
 | verb | path | body |
 |---|---|---|
+| `GET` | `/api/status` | whether live data is available and any startup warning |
 | `GET` | `/api/state` | selection, tags, generation, sequence |
 | `GET` | `/api/selection` | `{selected:[…], focused:{mode, nodes:[…]}}` — brushed vs highlighted |
 | `POST` | `/api/select` | `{add:[id], remove:[id], clear:bool}` |
