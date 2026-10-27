@@ -91,6 +91,44 @@ class ServiceRecoveryTest(unittest.TestCase):
             self.assertIn(("read", resource, "agent s_author"), self.gateway.calls)
         self.assertTrue(self.service.metrics["bootstrapComplete"])
 
+    def test_incomplete_bootstrap_retries_failed_scope_without_restarting_cycle(self):
+        gateway = PublishedReads()
+        gateway.partial.add(("work-items", None))
+        service = LiveService(gateway)
+        service.connected = True
+        self.addCleanup(service.stop)
+        service.rebuild()
+        cycle = service.cycle
+
+        deadline = time.monotonic() + 5
+        while service.reads.pending or service.reads.active:
+            service.reads.pump()
+            kind, value = service.events.get(timeout=max(0.01, deadline - time.monotonic()))
+            self.assertEqual("read", kind)
+            service._read_done(value)
+            self.assertLess(time.monotonic(), deadline)
+
+        retry = ("work-items", None, None)
+        self.assertIs(service.cycle, cycle)
+        self.assertEqual({("work-items", None)}, cycle["pending"])
+        self.assertIsNone(service.metrics["bootstrapReads"])
+        self.assertIn(retry, service.read_retries)
+
+        gateway.partial.clear()
+        _, priority = service.read_retries[retry]
+        service.read_retries[retry] = (time.monotonic() - 1, priority)
+        service._retry_incomplete_reads()
+        while service.reads.pending or service.reads.active:
+            service.reads.pump()
+            kind, value = service.events.get(timeout=max(0.01, deadline - time.monotonic()))
+            self.assertEqual("read", kind)
+            service._read_done(value)
+            self.assertLess(time.monotonic(), deadline)
+
+        self.assertIsNone(service.cycle)
+        self.assertTrue(service.metrics["bootstrapComplete"])
+        self.assertEqual("live", service.state)
+
     def test_failed_rebuild_retains_rows_and_recovery_can_establish_absence(self):
         self.gateway.rows[("work-items", None)] = []
         self.gateway.partial.add(("work-items", None))
