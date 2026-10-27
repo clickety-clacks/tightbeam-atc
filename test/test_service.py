@@ -216,18 +216,21 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.drain(service)
 
         retry = ("work-items", None, None)
-        self.assertIsNone(service.cycle)
+        self.assertIsNotNone(service.cycle)
+        self.assertIn(retry[:2], service.cycle["pending"])
         self.assertIn(retry, service.read_retries)
         service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
         self.assertEqual("recovery", service.cycle["mode"])
         self.drain(service)
 
-        self.assertIsNone(service.cycle)
+        offline_cycle = service.cycle
+        self.assertIsNotNone(offline_cycle)
+        self.assertIn(retry[:2], offline_cycle["pending"])
         self.assertIn(retry, service.read_retries)
         retry_state = service.read_retries[retry]
+        self.assertGreater(retry_state[0], time.monotonic())
         epochs = dict(service.reads.epochs)
         reads = gateway.read_count
-        rebuilds = service.metrics["rebuilds"]
 
         # Feed loss is reported repeatedly. Local read-state transitions can
         # change the stale reason between notifications without starting a
@@ -235,22 +238,22 @@ class ServiceRecoveryTest(unittest.TestCase):
         for reason in ("feed disconnected: retry 1", "feed disconnected: retry 2"):
             service._handle("lost", reason)
             self.assertEqual(reason, service.reason)
-            self.assertIsNone(service.cycle)
-            self.assertEqual(rebuilds, service.metrics["rebuilds"])
+            self.assertIs(offline_cycle, service.cycle)
             self.assertEqual(epochs, dict(service.reads.epochs))
             self.assertEqual(retry_state, service.read_retries[retry])
+            self.assertFalse(service.reads.pending)
         self.assertEqual(reads, gateway.read_count)
 
-        # Periodic recovery remains active offline and can finish the
-        # incomplete bootstrap once the upstream read succeeds.
+        # Its scheduled retry still completes bootstrap while disconnected.
         gateway.partial.clear()
-        service.last_rebuild = time.monotonic() - service.rebuild_interval
-        service._next_maintenance = 0
-        service._maintenance()
-        self.assertEqual("recovery", service.cycle["mode"])
+        service.read_retries[retry] = (time.monotonic() - 1, retry_state[1])
+        service._retry_incomplete_reads()
+        self.assertIn(retry, service.reads.pending)
         self.drain(service)
+        self.assertIsNone(service.cycle)
         self.assertTrue(service.metrics["bootstrapComplete"])
         self.assertEqual("stale", service.state)
+        self.assertTrue(service.last_retry_outcome["complete"])
 
     def test_status_exposes_sanitized_page_retry_epoch_and_feed_lag_details(self):
         job = ("work-items", None, None)
