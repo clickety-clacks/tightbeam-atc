@@ -3,6 +3,32 @@ export function canInspectNode({type, layerVisible}) {
   return Boolean(type) && layerVisible === true;
 }
 
+/* Use the rendered canvas rectangle for both sides of the pointer projection.
+   The optional output lets frame and hit-test loops reuse their scratch value. */
+export function clientToNdc(clientX, clientY, rect, out = {x: 0, y: 0}) {
+  const width = Math.max(1, rect.width), height = Math.max(1, rect.height);
+  out.x = ((clientX - rect.left) / width) * 2 - 1;
+  out.y = 1 - ((clientY - rect.top) / height) * 2;
+  return out;
+}
+
+export function ndcToClient(ndcX, ndcY, rect, out = {x: 0, y: 0}) {
+  out.x = rect.left + (ndcX + 1) * rect.width / 2;
+  out.y = rect.top + (1 - ndcY) * rect.height / 2;
+  return out;
+}
+
+/* Scene rebuilds replace meshes; resolve the visible hover keys against the
+   current scene and leave removed entities behind. */
+export function resolveHoverNodes(keys, resolveByKey) {
+  const nodes = [];
+  for (const key of keys){
+    const node = resolveByKey(key);
+    if (node) nodes.push(node);
+  }
+  return nodes;
+}
+
 const RING_VALUES = new Set(['black', 'green', 'light-gray', 'yellow']);
 const FRESHNESS_VALUES = new Set(['live', 'stale', 'rebuilding']);
 const MODEL_COLLECTIONS = ['agents', 'items', 'links', 'wakes', 'messages'];

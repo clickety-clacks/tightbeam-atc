@@ -321,7 +321,8 @@ import { agentSampleTimes, applyModelDelta, canInspectNode, evidencePageQuery,
          evidenceFreshnessLabel, evidenceRecordAuthor, factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, knownStage,
          prepareModelSnapshot, rebuildWithViewerState, renderEvidenceMarkup, renderModelStatusElement,
-         captureViewerState, restoreViewerState, ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
+         captureViewerState, clientToNdc, ndcToClient, resolveHoverNodes, restoreViewerState,
+         ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
 import { OrbitControls } from './addons/controls/OrbitControls.js';
 import { LineSegments2 } from './addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from './addons/lines/LineSegmentsGeometry.js';
@@ -375,12 +376,12 @@ const THEMES = {
 let T = matchMedia('(prefers-color-scheme: light)').matches ? THEMES.light : THEMES.dark;
 
 /* ---------- static scene ---------- */
+let canvasBounds = {left:0, top:0,
+  width:Math.max(1, innerWidth), height:Math.max(1, innerHeight)};
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, .1, 500);
+const camera = new THREE.PerspectiveCamera(55, canvasBounds.width/canvasBounds.height, .1, 500);
 camera.position.set(0, 34, 66);
 const renderer = new THREE.WebGLRenderer({antialias:true});
-renderer.setSize(innerWidth, innerHeight);
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 document.body.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.maxPolarAngle = Math.PI*0.82;   /* the org hangs below the grid — let the camera dip under */
@@ -779,7 +780,7 @@ function diagramMesh(geo, strokeHex){
   const lg = new LineSegmentsGeometry().setPositions(Array.from(eg.attributes.position.array));
   eg.dispose();
   const lineMat = new LineMaterial({color:strokeHex, linewidth:2, transparent:true, opacity:.6});
-  lineMat.resolution.set(innerWidth, innerHeight);
+  lineMat.resolution.set(canvasBounds.width, canvasBounds.height);
   edgeMats.add(lineMat);
   fill.add(new LineSegments2(lg, lineMat));
   fill.userData.lineMat = lineMat;
@@ -1028,8 +1029,8 @@ function frameDistance(pts, center, e, {margin = 1.10, usableH = 1, usableV = 1}
    space that is really available, which reads as a view wanting to be panned
    up, and slides the lowest nodes under the legend. */
 function clearRect(){
-  const vw = innerWidth, vh = innerHeight;
-  const r = {left: 0, right: vw, top: 0, bottom: vh};
+  const {left, top, width:vw, height:vh} = canvasBounds;
+  const r = {left, right:left + vw, top, bottom:top + vh};
   /* Only chrome pinned to an edge belongs here. The tag composer follows the
      focused node's SCREEN position, so measuring it closed a loop: the offset
      moved the node, the node moved the box, the box changed the offset. In
@@ -1040,17 +1041,17 @@ function clearRect(){
     const b = el.getBoundingClientRect();
     if (!b.width || !b.height) return;
     if (b.width / vw > .6){                       /* a band across the view */
-      if ((b.top + b.bottom) / 2 < vh / 2) r.top = Math.max(r.top, b.bottom);
+      if ((b.top + b.bottom) / 2 < top + vh / 2) r.top = Math.max(r.top, b.bottom);
       else r.bottom = Math.min(r.bottom, b.top);
-    } else if ((b.left + b.right) / 2 > vw / 2){  /* hugging one side */
+    } else if ((b.left + b.right) / 2 > left + vw / 2){  /* hugging one side */
       r.right = Math.min(r.right, b.left);
     } else {
       r.left = Math.max(r.left, b.right);
     }
   });
   /* never let chrome starve the view: fall back to the viewport if it would */
-  if (r.right - r.left < vw * .3){ r.left = 0; r.right = vw; }
-  if (r.bottom - r.top < vh * .3){ r.top = 0; r.bottom = vh; }
+  if (r.right - r.left < vw * .3){ r.left = left; r.right = left + vw; }
+  if (r.bottom - r.top < vh * .3){ r.top = top; r.bottom = top + vh; }
   return {...r, vw, vh};
 }
 
@@ -1098,7 +1099,7 @@ function frameTo(pts, center, e, {margin = 1.15, floor = 6} = {}){
    space the bar, the legend and the detail pane leave free. */
 const chromeOff = {x: 0, y: 0}, chromeAim = {x: 0, y: 0};
 function commitChromeOffset(){
-  const vw = innerWidth, vh = innerHeight;
+  const {width:vw, height:vh} = canvasBounds;
   if (Math.abs(chromeOff.x) < .5 && Math.abs(chromeOff.y) < .5) camera.clearViewOffset();
   else camera.setViewOffset(vw, vh, -chromeOff.x, -chromeOff.y, vw, vh);
   camera.updateProjectionMatrix();
@@ -1116,8 +1117,8 @@ function commitChromeOffset(){
 const VIEW_LIFT = 0;
 function applyChromeOffset(immediate){
   const b = clearRect();
-  chromeAim.x = (b.left + b.right) / 2 - b.vw / 2;
-  chromeAim.y = (b.top + b.bottom) / 2 - b.vh / 2 - b.vh * VIEW_LIFT;
+  chromeAim.x = (b.left + b.right) / 2 - (canvasBounds.left + b.vw / 2);
+  chromeAim.y = (b.top + b.bottom) / 2 - (canvasBounds.top + b.vh / 2) - b.vh * VIEW_LIFT;
   if (immediate){ chromeOff.x = chromeAim.x; chromeOff.y = chromeAim.y; commitChromeOffset(); }
 }
 
@@ -1605,7 +1606,7 @@ function buildLinks(links){
     const col = l.state === 'run' ? T.tetherRun : T.tetherWait;
     const lm = new LineMaterial({color:0xffffff, linewidth:2.6, transparent:true,
                                  opacity:.5, vertexColors:true});
-    lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
+    lm.resolution.set(canvasBounds.width, canvasBounds.height); edgeMats.add(lm);
     const lg = new LineSegmentsGeometry()
       .setPositions(new Array(TETHER_SEGS*6).fill(0))
       .setColors(new Array(TETHER_SEGS*6).fill(0));
@@ -1705,7 +1706,7 @@ function buildItems(items){
       if (!byId[hid] || byId[hid].retired) return;
       if (turns[hid]) return;
       const lm = new LineMaterial({color:T.tetherSched, linewidth:1, transparent:true, opacity:.22});
-      lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
+      lm.resolution.set(canvasBounds.width, canvasBounds.height); edgeMats.add(lm);
       const lg = new LineSegmentsGeometry().setPositions([0,0,0, 0,0,0]);
       const seg = new LineSegments2(lg, lm);
       seg.frustumCulled = false;
@@ -1718,7 +1719,7 @@ function buildItems(items){
       /* the tether is subdivided so a brightness wave can travel INSIDE it,
          showing direction without adding a separate object */
       const lm = new LineMaterial({color:col, linewidth:1.6, transparent:true, opacity:.4});
-      lm.resolution.set(innerWidth, innerHeight); edgeMats.add(lm);
+      lm.resolution.set(canvasBounds.width, canvasBounds.height); edgeMats.add(lm);
       const lg = new LineSegmentsGeometry().setPositions([0,0,0, 0,0,0]);
       const seg = new LineSegments2(lg, lm);
       seg.frustumCulled = false;
@@ -1863,12 +1864,13 @@ function positionTagBox(){
   m.getWorldPosition(_tv).project(camera);
   if (_tv.z > 1){ tagBox.style.visibility = 'hidden'; return; }   /* behind us */
   tagBox.style.visibility = 'visible';
-  const x = (_tv.x * .5 + .5) * innerWidth, y = (-_tv.y * .5 + .5) * innerHeight;
+  const {x, y} = ndcToClient(_tv.x, _tv.y, canvasBounds);
+  const {left, top, width, height} = canvasBounds;
   const r = tagBox.getBoundingClientRect();
-  tagBox.style.left = Math.round(Math.min(Math.max(10, x - r.width / 2),
-                                          innerWidth - r.width - 10)) + 'px';
+  tagBox.style.left = Math.round(Math.min(Math.max(left + 10, x - r.width / 2),
+                                          left + width - r.width - 10)) + 'px';
   /* clear of the node, not sitting on it */
-  tagBox.style.top  = Math.round(Math.min(y + 74, innerHeight - r.height - 10)) + 'px';
+  tagBox.style.top  = Math.round(Math.min(y + 74, top + height - r.height - 10)) + 'px';
 }
 tagInput.addEventListener('keydown', e => {
   e.stopPropagation();                       /* the canvas hotkeys are not for typing */
@@ -2214,6 +2216,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
   const previousSamples = agentSamples;
   const previousEvidencePages = new Map(itemEvidencePages);
   const previousEvidenceNotices = new Map(itemEvidenceNotices);
+  const previousHoverKeys = hoverLeaders.map(L => L.key).filter(Boolean);
   const versionChanged = Boolean(lastModel && (model.generation!==lastModel.generation
     || model.revision!==lastModel.revision));
   const nextSamples = agentSampleTimes(agentSamples, model,
@@ -2258,6 +2261,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
       orbitAngle = Math.atan2(d.x, d.z);
       controls.target.copy(orbitTgt);
     } else restoreModelPose(pose);
+    if (sceneChanged) restoreHoverByKey(previousHoverKeys);
     lastModel = model;
     lastSceneSignature = nextSignature;
     streamState='connected'; streamError=null;
@@ -2288,6 +2292,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
         }, restoreViewerModelState);
       } catch (rollbackError){ restoredPrevious = false; }
     }
+    if (restoredPrevious) restoreHoverByKey(previousHoverKeys);
     lastSceneSignature = restoredPrevious ? previousSignature : null;
     if (view.focus.stage===1) renderDetail();
     streamState='stale'; streamError=previous && restoredPrevious
@@ -2430,7 +2435,7 @@ window.__atc = {
     const m = meshForKey(selKeyFor(id));
     if (!m) return null;
     const p = m.getWorldPosition(new THREE.Vector3()).project(camera);
-    return {x: (p.x*.5+.5)*innerWidth, y: (-p.y*.5+.5)*innerHeight};
+    return ndcToClient(p.x, p.y, canvasBounds);
   },
   screenOfArrow(arrowId, at = .5){
     const g = arrowGroup.children.find(c => c.userData.ar && c.userData.ar.arrowId === arrowId);
@@ -2439,15 +2444,16 @@ window.__atc = {
     if (!ends) return null;
     const curve = arrowCurve(ends.a, ends.b, g.userData.rank);
     const p = curve.getPointAt(at).project(camera);
-    return {x: (p.x*.5+.5)*innerWidth, y: (-p.y*.5+.5)*innerHeight};
+    return ndcToClient(p.x, p.y, canvasBounds);
   },
   screenOfArrowHint(arrowId){
     const g = arrowGroup.children.find(c => c.userData.ar && c.userData.ar.arrowId === arrowId);
     if (!g || !g.userData.hint) return null;
     const p = g.userData.hint.getWorldPosition(new THREE.Vector3()).project(camera);
-    return {x: (p.x*.5+.5)*innerWidth, y: (-p.y*.5+.5)*innerHeight};
+    return ndcToClient(p.x, p.y, canvasBounds);
   },
   get hoverKeys(){ return hoverKeys; }, selectables, selKey,
+  get canvasBounds(){ return {...canvasBounds}; },
   get controls(){ return controls; },
   get view(){ return view; },
   get flying(){ return !!flight; },
@@ -2654,7 +2660,7 @@ function ownerOf(obj){
   return (o && o.userData.type) ? o : null;
 }
 function pickTagOwner(ev){
-  mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
+  setMouseFromClient(ev.clientX, ev.clientY);
   ray.setFromCamera(mouse, camera);
   /* Tags draw with depth testing off, so they appear above everything. Picking
      must follow what is visible, not what is nearest — otherwise clicking a
@@ -2676,21 +2682,23 @@ function pickTagOwner(ev){
    constant to the eye instead of shrinking with distance. */
 const PICK_SLOP = 13;
 const _pk = new THREE.Vector3();
+const _projectedClient = {x:0, y:0};
 function nodeNearPointer(ev, eligible){
   let best = null, bestD = PICK_SLOP;
   for (const m of selectables()){
     if (!eligible(m)) continue;
     m.getWorldPosition(_pk).project(camera);
     if (_pk.z > 1) continue;                       /* behind the camera */
-    const d = Math.hypot((_pk.x + 1) / 2 * innerWidth - ev.clientX,
-                         (1 - _pk.y) / 2 * innerHeight - ev.clientY);
+    ndcToClient(_pk.x, _pk.y, canvasBounds, _projectedClient);
+    const d = Math.hypot(_projectedClient.x - ev.clientX,
+                         _projectedClient.y - ev.clientY);
     if (d < bestD){ bestD = d; best = m; }
   }
   return best;
 }
 
 function pickPlainNode(ev){
-  mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
+  setMouseFromClient(ev.clientX, ev.clientY);
   ray.setFromCamera(mouse, camera);
   /* A ghosted node is out of play: it must not be clickable, and it must not
      block a lit node behind it either. Walking every hit and taking the first
@@ -2732,7 +2740,7 @@ function arrowInScope(g){
    over a lit node they visually overlap. */
 function pickArrow(ev){
   if (!layerState.arrows) return null;
-  mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
+  setMouseFromClient(ev.clientX, ev.clientY);
   ray.setFromCamera(mouse, camera);
   const objs = [];
   arrowGroup.children.forEach(g => {
@@ -2971,13 +2979,16 @@ detailEl.addEventListener('click', event=>{
 
 /* ---------- tooltip ---------- */
 const ray = new THREE.Raycaster(), mouse = new THREE.Vector2(), tip = document.getElementById('tip');
+function setMouseFromClient(clientX, clientY){
+  clientToNdc(clientX, clientY, canvasBounds, mouse);
+}
 /* Everything under the pointer, nearest first, whatever the current scope
    lights. Hovering is inspection, not selection: a ghosted node is out of play
    for clicking and brushing, but asking what it IS must always be answerable —
    a focused view that goes silent when you point at its surroundings tells you
    nothing about why they were excluded. */
 function pickAllHover(ev, max = 4){
-  mouse.set((ev.clientX / innerWidth) * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
+  setMouseFromClient(ev.clientX, ev.clientY);
   ray.setFromCamera(mouse, camera);
   const out = [], seen = new Set();
   const sprites = [];
@@ -3018,13 +3029,16 @@ const HOVER_WHITE = new THREE.Color(0xffffff);
 const hoverLayer = document.getElementById('hovercards');
 const leaderSvg = document.getElementById('leaders');
 const _hv = new THREE.Vector3();
+let hoverGrace = null;
 
 function screenOf(mesh){
   mesh.getWorldPosition(_hv).project(camera);
-  return {x: (_hv.x + 1) / 2 * innerWidth, y: (1 - _hv.y) / 2 * innerHeight};
+  return ndcToClient(_hv.x, _hv.y, canvasBounds);
 }
 
 function clearHover(){
+  if (hoverGrace !== null) clearTimeout(hoverGrace);
+  hoverGrace = null;
   hoverKeys.clear();
   hoverLeaders.length = 0;
   if (hoverLayer.childElementCount) hoverLayer.textContent = '';
@@ -3038,7 +3052,8 @@ function showHover(nodes, ev){
   nodes.forEach(n => { const k = selKey(n); if (k) hoverKeys.add(k); });
   if (!nodes.length) return;
 
-  const W = innerWidth, H = innerHeight, PAD = 10;
+  const {left, top, width:W, height:H} = canvasBounds;
+  const PAD = 10;
   const CARD = Math.min(290, W - 2 * PAD);
   /* Where each node actually is on screen. Nodes found together are stacked
      along one line of sight, so these are close and often identical — the
@@ -3067,8 +3082,8 @@ function showHover(nodes, ev){
     const a = spread[i];
     let x = cx + Math.cos(a) * (reach + CARD * 0.5) - CARD / 2;
     let y = cy + Math.sin(a) * (reach + c.h * 0.5) - c.h / 2;
-    x = Math.max(PAD, Math.min(W - PAD - CARD, x));
-    y = Math.max(PAD, Math.min(H - PAD - c.h, y));
+    x = Math.max(left + PAD, Math.min(left + W - PAD - CARD, x));
+    y = Math.max(top + PAD, Math.min(top + H - PAD - c.h, y));
     c.x = x; c.y = y;
   });
 
@@ -3082,8 +3097,8 @@ function showHover(nodes, ev){
       if (overlapX <= 0 || overlapY <= 0) continue;
       const push = (overlapY + 8) / 2;
       if (a.y < b.y){ a.y -= push; b.y += push; } else { a.y += push; b.y -= push; }
-      a.y = Math.max(PAD, Math.min(H - PAD - a.h, a.y));
-      b.y = Math.max(PAD, Math.min(H - PAD - b.h, b.y));
+      a.y = Math.max(top + PAD, Math.min(top + H - PAD - a.h, a.y));
+      b.y = Math.max(top + PAD, Math.min(top + H - PAD - b.h, b.y));
     }
   }
 
@@ -3097,6 +3112,16 @@ function showHover(nodes, ev){
                        ln, dot, x:c.x, y:c.y, w:CARD, h:c.h});
   });
   aimLeaders();
+}
+
+function restoreHoverByKey(keys){
+  if (!keys.length) return;
+  const nodes = resolveHoverNodes(keys, meshForKey);
+  if (!nodes.length) return;
+  if (hoverGrace !== null) clearTimeout(hoverGrace);
+  hoverGrace = null;
+  camera.updateMatrixWorld(true);
+  showHover(nodes);
 }
 
 /* Point every leader at where its node is NOW. The line leaves the card at the
@@ -3132,7 +3157,6 @@ function refreshInspectionAges(now=Date.now()){
   if (hoverLeaders.length) aimLeaders();
 }
 
-let hoverGrace = null;
 addEventListener('pointermove', e => {
   if (e.pointerType === 'touch') return;
   if (!onCanvas(e)){ clearTimeout(hoverGrace); hoverGrace = null; return clearHover(); }
@@ -3183,11 +3207,13 @@ function selectables(){
   return out;
 }
 function screenXY(o){
-  _sv.copy(o.position); _sv.project(camera);
-  return [(_sv.x*.5+.5)*innerWidth, (-_sv.y*.5+.5)*innerHeight, _sv.z];
+  o.getWorldPosition(_sv).project(camera);
+  const p = ndcToClient(_sv.x, _sv.y, canvasBounds);
+  return [p.x, p.y, _sv.z];
 }
 const spatialButtons = new Map();
 const _spatialWorld = new THREE.Vector3(), _spatialScale = new THREE.Vector3();
+const _spatialClient = {x:0, y:0};
 let spatialTruthAfter = 0;
 function clearSpatialTargets(){
   spatialButtons.clear();
@@ -3203,7 +3229,7 @@ function spatialHitIs(m, x, y){
   /* Rings, labels, and pulses can grow or disappear. They keep normal canvas
      ownership, but only the stable node body defines a persistent system
      region. */
-  mouse.set((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1);
+  setMouseFromClient(x, y);
   ray.setFromCamera(mouse, camera);
   return !!ray.intersectObject(m, false)[0];
 }
@@ -3255,15 +3281,16 @@ function updateSpatialTargets(){
     /* Layout snaps CSS positions to 1/64 px. Validate and publish that same
        coordinate; a raw floating-point center can straddle a depth edge that
        the snapped DOM center lands on the other side of. */
-    const x = Math.round((projected.x * .5 + .5) * innerWidth * 64) / 64;
-    const y = Math.round((-projected.y * .5 + .5) * innerHeight * 64) / 64;
+    ndcToClient(projected.x, projected.y, canvasBounds, _spatialClient);
+    const x = Math.round(_spatialClient.x * 64) / 64;
+    const y = Math.round(_spatialClient.y * 64) / 64;
     if (!spatialHitIs(m, x, y)) return;       /* keep visible hit precedence truthful */
     m.geometry.computeBoundingSphere();
     const geometryRadius = m.geometry.boundingSphere?.radius || 1;
     m.getWorldScale(_spatialScale);
     const depth = Math.max(.1, -_spatialWorld.clone().applyMatrix4(camera.matrixWorldInverse).z);
     const px = geometryRadius * Math.max(_spatialScale.x, _spatialScale.y, _spatialScale.z)
-      * innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * depth);
+      * canvasBounds.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * depth);
     const radius = Math.max(10, Math.min(24, Math.ceil(px * 1.2)));
     let button = spatialButtons.get(key);
     let shape = button?._spatialShape || '';
@@ -3481,7 +3508,7 @@ function buildArrows(){
     const lg = new LineSegmentsGeometry(); lg.setPositions(pos);
     const lm = new LineMaterial({color: hex, linewidth: 4.2, transparent: true,
                                  opacity: .95, depthTest: false});
-    lm.resolution.set(innerWidth, innerHeight);
+    lm.resolution.set(canvasBounds.width, canvasBounds.height);
     lm.userData.base = .95;
     edgeMats.add(lm);
     const line = new LineSegments2(lg, lm);
@@ -3556,7 +3583,7 @@ function placeArrow(g, curve){
     const at = d => span.u0 + (span.u1 - span.u0) * Math.min(1, Math.max(0, d / len));
     const screenAt = u => {
       const v = curve.getPointAt(u).project(camera);
-      return {x: v.x * innerWidth / 2, y: v.y * innerHeight / 2};
+      return ndcToClient(v.x, v.y, canvasBounds);
     };
     const head = screenAt(at(start)), tail = screenAt(at(start + g.userData.textLen));
     /* running right-to-left on screen would read backwards: walk the curve the
@@ -3567,7 +3594,7 @@ function placeArrow(g, curve){
       const u = at(d);
       sp.position.copy(curve.getPointAt(u)).addScaledVector(ARROW_UP, .5);
       const a = screenAt(Math.max(0, u - .012)), b = screenAt(Math.min(1, u + .012));
-      let ang = Math.atan2(b.y - a.y, b.x - a.x);
+      let ang = Math.atan2(a.y - b.y, b.x - a.x);
       if (flip) ang += Math.PI;
       sp.material.rotation = ang;
     });
@@ -4121,7 +4148,7 @@ function ensureRings(m){
       /* additive sums the three back to white on a dark ground; on paper the
          same trick has to subtract instead or it bleaches into the page */
       blending: T.name === 'light' ? THREE.MultiplyBlending : THREE.AdditiveBlending });
-    mat.resolution.set(innerWidth, innerHeight);
+    mat.resolution.set(canvasBounds.width, canvasBounds.height);
     edgeMats.add(mat);
     const seg = new LineSegments2(new LineSegmentsGeometry(), mat);
     seg.renderOrder = 6;
@@ -4440,12 +4467,13 @@ function tickFrame(){
   }
   renderer.render(scene, camera);
 }
-tickFrame();
 /* CSS decides the canvas box; we only match the drawing buffer to it. Passing
    false to setSize leaves the CSS size alone, so the two cannot disagree. */
 function fitViewport(){
   const r = renderer.domElement.getBoundingClientRect();
-  const w = Math.max(1, Math.floor(r.width)), h = Math.max(1, Math.floor(r.height));
+  canvasBounds = {left:r.left, top:r.top,
+    width:Math.max(1, r.width), height:Math.max(1, r.height)};
+  const {width:w, height:h} = canvasBounds;
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -4454,6 +4482,7 @@ function fitViewport(){
   autoCollapseLegend();
   measureLegend();
   applyChromeOffset(true);      /* a resize is already a jump; do not ease it */
+  if (hoverLeaders.length) showHover(hoverLeaders.map(L => L.node));
 }
 let fitQueued = false;
 function queueFit(){
@@ -4467,6 +4496,7 @@ window.visualViewport?.addEventListener('resize', queueFit);
 window.visualViewport?.addEventListener('scroll', queueFit);
 new ResizeObserver(queueFit).observe(document.body);
 fitViewport();
+tickFrame();
 </script>
 </body>
 </html>

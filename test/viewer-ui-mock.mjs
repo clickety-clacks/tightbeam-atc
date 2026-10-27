@@ -1,8 +1,42 @@
 import assert from 'node:assert/strict';
 import {
-  applyModelDelta, captureViewerState, rebuildWithViewerState,
+  applyModelDelta, captureViewerState, clientToNdc, ndcToClient, rebuildWithViewerState,
   renderEvidenceMarkup, renderModelStatusElement, restoreViewerState, sceneSignature,
+  resolveHoverNodes,
 } from '../web/viewer-semantics.mjs';
+
+/* Pointer and projected pixels share the canvas's CSS-pixel rectangle, even
+   when it is offset from or smaller than the browser viewport. */
+const canvasRect = {left: 125, top: 37, width: 800, height: 600};
+assert.deepEqual(clientToNdc(125, 37, canvasRect), {x: -1, y: 1});
+assert.deepEqual(clientToNdc(525, 337, canvasRect), {x: 0, y: 0});
+assert.deepEqual(ndcToClient(-1, 1, canvasRect), {x: 125, y: 37});
+const reusedNdc = {x: 0, y: 0};
+assert.equal(clientToNdc(525, 337, canvasRect, reusedNdc), reusedNdc);
+assert.deepEqual(reusedNdc, {x: 0, y: 0});
+const clientPoint = {x: 277.25, y: 488.5};
+const projectedPoint = clientToNdc(clientPoint.x, clientPoint.y, canvasRect);
+const restoredPoint = ndcToClient(projectedPoint.x, projectedPoint.y, canvasRect);
+assert.ok(Math.abs(restoredPoint.x - clientPoint.x) < 1e-9);
+assert.ok(Math.abs(restoredPoint.y - clientPoint.y) < 1e-9);
+for (const rect of [
+  {left: 0, top: 0, width: 1440, height: 900},
+  {left: 37.5, top: 21.25, width: 390, height: 844},
+]){
+  const point = {x: rect.left + rect.width * .37, y: rect.top + rect.height * .68};
+  const ndc = clientToNdc(point.x, point.y, rect);
+  const roundTrip = ndcToClient(ndc.x, ndc.y, rect);
+  assert.ok(Math.abs(roundTrip.x - point.x) < 1e-9);
+  assert.ok(Math.abs(roundTrip.y - point.y) < 1e-9);
+}
+
+const rebuiltMeshes = new Map([
+  ['i:wi-1', {id: 'replacement-item'}],
+  ['a:agent-1', {id: 'replacement-agent'}],
+]);
+assert.deepEqual(resolveHoverNodes(['i:wi-1', 'i:removed', 'a:agent-1'],
+  key => rebuiltMeshes.get(key)),
+[rebuiltMeshes.get('i:wi-1'), rebuiltMeshes.get('a:agent-1')]);
 
 /* The same model and DOM seam used by the HUD must expose global state, ages,
    and the distinction between feed updates and bounded reconciliation. */
