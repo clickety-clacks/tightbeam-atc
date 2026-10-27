@@ -1,6 +1,6 @@
 """One upstream feed, recoverable read model, and snapshot/delta subscriptions."""
 
-from collections import deque
+from collections import Counter, deque
 from copy import deepcopy
 import json
 import logging
@@ -38,6 +38,11 @@ RESOURCE_REFS = {
     "wakes": "wakeId", "roles": "role", "artifacts": "artifactId",
     "messages": "messageId", "decision requests": "decisionRequestId",
 }
+
+
+def _resource_counts(jobs):
+    counts = Counter(job[0] for job in jobs)
+    return {resource: counts[resource] for resource in sorted(counts)}
 
 
 class FeedCursor:
@@ -393,6 +398,7 @@ class LiveService:
         terminal = len(self.backstop.history)
         return {"mode": cycle["mode"] if cycle else None,
                 "pendingScopes": len(cycle["pending"]) if cycle else 0,
+                "pendingByResource": _resource_counts(cycle["pending"]) if cycle else {},
                 "totalScopes": len(cycle["seen"]) if cycle else 0,
                 "scopeBudget": self.scope_budget,
                 "historyScopes": histories,
@@ -413,7 +419,10 @@ class LiveService:
             "lastRetryOutcome": deepcopy(self.last_retry_outcome),
             "gatewayReadRequests": getattr(self.gateway, "read_count", None),
             "readQueue": {"pending": len(self.reads.pending),
-                          "active": len(self.reads.active)},
+                          "pendingByResource": _resource_counts(self.reads.pending),
+                          "active": len(self.reads.active),
+                          "activeByResource": _resource_counts(
+                              job for job, _epoch in self.reads.active.values())},
             "retry": {**self.retry_counters, "waiting": len(self.read_retries),
                       "inProgress": len(self.retry_in_flight)},
             "epochDiscards": {"total": self.reads.epoch_discards,

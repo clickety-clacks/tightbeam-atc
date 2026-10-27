@@ -84,6 +84,28 @@ class ServiceRecoveryTest(unittest.TestCase):
     def item(self):
         return self.service.model.snapshot(20)["items"][0]
 
+    def test_reconciliation_names_pending_scopes_and_queue_work_by_resource(self):
+        self.service.cycle = {
+            "mode": "recovery",
+            "pending": {("messages", "agent-one"), ("messages", "agent-two"),
+                        ("wakes", "agent-one")},
+            "seen": {("messages", "agent-one"), ("messages", "agent-two"),
+                     ("wakes", "agent-one")},
+        }
+        self.service.reads.schedule("messages", "agent-one")
+        self.service.reads.schedule("messages", "agent-two", "message-one")
+        self.service.reads.schedule("wakes", "agent-one")
+        self.service.reads.active[("messages", "agent-three")] = (
+            ("messages", "agent-three", None), 0)
+
+        reconciliation = self.service._reconciliation()
+        self.assertEqual(3, reconciliation["pendingScopes"])
+        self.assertEqual({"messages": 2, "wakes": 1},
+                         reconciliation["pendingByResource"])
+        queue = reconciliation["readDiagnostics"]["readQueue"]
+        self.assertEqual({"messages": 2, "wakes": 1}, queue["pendingByResource"])
+        self.assertEqual({"messages": 1}, queue["activeByResource"])
+
     def test_bootstrap_covers_assignments_attests_and_visible_session_histories(self):
         self.assertEqual("live", self.service.state)
         self.assertEqual(1, self.item()["stage"])
