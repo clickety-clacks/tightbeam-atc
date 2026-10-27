@@ -169,12 +169,14 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertTrue(self.service.metrics["bootstrapComplete"])
         rebuilds += 1
         reads = self.gateway.read_count
+        epochs = dict(self.service.reads.epochs)
 
         for reason in ("feed disconnected: retry 1", "feed disconnected: retry 2"):
             self.service._handle("lost", reason)
             self.assertEqual(reason, self.service.reason)
             self.assertIsNone(self.service.cycle)
             self.assertEqual(rebuilds, self.service.metrics["rebuilds"])
+            self.assertEqual(epochs, dict(self.service.reads.epochs))
         self.assertEqual(reads, self.gateway.read_count)
 
     def test_incomplete_read_retry_deadline_runs_while_feed_is_disconnected(self):
@@ -231,6 +233,12 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertGreater(retry_state[0], time.monotonic())
         epochs = dict(service.reads.epochs)
         reads = gateway.read_count
+        cycle_state = {
+            "mode": offline_cycle["mode"],
+            "pending": set(offline_cycle["pending"]),
+            "seen": set(offline_cycle["seen"]),
+            "expanded": offline_cycle["expanded"],
+        }
 
         # Feed loss is reported repeatedly. Local read-state transitions can
         # change the stale reason between notifications without starting a
@@ -239,9 +247,14 @@ class ServiceRecoveryTest(unittest.TestCase):
             service._handle("lost", reason)
             self.assertEqual(reason, service.reason)
             self.assertIs(offline_cycle, service.cycle)
+            self.assertEqual(cycle_state["mode"], offline_cycle["mode"])
+            self.assertEqual(cycle_state["pending"], offline_cycle["pending"])
+            self.assertEqual(cycle_state["seen"], offline_cycle["seen"])
+            self.assertEqual(cycle_state["expanded"], offline_cycle["expanded"])
             self.assertEqual(epochs, dict(service.reads.epochs))
             self.assertEqual(retry_state, service.read_retries[retry])
             self.assertFalse(service.reads.pending)
+            self.assertGreater(retry_state[0], time.monotonic())
         self.assertEqual(reads, gateway.read_count)
 
         # Its scheduled retry still runs while disconnected; the model remains
