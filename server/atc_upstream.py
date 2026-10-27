@@ -126,12 +126,14 @@ class Gateway:
             self.read_count += 1
         return self.cli.read(verb, **params)
 
-    def collection(self, path):
+    def collection(self, path, *, from_head=False):
         rows, cursor, seen, page_number = [], None, set(), 0
         try:
             while True:
                 page_number += 1
                 query = {"limit": 500}
+                if cursor is None and from_head:
+                    query["tail"] = "false"
                 if cursor is not None:
                     query["after"] = cursor
                 result = self.request(path + "?" + urlencode(query))
@@ -161,7 +163,9 @@ class Gateway:
         if resource in {"work-items", "sessions", "decision-requests"}:
             return self.collection("/api/" + resource)
         if resource in {"turns", "wakes", "messages"}:
-            return self.collection("/api/sessions/" + quote(scope, safe="") + "/" + resource)
+            return self.collection(
+                "/api/sessions/" + quote(scope, safe="") + "/" + resource,
+                from_head=resource == "messages")
         source = {
             "assignments": "cli:assignments --state all",
             "attests": "cli:attests " + str(scope),

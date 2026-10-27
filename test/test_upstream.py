@@ -1,15 +1,16 @@
 import sys
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from atc_upstream import Gateway, PackagedCLI
 
 
-def page(rows, more=False, cursor=None):
+def page(rows, more=False, cursor=None, before=False):
     return {"schemaVersion": 1, "items": rows, "page": {
-        "hasMoreBefore": False, "hasMoreAfter": more, "newestCursor": cursor}}
+        "hasMoreBefore": before, "hasMoreAfter": more, "newestCursor": cursor}}
 
 
 class ReadCompletionTest(unittest.TestCase):
@@ -22,7 +23,32 @@ class ReadCompletionTest(unittest.TestCase):
         result = self.gateway.collection("/api/work-items")
         self.assertTrue(result.complete)
         self.assertEqual(["a", "b"], [r["id"] for r in result.rows])
+        first_query = parse_qs(urlsplit(self.gateway.request.call_args_list[0].args[0]).query)
+        self.assertNotIn("tail", first_query)
         self.assertIn("after=cursor", self.gateway.request.call_args.args[0])
+
+    def test_messages_collection_starts_at_head_then_pages_forward(self):
+        requests = []
+
+        def response(path):
+            query = parse_qs(urlsplit(path).query)
+            requests.append(query)
+            if query.get("tail") == ["false"]:
+                return page([{"id": "older"}], True, "cursor")
+            if "after" in query:
+                return page([{"id": "newer"}], before=True)
+            # A cursorless transcript request defaults to the newest tail.
+            return page([{"id": "newer"}], before=True)
+
+        self.gateway.request = Mock(side_effect=response)
+        result = self.gateway.read("messages", "agent s_example")
+
+        self.assertTrue(result.complete)
+        self.assertEqual(["older", "newer"], [row["id"] for row in result.rows])
+        self.assertEqual(["false"], requests[0]["tail"])
+        self.assertEqual(["500"], requests[0]["limit"])
+        self.assertEqual(["cursor"], requests[1]["after"])
+        self.assertNotIn("tail", requests[1])
 
     def test_failed_second_page_keeps_first_page_partial(self):
         self.gateway.request = Mock(side_effect=[
