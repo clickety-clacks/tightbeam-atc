@@ -59,7 +59,12 @@ partialModel.freshness.state = 'rebuilding';
 partialModel.freshness.reason = 'reading published state: recovery';
 partialModel.freshness.reconciliation.mode = 'recovery';
 partialModel.freshness.reconciliation.pendingScopes = 11;
+partialModel.freshness.reconciliation.pendingByResource = {messages: 4, wakes: 7};
 partialModel.freshness.reconciliation.totalScopes = 788;
+partialModel.freshness.reconciliation.readDiagnostics = {readQueue: {
+  pending: 43, pendingByResource: {messages: 35, wakes: 8},
+  active: 5, activeByResource: {messages: 3, wakes: 2},
+}};
 partialModel.freshness.reconciliation.active.overBudgetScopes = 0;
 partialModel.freshness.reconciliation.active.oldestConfirmedAt = now - 5 * 60_000;
 partialModel.items[0].evidence.identity = {status: 'known', freshness: 'stale',
@@ -69,11 +74,20 @@ const partialHud = {textContent: '', className: '', title: ''};
 renderModelStatusElement(partialHud, {model: partialModel,
   streamState: 'connected', streamError: null}, now);
 assert.equal(partialHud.className, 'rebuilding');
-assert.match(partialHud.textContent, /^rebuilding ·/);
+assert.match(partialHud.textContent,
+  /^rebuilding · 11 scopes pending \(messages 4, wakes 7\) ·/);
 assert.match(partialHud.textContent, /2 stale/);
 assert.match(partialHud.title, /Reconciliation: recovery · 11 pending \/ 788 cycle scopes/);
+assert.match(partialHud.title, /Read queue: 43 queued \(messages 35, wakes 8\) · 5 active \(messages 3, wakes 2\)/);
 assert.match(partialHud.title, /Service freshness: rebuilding/);
 assert.match(partialHud.title, /Reason: reading published state: recovery/);
+const disconnectedPartialHud = {textContent: '', className: '', title: ''};
+renderModelStatusElement(disconnectedPartialHud, {
+  model: partialModel, streamState: 'stale', streamError: 'event stream disconnected; reconnecting',
+}, now);
+assert.equal(disconnectedPartialHud.className, 'stale');
+assert.match(disconnectedPartialHud.textContent, /^stale ·/);
+assert.doesNotMatch(disconnectedPartialHud.textContent, /scopes pending/);
 assert.match(renderEvidenceMarkup(partialModel.items[0], now),
   new RegExp(`identity<\\/b> · known · stale · unconfirmed since ${new Date(now - 120_000).toISOString()} · observed 30s ago · work-items · incomplete`));
 

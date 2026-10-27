@@ -564,7 +564,20 @@ export function renderModelStatusElement(element,
   const counts = evidenceCounts(model);
   const age = factAge(model.generatedAt, now);
   const warnings = Array.isArray(model.viewerWarnings) ? model.viewerWarnings : [];
-  element.textContent = `${state} · ${model.agents.length} agents · ${model.items.length} items · `
+  const resourceCountsLabel = values => {
+    if (!isRecord(values)) return null;
+    const entries = Object.entries(values)
+      .filter(([resource, count]) => resource && Number.isSafeInteger(count) && count > 0)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return entries.length ? entries.map(([resource, count]) => `${resource} ${count}`).join(', ') : null;
+  };
+  const pendingCount = freshness.reconciliation?.pendingScopes;
+  const pendingResources = resourceCountsLabel(freshness.reconciliation?.pendingByResource);
+  const pendingSummary = state === 'rebuilding' && Number.isSafeInteger(pendingCount) && pendingCount > 0
+    ? `${pendingCount} scopes pending${pendingResources ? ` (${pendingResources})` : ''}`
+    : null;
+  element.textContent = `${state}${pendingSummary ? ` · ${pendingSummary}` : ''} · `
+    + `${model.agents.length} agents · ${model.items.length} items · `
     + `${counts.stale} stale · ${counts.rebuilding} rebuilding · ${counts.unknown} unknown · snapshot age ${age}`
     + (warnings.length ? ` · ${warnings.join(' · ')}` : '');
   element.className = state === 'live' ? 'live' : state === 'stale' ? 'stale'
@@ -604,6 +617,15 @@ export function renderModelStatusElement(element,
       + `maintained scopes ${Number.isFinite(freshness.reconciliation.historyScopes) ? freshness.reconciliation.historyScopes : 'unknown'} · `
       + `last sweep ${sweepAge === 'unknown' ? 'unknown' : sweepAge + ' ago'}`
     : 'Reconciliation: unknown';
+  const readQueue = freshness.reconciliation?.readDiagnostics?.readQueue;
+  const queuedResources = resourceCountsLabel(readQueue?.pendingByResource);
+  const activeResources = resourceCountsLabel(readQueue?.activeByResource);
+  const readQueueSummary = readQueue && typeof readQueue === 'object'
+    ? `Read queue: ${Number.isFinite(readQueue.pending) ? readQueue.pending : 'unknown'} queued`
+      + `${queuedResources ? ` (${queuedResources})` : ''} · `
+      + `${Number.isFinite(readQueue.active) ? readQueue.active : 'unknown'} active`
+      + `${activeResources ? ` (${activeResources})` : ''}`
+    : null;
   element.title = [
     `Gateway version: ${gatewayVersionLabel(model.gatewayVersion)}`,
     `Service freshness: ${FRESHNESS_VALUES.has(freshness.state) ? freshness.state : 'unknown'}`,
@@ -615,6 +637,7 @@ export function renderModelStatusElement(element,
     `Last complete read: ${factAge(freshness.lastCompleteAt, now)} ago`,
     Number.isFinite(freshness.rebuildIntervalMs) ? `Rebuild interval: ${Math.round(freshness.rebuildIntervalMs / 1000)}s` : 'Rebuild interval: unknown',
     reconciliation,
+    readQueueSummary,
     freshness.reason ? `Reason: ${freshness.reason}` : null,
     ...warnings,
     streamError ? `Connection: ${streamError}` : 'Connection: event stream open',
