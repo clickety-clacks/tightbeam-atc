@@ -28,6 +28,8 @@ BASE_SCOPES = (("work-items", None), ("sessions", None), ("assignments", None),
 HISTORIES = {"attests", "turns", "wakes", "messages"}
 PUBLICATION_INTERVAL = 0.25
 EVENT_BATCH_LIMIT = 128
+MAX_DELTA_HISTORY_COUNT = 64
+MAX_DELTA_HISTORY_BYTES = 16 * 1024 * 1024
 
 COLLECTIONS = ("agents", "items", "links", "wakes", "messages")
 LOG = logging.getLogger("atc.recovery")
@@ -140,8 +142,8 @@ class LiveService:
         self._comparison = None
         self._published_details = -1
         self._full_event = None
-        self.delta = None
-        self.delta_base = None
+        self.delta_history = deque()
+        self.delta_history_bytes = 0
         self._publish()
 
     def snapshot(self):
@@ -157,14 +159,40 @@ class LiveService:
             return deepcopy(self.current) if self.revision != revision else None
 
     def next_event(self, revision, timeout=15):
-        """All subscribers share the immutable bytes encoded at publication."""
+        """Return retained delta frames in order, or a full snapshot on a gap."""
         with self.condition:
             self.condition.wait_for(
                 lambda: self.revision != revision or self.stop_event.is_set(), timeout)
             if self.revision == revision:
                 return None
-            body = self.delta if revision == self.delta_base else self.event
+            history = {base: (next_revision, body)
+                       for base, next_revision, body in self.delta_history}
+            cursor = revision
+            frames = []
+            while cursor < self.revision:
+                retained = history.get(cursor)
+                if retained is None:
+                    break
+                next_revision, body = retained
+                if next_revision != cursor + 1 or next_revision > self.revision:
+                    break
+                frames.append(body)
+                cursor = next_revision
+            body = b"".join(frames) if cursor == self.revision else self.event
             return self.revision, body
+
+    def _retain_delta(self, base_revision, revision, body):
+        if len(body) > MAX_DELTA_HISTORY_BYTES:
+            # Keep even one unusually large publication from exceeding the cap.
+            self.delta_history.clear()
+            self.delta_history_bytes = 0
+            return
+        self.delta_history.append((base_revision, revision, body))
+        self.delta_history_bytes += len(body)
+        while (len(self.delta_history) > MAX_DELTA_HISTORY_COUNT or
+               self.delta_history_bytes > MAX_DELTA_HISTORY_BYTES):
+            _, _, expired = self.delta_history.popleft()
+            self.delta_history_bytes -= len(expired)
 
     @property
     def event(self):
@@ -302,7 +330,8 @@ class LiveService:
         if comparison == self._comparison and self.model.details_revision == self._published_details:
             return False
         previous = self.current
-        revision = self.revision + 1
+        base_revision = self.revision
+        revision = base_revision + 1
         current = dict(candidate, revision=revision, generatedAt=at, metrics=dict(self.metrics))
         changes = {}
         for name in COLLECTIONS:
@@ -314,16 +343,16 @@ class LiveService:
                 "remove": [key for key in before if key not in after],
             }
         metadata = {key: value for key, value in current.items() if key not in COLLECTIONS}
-        delta = self._encode("delta", dict(metadata, baseRevision=self.revision, changes=changes))
+        delta = self._encode("delta", dict(metadata, baseRevision=base_revision, changes=changes))
         with self.condition:
             previous = self.current
-            self.delta_base = self.revision
+            # Publish the revision and its catch-up path atomically to subscribers.
+            self._retain_delta(base_revision, revision, delta)
             self.revision = revision
             self.current = current
             self._comparison = comparison
             self._published_details = self.model.details_revision
             self._full_event = None
-            self.delta = delta
             self.condition.notify_all()
         return True
 

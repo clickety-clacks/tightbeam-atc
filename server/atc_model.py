@@ -119,6 +119,9 @@ class EvidenceModel:
                 wakes[str(wake["wakeId"])] = wake
             messages.extend(recent_marks(self.summary("messages", key), "at", now))
         all_turn_facts = combined_evidence(*turn_evidence) if visible else sessions.evidence()
+        # Item evidence names the turns collection, not every session URL.
+        # Session-level observations and timestamps remain on each agent.
+        item_turn_facts = dict(all_turn_facts, observedAt=None, source=["turns"])
 
         authored_at = defaultdict(dict)
         activity_evidence = defaultdict(list)
@@ -238,7 +241,8 @@ class EvidenceModel:
                 "stage": stage, "ring": ring, "merged": merged, "code": code,
                 "readyToMerge": ready, "closedAt": max(closed) if closed else None,
                 "holders": holders if assignments.complete else (holders or None),
-                "turns": item_turns.get(wid, {}) if all_turn_facts["complete"] else (item_turns.get(wid) or None),
+                "turns": (item_turns.get(wid, {}) if item_turn_facts["complete"]
+                          else (item_turns.get(wid) or None)),
                 "flow": {holder: "in" for holder in item_turns.get(wid, {})},
                 "attestKinds": kinds, "verdictKinds": verdicts,
                 "assignments": {
@@ -256,7 +260,7 @@ class EvidenceModel:
                     for a in owned for c in a.get("commitRefCorrections", [])],
                 "evidence": {"identity": identity, "stage": stage_facts,
                              "ring": ring_facts, "assignments": assignments.evidence(),
-                             "attests": attest_facts, "turns": all_turn_facts,
+                             "attests": attest_facts, "turns": item_turn_facts,
                              "merged": merge_facts, "code": stage_facts},
             })
 

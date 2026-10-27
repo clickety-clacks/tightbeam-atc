@@ -60,7 +60,13 @@ class ModelTest(unittest.TestCase):
         self.read("turns", [{"seq": 1, "sessionKey": "agent s_author",
                              "assignmentId": None, "startedAt": 1, "endedAt": None}],
                   "agent s_author")
-        self.assertEqual({"s_author": "run"}, self.model.snapshot(20)["items"][0]["turns"])
+        snapshot = self.model.snapshot(20)
+        self.assertEqual({"s_author": "run"}, snapshot["items"][0]["turns"])
+        turns_evidence = snapshot["items"][0]["evidence"]["turns"]
+        self.assertEqual(["turns"], turns_evidence["source"])
+        self.assertIsNone(turns_evidence["observedAt"])
+        self.assertEqual("test-read", snapshot["agents"][0]["evidence"]["turn"]["source"])
+        self.assertEqual(10, snapshot["agents"][0]["evidence"]["turn"]["observedAt"])
         self.read("turns", [{"seq": 1, "sessionKey": "agent s_author",
                              "assignmentId": None, "startedAt": 3, "endedAt": None}],
                   "agent s_author")

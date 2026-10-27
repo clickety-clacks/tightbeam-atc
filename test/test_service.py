@@ -817,13 +817,18 @@ class ServiceRecoveryTest(unittest.TestCase):
             self.assertEqual(self.service.snapshot()[name], delta[name])
         self.service.model.accept("work-items", None, Read([], True, 40, "read"))
         self.service._publish()
-        _, frame = self.service.next_event(revision, timeout=0)
+        final_revision, frame = self.service.next_event(revision, timeout=0)
         delta = json.loads(frame.split(b"data: ", 1)[1])
         self.assertEqual(["work"], delta["changes"]["items"]["remove"])
-        # Falling behind more than the retained delta yields a complete resync.
+        # A subscriber still within the bounded history receives each delta in order.
         _, frame = self.service.next_event(baseline["revision"], timeout=0)
-        self.assertTrue(frame.startswith(b"event: model\n"))
-        self.assertEqual([], json.loads(frame.split(b"data: ", 1)[1])["items"])
+        frames = [part for part in frame.split(b"\n\n") if part]
+        self.assertEqual(2, len(frames))
+        catch_up = [json.loads(part.split(b"data: ", 1)[1]) for part in frames]
+        self.assertEqual(baseline["revision"], catch_up[0]["baseRevision"])
+        self.assertEqual(revision, catch_up[0]["revision"])
+        self.assertEqual(revision, catch_up[1]["baseRevision"])
+        self.assertEqual(final_revision, catch_up[1]["revision"])
 
     def test_status_delta_has_no_clock_only_agent_upserts(self):
         self.service._publish()
