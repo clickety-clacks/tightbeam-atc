@@ -146,7 +146,7 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual("live", snapshot["agents"][0]["evidence"]["identity"]["freshness"])
         self.assertIn(("work-items", None, None), self.service.read_retries)
 
-    def test_disconnect_restarts_pending_bootstrap_and_reconnect_can_complete_it(self):
+    def test_disconnect_resumes_pending_bootstrap_without_restarting_completed_scopes(self):
         gateway = PublishedReads()
         gateway.partial.add(("work-items", None))
         service = LiveService(gateway)
@@ -158,42 +158,149 @@ class ServiceRecoveryTest(unittest.TestCase):
         retry = ("work-items", None, None)
         self.assertIn(retry, service.read_retries)
         self.assertIsNone(service.metrics["bootstrapReads"])
+        cycle = service.cycle
+        retry_state = service.read_retries[retry]
+        completed = {scope for scope in cycle["seen"] if scope != retry[:2]}
+        self.assertTrue(completed)
+        self.assertTrue(all(service.model.inventory(*scope).complete and
+                            not service.model.inventory(*scope).stale for scope in completed))
 
         reads_before_disconnect = gateway.read_count
+        epochs_before_disconnect = dict(service.reads.epochs)
         service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
+        self.assertIs(cycle, service.cycle)
         self.assertEqual("recovery", service.cycle["mode"])
         self.assertEqual("feed disconnected: ConnectionClosedError (4008)", service.reason)
         gateway.partial.clear()
         self.drain(service)
-
-        self.assertIsNone(service.cycle)
-        self.assertFalse(service.metrics["bootstrapComplete"])
-        self.assertEqual("stale", service.state)
-        self.assertGreater(gateway.read_count, reads_before_disconnect)
+        self.assertEqual(reads_before_disconnect, gateway.read_count)
+        self.assertEqual(retry_state, service.read_retries[retry])
 
         service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+        self.assertTrue(service.connected)
+        self.assertEqual(reads_before_disconnect, gateway.read_count)
+        self.assertEqual(retry_state, service.read_retries[retry])
+        self.assertEqual(epochs_before_disconnect, dict(service.reads.epochs))
+
+        _, priority = retry_state
+        service.read_retries[retry] = (time.monotonic() - 1, priority)
+        service._retry_incomplete_reads()
         self.drain(service)
+        self.assertIsNone(service.cycle)
         self.assertTrue(service.metrics["bootstrapComplete"])
         self.assertIsNotNone(service.last_complete)
         self.assertEqual("live", service.state)
 
-    def test_repeated_lost_after_healthy_offline_settle_waits_for_interval(self):
-        rebuilds = self.service.metrics["rebuilds"]
-        self.service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
-        self.drain()
+    def test_completed_scopes_keep_credit_and_show_outage_until_validated(self):
+        completed = {
+            scope: (deepcopy(inventory.rows), inventory.confirmed_at)
+            for scope, inventory in self.service.model.inventories.items()
+            if inventory.complete
+        }
+        self.assertTrue(completed)
+        reads_before_outage = self.gateway.read_count
+        last_complete_before = self.service.last_complete
+        outage_at = 1000
+
+        with patch("atc_service.now_ms", return_value=outage_at):
+            self.service._handle("lost", "feed disconnected: transport closed")
+        self.assertIsNotNone(self.service.cycle)
+        self.assertEqual(set(), self.service.cycle["pending"])
+        self.assertEqual(reads_before_outage, self.gateway.read_count)
+        for scope, (rows, confirmed_at) in completed.items():
+            inventory = self.service.model.inventory(*scope)
+            self.assertEqual(rows, inventory.rows)
+            self.assertTrue(inventory.complete)
+            self.assertFalse(inventory.stale)
+            self.assertEqual(confirmed_at, inventory.confirmed_at)
+            self.assertEqual(outage_at, inventory.unconfirmed_since)
+            self.assertEqual("unconfirmed", inventory.evidence()["freshness"])
+
+        with patch("atc_service.now_ms", return_value=1100):
+            self.service._handle(
+                "ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+            self.service._publish()
+        self.assertTrue(self.service.connected)
         self.assertIsNone(self.service.cycle)
         self.assertTrue(self.service.metrics["bootstrapComplete"])
-        rebuilds += 1
+        self.assertNotEqual(last_complete_before, self.service.last_complete)
+        self.assertEqual(1100, self.service.last_complete)
+        self.assertEqual("live", self.service.state)
+        self.assertEqual(reads_before_outage, self.gateway.read_count)
+        item = self.service.snapshot()["items"][0]
+        self.assertEqual("unconfirmed", item["evidence"]["identity"]["freshness"])
+        self.assertEqual(outage_at, item["evidence"]["identity"]["unconfirmedSince"])
+        self.assertEqual("unconfirmed", item["evidence"]["stage"]["freshness"])
+        status, page = self.service.evidence_page("work")
+        self.assertEqual(200, status)
+        self.assertEqual("unconfirmed", page["freshness"]["freshness"])
+        self.assertEqual(outage_at, page["freshness"]["unconfirmedSince"])
+
+        work_rows = list(self.service.model.inventory("work-items").rows.values())
+        self.service.model.accept("work-items", None,
+                                  Read(work_rows, True, 1200, "validating-read"))
+        with patch("atc_service.now_ms", return_value=1200):
+            self.service._publish()
+        item = self.service.snapshot()["items"][0]
+        self.assertEqual("live", item["evidence"]["identity"]["freshness"])
+        self.assertIsNone(item["evidence"]["identity"]["unconfirmedSince"])
+        self.assertEqual("unconfirmed", item["evidence"]["stage"]["freshness"])
+        self.assertEqual(outage_at,
+                         self.service.model.inventory("assignments").unconfirmed_since)
+
+    def test_reconnected_partial_recovery_keeps_stale_on_genuinely_incomplete_scope(self):
+        self.gateway.partial.add(("attests", "assignment"))
+        self.service.model.inventory("attests", "assignment").invalidate()
+        self.service._handle("lost", "feed disconnected: transport closed")
+        self.assertEqual("stale", self.service.state)
+        self.assertIsNotNone(self.service.cycle)
+
+        self.service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+        self.assertTrue(self.service.connected)
+        self.assertEqual("rebuilding", self.service.state)
+
+        self.drain()
+        self.assertEqual("rebuilding", self.service.state)
+        self.assertEqual({("attests", "assignment")}, self.service.cycle["pending"])
+        self.assertFalse(self.service.model.inventory("work-items").stale)
+        self.assertFalse(self.service.model.inventory("assignments").stale)
+        self.assertTrue(self.service.model.inventory("attests", "assignment").stale)
+        self.assertEqual("unconfirmed", self.service.model.inventory("work-items").evidence()["freshness"])
+        self.assertEqual("unconfirmed", self.service.model.inventory("assignments").evidence()["freshness"])
+        self.assertIsNotNone(self.service.model.inventory("attests", "assignment").unconfirmed_since)
+
+        self.service._publish()
+        reconciliation = self.service.snapshot()["freshness"]["reconciliation"]
+        self.assertGreater(reconciliation["totalScopes"], reconciliation["pendingScopes"])
+        self.assertEqual(1, reconciliation["pendingScopes"])
+        self.assertEqual("stale", self.service.snapshot()["items"][0]["evidence"]["stage"]["freshness"])
+        self.assertIsNotNone(self.service.snapshot()["items"][0]["evidence"]["stage"]["unconfirmedSince"])
+
+    def test_repeated_lost_events_do_not_rebuild_after_disconnect_transition(self):
+        self.service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
+        cycle = self.service.cycle
+        self.assertIsNotNone(cycle)
+        self.drain()
+        self.assertIs(cycle, self.service.cycle,
+                      "an offline recovery keeps completion credit but waits to settle until reconnect")
+        rebuilds = self.service.metrics["rebuilds"]
         reads = self.gateway.read_count
         epochs = dict(self.service.reads.epochs)
 
         for reason in ("feed disconnected: retry 1", "feed disconnected: retry 2"):
             self.service._handle("lost", reason)
             self.assertEqual(reason, self.service.reason)
-            self.assertIsNone(self.service.cycle)
+            self.assertIs(cycle, self.service.cycle)
             self.assertEqual(rebuilds, self.service.metrics["rebuilds"])
             self.assertEqual(epochs, dict(self.service.reads.epochs))
+            self.assertEqual(reads, self.gateway.read_count)
         self.assertEqual(reads, self.gateway.read_count)
+
+        self.service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+        self.drain()
+        self.assertIsNone(self.service.cycle)
+        self.assertTrue(self.service.metrics["bootstrapComplete"])
+        self.assertEqual("live", self.service.state)
 
     def test_incomplete_read_retry_deadline_runs_while_feed_is_disconnected(self):
         gateway = PublishedReads()
@@ -273,17 +380,33 @@ class ServiceRecoveryTest(unittest.TestCase):
             self.assertGreater(retry_state[0], time.monotonic())
         self.assertEqual(reads, gateway.read_count)
 
-        # Its scheduled retry still runs while disconnected; the model remains
-        # stale until the feed reconnects and can establish live freshness.
+        # Its scheduled retry still runs while disconnected. The result remains
+        # stale, so reconnect must resume that scope before settling the cycle.
         gateway.partial.clear()
         service.read_retries[retry] = (time.monotonic() - 1, retry_state[1])
         service._retry_incomplete_reads()
         self.assertIn(retry, service.reads.pending)
         self.drain(service)
-        self.assertIsNone(service.cycle)
+        self.assertIs(offline_cycle, service.cycle)
         self.assertEqual(1, service.retry_counters["completed"])
         self.assertTrue(service.last_retry_outcome["complete"])
         self.assertEqual("stale", service.state)
+        self.assertTrue(service.model.inventory(*retry[:2]).stale)
+
+        reads_before_reconnect = gateway.read_count
+        service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+        self.assertEqual(reads_before_reconnect, gateway.read_count)
+        pending_scopes = {job[:2] for job in service.reads.pending if job[2] is None}
+        stale_scopes = {scope for scope in offline_cycle["seen"]
+                        if (not service.model.inventory(*scope).complete
+                            or service.model.inventory(*scope).stale
+                            or service.model.inventory(*scope).budget_stale)}
+        self.assertEqual(stale_scopes, pending_scopes)
+        self.assertIn(retry[:2], pending_scopes)
+        self.drain(service)
+        self.assertIsNone(service.cycle)
+        self.assertFalse(service.model.inventory(*retry[:2]).stale)
+        self.assertEqual("live", service.state)
 
     def test_status_exposes_sanitized_page_retry_epoch_and_feed_lag_details(self):
         job = ("work-items", None, None)
@@ -522,6 +645,38 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertIn(gap, self.service.correlation_gaps)
         self.assertEqual("stale", self.service.state)
         self.assertEqual("uncorrelated messages change", self.service.reason)
+
+    def test_unplaced_change_survives_idle_reconnect_until_correlated_read(self):
+        self.service.change({"resource": "messages", "refs": {"messageId": "unplaced"}})
+        gap = ("messages", "unplaced")
+        self.assertIn(gap, self.service.correlation_gaps)
+        self.assertEqual("stale", self.service.state)
+        reads_before_outage = self.gateway.read_count
+
+        self.service._handle("lost", "feed disconnected: transport closed")
+        cycle = self.service.cycle
+        self.assertIsNotNone(cycle)
+        self.assertTrue(cycle["resume"])
+        self.assertEqual(set(), cycle["pending"])
+        self.service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+
+        self.assertIsNone(self.service.cycle)
+        self.assertEqual(reads_before_outage, self.gateway.read_count,
+                         "idle reconnect should retain completed scope credit")
+        self.assertIn(gap, self.service.correlation_gaps)
+        self.assertEqual("stale", self.service.state)
+        self.assertEqual("uncorrelated messages change", self.service.reason)
+
+        self.gateway.rows[("messages", None)] = [{
+            "id": "unplaced", "sessionKey": "agent s_author",
+        }]
+        self.service.reads.schedule("messages", None, "unplaced")
+        self.drain()
+
+        self.assertIsNone(self.service.cycle)
+        self.assertNotIn(gap, self.service.correlation_gaps)
+        self.assertTrue(self.service.model.inventory("messages", "agent s_author").stale,
+                        "a detail read correlates the event but does not validate the full scope")
 
     def test_background_history_read_does_not_block_targeted_change(self):
         entered, release = threading.Event(), threading.Event()

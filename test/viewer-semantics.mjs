@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts, evidencePageFreshness,
+import { agentSampleTimes, applyModelDelta, canInspectNode, evidenceCounts, evidenceFreshnessLabel, evidencePageFreshness,
          evidencePageQuery, evidenceRecordAuthor,
          factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, isModelEnvelope, knownStage,
@@ -199,6 +199,13 @@ const page = {itemId: 'wi-1', generation: 'service-a', revision: 9,
   total: 1, nextOffset: null, complete: true,
   freshness: {status: 'known', freshness: 'live', observedAt: 1000, source: ['work-items'], complete: true}};
 assert.equal(isEvidencePage(page, {itemId: 'wi-1', generation: 'service-a', revision: 9}), true);
+const unconfirmedPage = {...page, freshness: {...page.freshness,
+  freshness: 'unconfirmed', unconfirmedSince: 1000}};
+assert.equal(isEvidencePage(unconfirmedPage,
+  {itemId: 'wi-1', generation: 'service-a', revision: 9}), true);
+assert.equal(isEvidencePage({...unconfirmedPage, freshness: {
+  ...unconfirmedPage.freshness, unconfirmedSince: null,
+}}, {itemId: 'wi-1', generation: 'service-a', revision: 9}), false);
 assert.equal(isEvidencePage(page, {itemId: 'wi-1', generation: 'service-a', revision: 10}), false);
 assert.equal(isEvidencePage({...page, nextOffset: '10'},
   {itemId: 'wi-1', generation: 'service-a', revision: 9}), false);
@@ -208,6 +215,11 @@ assert.equal(isEvidencePage({...page, freshness: {
   {itemId: 'wi-1', generation: 'service-a', revision: 9}), false);
 assert.equal(evidencePageFreshness(page.freshness), 'live');
 assert.equal(evidencePageFreshness({...page.freshness, freshness: 'stale'}), 'stale');
+assert.equal(evidencePageFreshness(unconfirmedPage.freshness), 'unconfirmed');
+assert.equal(evidenceFreshnessLabel(unconfirmedPage.freshness),
+  `unconfirmed since ${new Date(1000).toISOString()}`);
+assert.equal(evidenceFreshnessLabel({...unconfirmedPage.freshness, freshness: 'stale'}),
+  `stale · unconfirmed since ${new Date(1000).toISOString()}`);
 assert.equal(evidencePageFreshness({state: 'live'}), 'unknown freshness');
 assert.equal(evidenceRecordAuthor({byUser: 'mike', bySession: 'agent-session', producer: 'builder'}), 'mike');
 assert.equal(evidenceRecordAuthor({bySession: 'agent-session', producer: 'builder'}), 'agent-session');
@@ -221,8 +233,10 @@ assert.equal(evidencePageQuery(100, 100, null, null), null);
 assert.equal(sceneSignature(model), sceneSignature({...model, revision: 9, generatedAt: 3000,
   freshness: {...model.freshness, state: 'stale', since: 3000},
   agents: [{...model.agents[0], idleFor: 91, idleSince: 1900,
-    evidence: {parent: {status: 'known', observedAt: 3000}}}],
-  items: [{...model.items[0], evidence: {stage: {status: 'unknown', freshness: 'stale', observedAt: 3000},
+    evidence: {parent: {status: 'known', freshness: 'unconfirmed', observedAt: 3000,
+      unconfirmedSince: 2500}}}],
+  items: [{...model.items[0], evidence: {stage: {status: 'unknown', freshness: 'unconfirmed',
+    observedAt: 3000, unconfirmedSince: 2500},
     ring: {status: 'unknown', observedAt: 3000}}}]}));
 assert.notEqual(sceneSignature(model), sceneSignature({...model, items: [{...model.items[0], stage: 2}]}));
 

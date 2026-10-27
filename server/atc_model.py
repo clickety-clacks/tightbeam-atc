@@ -34,6 +34,10 @@ class EvidenceModel:
     def inventory(self, resource, scope=None):
         return self.inventories.setdefault((resource, scope), Inventory(KEYS.get(resource, "id")))
 
+    def mark_unconfirmed(self, at):
+        for inventory in self.inventories.values():
+            inventory.mark_unconfirmed(at)
+
     def accept(self, resource, scope, result):
         inventory = self.inventory(resource, scope)
         if resource in {"attests", "assignments", "work-items"}:
@@ -131,7 +135,7 @@ class EvidenceModel:
         agents = []
         for session in visible:
             key = session["sessionKey"]
-            facts = sessions.observations.get(key, sessions.evidence())
+            facts = sessions.evidence_for(key)
             turn_inventory = self.inventory("turns", key)
             actual_parent = session.get("topologyParent")
             # Missing parents stay unresolved, including a parent outside the
@@ -193,7 +197,7 @@ class EvidenceModel:
                     summary["latest"][verdict] = max(summary["latest"].get(verdict, 0), timestamp)
             inventory_facts = [self.inventory("attests", a["id"]).evidence() for a in owned]
             attest_facts = combined_evidence(assignments.evidence(), *inventory_facts)
-            identity = work.observations.get(wid, work.evidence())
+            identity = work.evidence_for(wid)
             stage_facts = combined_evidence(identity, assignments.evidence(), attest_facts)
             complete = stage_facts["complete"]
             stage = evidence_stage(item, owned, (), complete=complete, summary=summary)

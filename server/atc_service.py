@@ -437,31 +437,53 @@ class LiveService:
             self.feed_queued += 1
         self.events.put(("change", (message, received_at)))
 
-    def rebuild(self, *, recovery=True):
+    def rebuild(self, *, recovery=True, resume=False):
         """Schedule work, never perform upstream I/O on the model worker.
 
-        Bootstrap and a lost feed require all scopes. Normal intervals rotate
-        through a bounded number of histories and always read base inventories.
-        A collection still establishes absence only after every page succeeds.
+        A new bootstrap reads every scope. A resumed recovery keeps completed
+        scopes, including those marked unconfirmed after feed loss, and adds
+        newly discovered or incomplete scopes. Normal intervals rotate through
+        bounded history scopes. A collection establishes absence only after
+        every page succeeds.
         """
         if self.cycle is not None:
             if recovery:
                 self.cycle["mode"] = "recovery"
                 self.cycle["expanded"] = False
-                self.model.invalidate()
-                for resource, scope in self.model.inventories:
-                    self.reads.touch(resource, scope)
-                self._cycle_add(BASE_SCOPES, repeat=True)
+                self.cycle["resume"] = resume
+                if resume:
+                    if self.connected:
+                        self._expand_cycle()
+                        self._resume_cycle()
+                        self._settle_cycle()
+                        if self.cycle:
+                            self._incomplete_state("reading published state: " + self.cycle["mode"])
+                else:
+                    self.model.invalidate()
+                    for resource, scope in self.model.inventories:
+                        self.reads.touch(resource, scope)
+                    self._cycle_add(BASE_SCOPES, repeat=True)
+                    if self.connected:
+                        self._incomplete_state("reading published state: " + self.cycle["mode"])
             return
         mode = ("bootstrap" if self.metrics["bootstrapReads"] is None else "recovery") if recovery else "interval"
-        self.cycle = {"mode": mode, "pending": set(), "seen": set(),
+        completed = ({scope for scope, inventory in self.model.inventories.items()
+                      if inventory.complete} if recovery and resume else set())
+        self.cycle = {"mode": mode, "pending": set(), "seen": completed,
                       "expanded": False, "started": time.monotonic(),
-                      "reads": self.gateway.read_count, "complete": True}
-        if recovery:
+                      "reads": self.gateway.read_count, "complete": True,
+                      "resume": resume}
+        if recovery and not resume:
             self.model.invalidate()
         self._state("rebuilding", "reading published state: " + mode)
         self._cycle_add(BASE_SCOPES)
         self.metrics["rebuilds"] += 1
+        if resume and self.connected:
+            self._expand_cycle()
+            self._resume_cycle()
+            self._settle_cycle()
+            if self.cycle:
+                self._incomplete_state("reading published state: " + self.cycle["mode"])
         # Tick from start, not completion. An unfinished cycle cannot overlap.
         self.last_rebuild = time.monotonic()
 
@@ -473,6 +495,31 @@ class LiveService:
                 self.cycle["pending"].add(inventory)
                 self.read_retries.pop((resource, scope, None), None)
                 self.reads.schedule(resource, scope)
+
+    def _resume_cycle(self):
+        """Requeue only unfinished cycle scopes, respecting existing retry deadlines."""
+        cycle = self.cycle
+        if not cycle:
+            return
+        waiting_retries = {job[:2] for job in self.read_retries if job[2] is None}
+        queued = {job[:2] for job in self.reads.pending if job[2] is None}
+        active = {job[:2] for job, _ in self.reads.active.values() if job[2] is None}
+
+        # A successful read while disconnected is retained as data but marked
+        # stale. Re-add those scopes here; completed connected reads stay done.
+        for inventory in cycle["seen"]:
+            state = self.model.inventory(*inventory)
+            if not state.complete or state.stale or state.budget_stale:
+                cycle["pending"].add(inventory)
+
+        for inventory in tuple(cycle["pending"]):
+            if inventory in waiting_retries or inventory in queued or inventory in active:
+                continue
+            state = self.model.inventory(*inventory)
+            if state.complete and not state.stale and not state.budget_stale:
+                cycle["pending"].discard(inventory)
+                continue
+            self.reads.schedule(*inventory)
 
     def _retry_incomplete_reads(self):
         now = time.monotonic()
@@ -490,7 +537,7 @@ class LiveService:
         cycle["expanded"] = True
         scopes = self._history_scopes()
         if cycle["mode"] != "interval":
-            self._cycle_add(scopes, repeat=True)
+            self._cycle_add(scopes, repeat=not cycle.get("resume", False))
             return
         needed = set(scopes)
         self.backstop.classify(self.model, scopes, now_ms())
@@ -515,7 +562,11 @@ class LiveService:
             return
         self._expand_cycle()
         cycle = self.cycle
-        if cycle["pending"] or not cycle["expanded"]:
+        # A cycle already in progress when the feed drops stays open to resume
+        # its unfinished scopes. New offline snapshots can still settle and
+        # keep the existing periodic-read behavior.
+        if ((not self.connected and cycle.get("resume")) or
+                cycle["pending"] or not cycle["expanded"]):
             return
         # A failing history remains stale until its next successful rotation;
         # a successful unrelated batch never declares the whole map complete.
@@ -533,7 +584,13 @@ class LiveService:
         if cycle["mode"] != "interval" and complete:
             self.last_complete = self.last_sweep = now_ms()
             self.sweep_remaining = set(self._history_scopes())
-            self.correlation_gaps.clear()
+            # A resumed recovery can settle without reading anything when all
+            # retained scopes are complete. That preserves their completion
+            # credit, but cannot resolve an unplaced feed change, whose only
+            # evidence is the global correlation-gap warning. A later full
+            # interval sweep (or a correlated read) clears that warning.
+            if not cycle.get("resume", False):
+                self.correlation_gaps.clear()
         elif cycle["mode"] == "interval" and not self.sweep_remaining and complete:
             self.last_complete = self.last_sweep = now_ms()
             self.correlation_gaps.clear()
@@ -754,20 +811,23 @@ class LiveService:
             self.version = value
             self.policies = policies_for(value)
             self.payload_warning = payload_policy_warning(value)
-            self.rebuild()
+            self.rebuild(resume=self.cycle is not None)
         elif kind == "lost":
             was_connected = self.connected
             self.connected = False
             changed = self._state("stale", value) or was_connected
             if was_connected:
-                if self.cycle is None:
-                    self.model.invalidate()
-                    for resource, scope in self.model.inventories:
-                        self.reads.touch(resource, scope)
-                # Start recovery once per outage. Repeated lost notifications
-                # can follow local read-state changes; they must not invalidate
-                # epochs or bypass an incomplete read's retry deadline.
-                self.rebuild()
+                self.model.mark_unconfirmed(now_ms())
+                # Reject only snapshots already in flight. Completed scopes
+                # retain their data and completion credit, with the outage
+                # timestamp carried independently of freshness and cleared by
+                # their next complete read.
+                for resource, scope in tuple(self.reads.active):
+                    self.reads.touch(resource, scope)
+                    self.model.inventory(resource, scope).invalidate()
+                # Start or resume one recovery cycle. Repeated lost events do
+                # not reset epochs or bypass retry deadlines.
+                self.rebuild(resume=True)
                 self._state("stale", value)
             return changed
         elif kind == "read":

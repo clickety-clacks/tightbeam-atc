@@ -317,7 +317,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { agentSampleTimes, applyModelDelta, canInspectNode, evidencePageQuery,
-         evidencePageFreshness, evidenceRecordAuthor, factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
+         evidenceFreshnessLabel, evidenceRecordAuthor, factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, knownStage,
          prepareModelSnapshot, rebuildWithViewerState, renderEvidenceMarkup, renderModelStatusElement,
          captureViewerState, restoreViewerState, ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
@@ -2786,7 +2786,7 @@ function evidenceNotesMarkup(itemId){
     ? detailFreshness.source.join(', ') : 'unknown source';
   const observed = detailAge==='unknown' ? 'age unknown' : `observed ${detailAge} ago`;
   const status = matching
-    ? [evidencePageFreshness(detailFreshness), observed, detailSources,
+    ? [evidenceFreshnessLabel(detailFreshness), observed, detailSources,
         page.complete ? 'complete inventory' : 'incomplete inventory',
         `${page.records.length} of ${page.total} loaded`].join(' · ')
     : '';
