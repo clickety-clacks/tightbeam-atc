@@ -3594,7 +3594,7 @@ function placeArrow(g, curve){
       const u = at(d);
       sp.position.copy(curve.getPointAt(u)).addScaledVector(ARROW_UP, .5);
       const a = screenAt(Math.max(0, u - .012)), b = screenAt(Math.min(1, u + .012));
-      let ang = Math.atan2(b.y - a.y, b.x - a.x);
+      let ang = Math.atan2(a.y - b.y, b.x - a.x);
       if (flip) ang += Math.PI;
       sp.material.rotation = ang;
     });
