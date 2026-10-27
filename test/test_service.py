@@ -130,6 +130,22 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertTrue(service.metrics["bootstrapComplete"])
         self.assertEqual("live", service.state)
 
+    def test_connected_incomplete_scope_keeps_staleness_local(self):
+        self.gateway.partial.add(("work-items", None))
+        self.service.reads.schedule("work-items", None, None)
+        self.service.reads.pump()
+        kind, value = self.service.events.get(timeout=2)
+        self.assertEqual("read", kind)
+        self.service._read_done(value)
+        self.service._publish()
+
+        snapshot = self.service.snapshot()
+        self.assertEqual("rebuilding", snapshot["freshness"]["state"])
+        self.assertEqual("published read incomplete", snapshot["freshness"]["reason"])
+        self.assertEqual("stale", snapshot["items"][0]["evidence"]["identity"]["freshness"])
+        self.assertEqual("live", snapshot["agents"][0]["evidence"]["identity"]["freshness"])
+        self.assertIn(("work-items", None, None), self.service.read_retries)
+
     def test_disconnect_restarts_pending_bootstrap_and_reconnect_can_complete_it(self):
         gateway = PublishedReads()
         gateway.partial.add(("work-items", None))
@@ -310,7 +326,7 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.drain()
         self.assertEqual("work", self.item()["id"])
         self.assertEqual("stale", self.item()["evidence"]["identity"]["freshness"])
-        self.assertEqual("stale", self.service.state)
+        self.assertEqual("rebuilding", self.service.state)
         self.gateway.partial.clear()
         self.service.rebuild()
         self.drain()

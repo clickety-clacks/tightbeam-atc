@@ -246,6 +246,12 @@ class LiveService:
             return True
         return False
 
+    def _incomplete_state(self, reason):
+        # A connected feed with a failed read is still rebuilding; the
+        # affected inventories carry stale evidence individually. Disconnects
+        # and over-budget active scopes remain a global stale condition.
+        self._state("rebuilding" if self.connected else "stale", reason)
+
     def _publish(self, *, classified=False):
         # Only the model worker writes. Build the next immutable frame without
         # holding the condition used by subscribers of the committed frame.
@@ -370,7 +376,7 @@ class LiveService:
             elif complete and self.connected and not self.read_failures and not self.correlation_gaps:
                 self._state("live")
             else:
-                self._state("stale", "incomplete read or disconnected feed")
+                self._incomplete_state("incomplete read or disconnected feed")
         after = (self.state, self.reason, self.backstop.active, self.backstop.history,
                  {s for s in self.backstop.active if self.model.inventory(*s).budget_stale})
         return before != after
@@ -527,8 +533,10 @@ class LiveService:
             self.correlation_gaps.clear()
         self.cycle = None
         complete = complete and not self.correlation_gaps
-        self._state("live" if complete and self.connected else "stale",
-                    None if complete and self.connected else "incomplete read or disconnected feed")
+        if complete and self.connected:
+            self._state("live")
+        else:
+            self._incomplete_state("incomplete read or disconnected feed")
 
     def _read_done(self, value):
         job, epoch, result = value
@@ -577,7 +585,7 @@ class LiveService:
                 self.sweep_remaining.discard(job[:2])
         else:
             self.read_failures.add(job[:2])
-            self._state("stale", "published read incomplete")
+            self._incomplete_state("published read incomplete")
             if key is None:
                 # Keep a failed collection in the current recovery cycle and
                 # retry it after a bounded pause instead of waiting for the
