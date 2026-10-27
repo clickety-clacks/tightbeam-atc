@@ -726,6 +726,24 @@ class LiveService:
             self.merge_pending[item["id"]] = deepcopy(refs)
             self.merge_jobs.put((item["id"], deepcopy(refs)))
 
+    def _next_merge_retry_at(self):
+        """Return when an unresolved merge observation can be checked again."""
+        if self.resolver is None:
+            return None
+        deadlines = []
+        for item in self.current.get("items", []):
+            if item.get("code") is not True or not item.get("commitRefs"):
+                continue
+            item_id, refs = item["id"], item["commitRefs"]
+            if self.merge_pending.get(item_id) == refs:
+                continue
+            previous = self.model.merges.get(item_id)
+            if (previous and previous.get("refs") == refs
+                    and previous.get("value") is None
+                    and isinstance(previous.get("observedAt"), (int, float))):
+                deadlines.append(previous["observedAt"] + self.rebuild_interval * 1000)
+        return min(deadlines, default=None)
+
     def _git_worker(self):
         while not self.stop_event.is_set():
             job = self.merge_jobs.get()
@@ -903,7 +921,9 @@ class LiveService:
             self._dirty = True
         at = now_ms()
         expired = self.model.next_expiry is not None and self.model.next_expiry <= at
-        self._dirty = self._update_backstop(at) or self._dirty or expired
+        merge_retry_at = self._next_merge_retry_at()
+        merge_retry_due = merge_retry_at is not None and merge_retry_at <= at
+        self._dirty = self._update_backstop(at) or self._dirty or expired or merge_retry_due
         if self.connected:
             self.backstop.schedule(self.model, self.reads, at)
         if self._dirty:
@@ -924,6 +944,9 @@ class LiveService:
         backstop_deadline = self.backstop.deadline(self.model, self.reads, now_ms(), self.connected)
         if backstop_deadline is not None:
             deadlines.append((backstop_deadline - now_ms()) / 1000)
+        merge_retry_at = self._next_merge_retry_at()
+        if merge_retry_at is not None:
+            deadlines.append((merge_retry_at - now_ms()) / 1000)
         deadlines.extend(due - time.monotonic()
                          for due, _ in self.read_retries.values())
         return max(0, min(deadlines)) if deadlines else None

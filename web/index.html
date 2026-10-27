@@ -316,6 +316,7 @@
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
+import { unknownItemFacts, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
 import { agentSampleTimes, applyModelDelta, canInspectNode, evidencePageQuery,
          evidenceFreshnessLabel, evidenceRecordAuthor, factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, knownStage,
@@ -1491,7 +1492,7 @@ function renderLegend(){
     `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = explicit ready-to-merge verdict</span>` +
     `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = durable non-code item</span>` +
     `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = code merge state unknown</span>` +
-    `<span style="margin-left:10px;color:${hx(T.factUnknown)}">? = a fact is unknown</span>` +
+    `<span style="margin-left:10px;color:${hx(T.factUnknown)}">? = an item fact is not confirmed; hover or focus it to see which</span>` +
     `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring around an item = orphaned, no live holder</span>` +
     `<span style="margin-left:10px;color:${hx(T.pulse)}">traveling dot = wake</span>` +
     `<span style="margin-left:8px;color:${hx(T.pulse)}">strobing line = message</span>` +
@@ -1668,8 +1669,10 @@ function buildItems(items){
     /* Ring color is an explicit service verdict. Do not infer it from code,
        merge lookups, or ready-to-merge fields in the browser. */
     const ring = ringMeaning(w.ring, w.evidence?.ring?.status, w.evidence?.ring?.complete);
+    const unknownFacts = unknownItemFacts({stageKnown: stage !== null, holdersKnown,
+      landed, ring});
     const dcol = ({black:T.discBlack, green:T.discG, 'light-gray':T.discN, yellow:T.discY})[ring];
-    if ((stage === null || !holdersKnown || (landed && ring === 'unknown'))){
+    if (unknownFacts.length){
       const marker = labelSprite('?');
       marker.scale.multiplyScalar(.72);
       marker.position.set(0, 1.35, 0);
@@ -2809,7 +2812,11 @@ function nodeContent(u, clamp){
     const ringLabels = {black:'black · canonical branch contains code',
       green:'green · explicit ready-to-merge verdict',
       'light-gray':'light gray · durable non-code item',
-      yellow:'yellow · code merge state unknown', none:'none', unknown:'unknown'};
+      yellow:'yellow · code merge state unknown', none:'none',
+      unknown:'merge status is not confirmed'};
+    const unknownDetails = accessibleUnknownDetails(unknownItemFacts({
+      stageKnown: !u.stageUnknown, holdersKnown: !u.holdersUnknown,
+      landed: u.landed, ring}));
     const assignmentOpen = factCountValue(w.assignments?.open, w.evidence?.assignments);
     const assignmentTerminal = factCountValue(w.assignments?.terminal, w.evidence?.assignments);
     const turnsKnown = w.evidence?.turns?.status==='known' && w.turns !== null && w.turns !== undefined
@@ -2820,8 +2827,12 @@ function nodeContent(u, clamp){
         (st==='run'?'▶ ':st==='wait'?'⏸ ':'')+(byId[h]?.name || h)).join('<br>')
           + (w.evidence.turns.complete===false ? '<br>incomplete inventory' : '')
       : w.evidence.turns.complete===true ? 'no turns active' : 'unknown · incomplete inventory';
-    const merged = factText(w, 'merged', w.merged,
-      value=>value===true ? 'in the branch' : value===false ? 'not in the branch' : 'unknown');
+    const mergeEvidence = w.evidence?.merged;
+    const mergeUnconfirmed = u.landed && ring === 'unknown';
+    const merged = mergeEvidence?.status==='known' && mergeEvidence.complete!==false
+      ? (w.merged===true ? 'in the branch' : w.merged===false ? 'not in the branch'
+        : (mergeUnconfirmed ? 'merge status is not confirmed' : 'unknown'))
+      : (mergeUnconfirmed ? 'merge status is not confirmed' : 'unknown');
     const code = factText(w, 'code', w.code,
       value=>value===true ? 'code' : value===false ? 'non-code' : 'unknown');
     const holders = Array.isArray(w.holders) ? w.holders : null;
@@ -2832,6 +2843,8 @@ function nodeContent(u, clamp){
       + '<div' + (clamp ? ' class="clamp5"' : '') + '>' + esc(w.title || 'title unknown') + '</div>'
       + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · stage ' + stage
       + ' · ' + merged + ' · ' + code + ' · ring ' + esc(ringLabels[ring]) + verdict + noHolder
+      + (unknownDetails ? '<span class="k">?</span><span class="seg">'
+        + esc(unknownDetails) + '</span>' : '')
       + '<span class="k">attests</span><span class="seg">' + listFact('attests', w.attestKinds) + '</span>'
       + '<span class="k">verdicts</span><span class="seg">' + listFact('attests', w.verdictKinds) + '</span>'
       + '<span class="k">assignments</span><span class="seg">' + esc(assignmentOpen) + ' open · '
@@ -3270,9 +3283,17 @@ function updateSpatialTargets(){
     button._spatialShape = shape; button._spatialBoxRadius = radius;
     if (button._spatialTruthX == null){ button._spatialTruthX = x; button._spatialTruthY = y; }
     const u = m.userData;
-    button.setAttribute('aria-label', u.w
-      ? 'Work item ' + (u.w.short || u.w.id) + ': ' + u.w.title
-      : 'Agent ' + u.a.name);
+    if (u.w){
+      const ring = ringMeaning(u.w.ring, u.w.evidence?.ring?.status,
+        u.w.evidence?.ring?.complete);
+      const unknownDetails = accessibleUnknownDetails(unknownItemFacts({
+        stageKnown: !u.stageUnknown, holdersKnown: !u.holdersUnknown,
+        landed: u.landed, ring}));
+      const label = 'Work item ' + (u.w.short || u.w.id) + ': ' + u.w.title;
+      button.setAttribute('aria-label', unknownDetails ? label + '. ' + unknownDetails + '.' : label);
+    } else {
+      button.setAttribute('aria-label', 'Agent ' + u.a.name);
+    }
     const size = Math.round(radius * 2);
     button.style.left = x + 'px'; button.style.top = y + 'px';
     button.style.width = button.style.height = size + 'px';
