@@ -646,6 +646,37 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual("stale", self.service.state)
         self.assertEqual("uncorrelated messages change", self.service.reason)
 
+    def test_unplaced_change_survives_idle_reconnect_until_correlated_read(self):
+        self.service.change({"resource": "messages", "refs": {"messageId": "unplaced"}})
+        gap = ("messages", "unplaced")
+        self.assertIn(gap, self.service.correlation_gaps)
+        self.assertEqual("stale", self.service.state)
+        reads_before_outage = self.gateway.read_count
+
+        self.service._handle("lost", "feed disconnected: transport closed")
+        cycle = self.service.cycle
+        self.assertIsNotNone(cycle)
+        self.assertTrue(cycle["resume"])
+        self.assertEqual(set(), cycle["pending"])
+        self.service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+
+        self.assertIsNone(self.service.cycle)
+        self.assertEqual(reads_before_outage, self.gateway.read_count,
+                         "idle reconnect should retain completed scope credit")
+        self.assertIn(gap, self.service.correlation_gaps)
+        self.assertEqual("stale", self.service.state)
+        self.assertEqual("uncorrelated messages change", self.service.reason)
+
+        self.gateway.rows[("messages", None)] = [{
+            "id": "unplaced", "sessionKey": "agent s_author",
+        }]
+        self.service.reads.schedule("messages", None, "unplaced")
+        self.drain()
+
+        self.assertIsNone(self.service.cycle)
+        self.assertNotIn(gap, self.service.correlation_gaps)
+        self.assertEqual("live", self.service.state)
+
     def test_background_history_read_does_not_block_targeted_change(self):
         entered, release = threading.Event(), threading.Event()
         original = self.gateway.read

@@ -584,7 +584,13 @@ class LiveService:
         if cycle["mode"] != "interval" and complete:
             self.last_complete = self.last_sweep = now_ms()
             self.sweep_remaining = set(self._history_scopes())
-            self.correlation_gaps.clear()
+            # A resumed recovery can settle without reading anything when all
+            # retained scopes are complete. That preserves their completion
+            # credit, but cannot resolve an unplaced feed change, whose only
+            # evidence is the global correlation-gap warning. A later full
+            # interval sweep (or a correlated read) clears that warning.
+            if not cycle.get("resume", False):
+                self.correlation_gaps.clear()
         elif cycle["mode"] == "interval" and not self.sweep_remaining and complete:
             self.last_complete = self.last_sweep = now_ms()
             self.correlation_gaps.clear()
