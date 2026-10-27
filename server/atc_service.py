@@ -399,7 +399,7 @@ class LiveService:
         return {
             "lastIncompleteRead": deepcopy(self.last_incomplete_read),
             "lastRetryOutcome": deepcopy(self.last_retry_outcome),
-            "gatewayReadRequests": self.gateway.read_count,
+            "gatewayReadRequests": getattr(self.gateway, "read_count", None),
             "readQueue": {"pending": len(self.reads.pending),
                           "active": len(self.reads.active)},
             "retry": {**self.retry_counters, "waiting": len(self.read_retries),

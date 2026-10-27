@@ -130,7 +130,7 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertTrue(service.metrics["bootstrapComplete"])
         self.assertEqual("live", service.state)
 
-    def test_disconnect_does_not_pause_bootstrap_retry_and_reconnect_can_complete_it(self):
+    def test_disconnect_restarts_pending_bootstrap_and_reconnect_can_complete_it(self):
         gateway = PublishedReads()
         gateway.partial.add(("work-items", None))
         service = LiveService(gateway)
@@ -143,11 +143,41 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertIn(retry, service.read_retries)
         self.assertIsNone(service.metrics["bootstrapReads"])
 
+        reads_before_disconnect = gateway.read_count
         service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
         self.assertEqual("recovery", service.cycle["mode"])
         self.assertEqual("feed disconnected: ConnectionClosedError (4008)", service.reason)
         gateway.partial.clear()
         self.drain(service)
+
+        self.assertIsNone(service.cycle)
+        self.assertFalse(service.metrics["bootstrapComplete"])
+        self.assertEqual("stale", service.state)
+        self.assertGreater(gateway.read_count, reads_before_disconnect)
+
+        service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
+        self.drain(service)
+        self.assertTrue(service.metrics["bootstrapComplete"])
+        self.assertIsNotNone(service.last_complete)
+        self.assertEqual("live", service.state)
+
+    def test_incomplete_read_retry_deadline_runs_while_feed_is_disconnected(self):
+        gateway = PublishedReads()
+        gateway.partial.add(("work-items", None))
+        service = LiveService(gateway)
+        service.connected = True
+        service.last_rebuild = time.monotonic()
+        self.addCleanup(service.stop)
+        service.reads.schedule("work-items", None, None)
+        service.reads.pump()
+        kind, value = service.events.get(timeout=2)
+        self.assertEqual("read", kind)
+        service._read_done(value)
+        retry = ("work-items", None, None)
+        self.assertIn(retry, service.read_retries)
+
+        service.connected = False
+        gateway.partial.clear()
         retry_delay = service._wait_timeout()
         self.assertIsNotNone(retry_delay)
         self.assertGreater(retry_delay, 0)
@@ -155,19 +185,10 @@ class ServiceRecoveryTest(unittest.TestCase):
         _, priority = service.read_retries[retry]
         service.read_retries[retry] = (time.monotonic() - 1, priority)
         service._retry_incomplete_reads()
+        self.assertIn(retry, service.reads.pending)
         self.drain(service)
-
-        self.assertIsNone(service.cycle)
-        self.assertFalse(service.metrics["bootstrapComplete"])
-        self.assertEqual("stale", service.state)
         self.assertEqual(1, service.retry_counters["completed"])
-        self.assertEqual("work-items", service.last_retry_outcome["resource"])
-
-        service._handle("ready", {"version": "0.1.11", "build": 1, "sha": "test"})
-        self.drain(service)
-        self.assertTrue(service.metrics["bootstrapComplete"])
-        self.assertIsNotNone(service.last_complete)
-        self.assertEqual("live", service.state)
+        self.assertTrue(service.last_retry_outcome["complete"])
 
     def test_status_exposes_sanitized_page_retry_epoch_and_feed_lag_details(self):
         job = ("work-items", None, None)
