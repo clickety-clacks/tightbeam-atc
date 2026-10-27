@@ -62,8 +62,10 @@ class OperatorLoginTest(unittest.TestCase):
         self.assertEqual(["a", "b"], [r["id"] for r in result.rows])
         first, second = [urlsplit(c.args[0].full_url) for c in urlopen.call_args_list]
         self.assertEqual("/api/sessions/session%20%2F%20one/turns", first.path)
-        self.assertEqual({"limit": ["500"], "asUser": [self.cli.user]}, parse_qs(first.query))
+        self.assertEqual({"limit": ["500"], "tail": ["false"], "asUser": [self.cli.user]},
+                         parse_qs(first.query))
         self.assertEqual(["next cursor"], parse_qs(second.query)["after"])
+        self.assertNotIn("tail", parse_qs(second.query))
         self.assertEqual([self.cli.user], parse_qs(second.query)["asUser"])
 
     @patch("atc_upstream.urlopen")

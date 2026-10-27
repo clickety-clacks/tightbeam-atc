@@ -130,6 +130,22 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertTrue(service.metrics["bootstrapComplete"])
         self.assertEqual("live", service.state)
 
+    def test_connected_incomplete_scope_keeps_staleness_local(self):
+        self.gateway.partial.add(("work-items", None))
+        self.service.reads.schedule("work-items", None, None)
+        self.service.reads.pump()
+        kind, value = self.service.events.get(timeout=2)
+        self.assertEqual("read", kind)
+        self.service._read_done(value)
+        self.service._publish()
+
+        snapshot = self.service.snapshot()
+        self.assertEqual("rebuilding", snapshot["freshness"]["state"])
+        self.assertEqual("published read incomplete", snapshot["freshness"]["reason"])
+        self.assertEqual("stale", snapshot["items"][0]["evidence"]["identity"]["freshness"])
+        self.assertEqual("live", snapshot["agents"][0]["evidence"]["identity"]["freshness"])
+        self.assertIn(("work-items", None, None), self.service.read_retries)
+
     def test_disconnect_restarts_pending_bootstrap_and_reconnect_can_complete_it(self):
         gateway = PublishedReads()
         gateway.partial.add(("work-items", None))
@@ -310,7 +326,7 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.drain()
         self.assertEqual("work", self.item()["id"])
         self.assertEqual("stale", self.item()["evidence"]["identity"]["freshness"])
-        self.assertEqual("stale", self.service.state)
+        self.assertEqual("rebuilding", self.service.state)
         self.gateway.partial.clear()
         self.service.rebuild()
         self.drain()
@@ -482,6 +498,31 @@ class ServiceRecoveryTest(unittest.TestCase):
             seen.update(histories)
         self.assertEqual(self.service.backstop.history, seen)
 
+    def test_unplaced_change_stays_stale_after_interval_without_full_sweep(self):
+        self.gateway.rows[("assignments", None)][0]["state"] = "closed"
+        self.service.rebuild()
+        self.drain()
+        self.service._update_backstop(20)
+        self.assertIn(("attests", "assignment"), self.service.backstop.history)
+
+        self.service.scope_budget = 1
+        self.service.change({"resource": "messages", "refs": {"messageId": "unplaced"}})
+        gap = ("messages", "unplaced")
+        self.assertIn(gap, self.service.correlation_gaps)
+        self.assertEqual("stale", self.service.state)
+
+        sweep = set(self.service.sweep_remaining)
+        self.assertTrue(sweep)
+        self.service.rebuild(recovery=False)
+        self.drain()
+
+        self.assertIsNone(self.service.cycle)
+        self.assertTrue(self.service.sweep_remaining)
+        self.assertLess(len(self.service.sweep_remaining), len(sweep))
+        self.assertIn(gap, self.service.correlation_gaps)
+        self.assertEqual("stale", self.service.state)
+        self.assertEqual("uncorrelated messages change", self.service.reason)
+
     def test_background_history_read_does_not_block_targeted_change(self):
         entered, release = threading.Event(), threading.Event()
         original = self.gateway.read
@@ -549,7 +590,8 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.drain()
         self.assertIn("progress", self.service.model.inventory("attests", "assignment").rows)
         self.assertIsNone(self.item()["stage"])
-        self.assertEqual("stale", self.service.state)
+        self.assertEqual("rebuilding", self.service.state)
+        self.assertTrue(self.service.model.inventory("attests", "assignment").stale)
         self.assertEqual(before, self.service.last_sweep)
         self.gateway.partial.clear()
         self.service.rebuild(recovery=False)

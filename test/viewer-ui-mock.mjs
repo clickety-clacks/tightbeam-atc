@@ -51,6 +51,27 @@ assert.match(hud.title, /estimated rotation 20d/);
 assert.match(hud.title, /last sweep 4d ago/);
 assert.match(hud.title, /no separate gaze signal/);
 
+/* A connected partial read is shown as rebuilding while the affected item
+   still carries its own stale evidence. A small lagging scope must not turn
+   the entire map status red. */
+const partialModel = structuredClone(statusModel);
+partialModel.freshness.state = 'rebuilding';
+partialModel.freshness.reason = 'published read incomplete';
+partialModel.freshness.reconciliation.active.overBudgetScopes = 0;
+partialModel.freshness.reconciliation.active.oldestConfirmedAt = now - 5 * 60_000;
+partialModel.items[0].evidence.identity = {status: 'known', freshness: 'stale',
+  observedAt: now - 30_000, source: ['work-items'], complete: false};
+const partialHud = {textContent: '', className: '', title: ''};
+renderModelStatusElement(partialHud, {model: partialModel,
+  streamState: 'connected', streamError: null}, now);
+assert.equal(partialHud.className, 'rebuilding');
+assert.match(partialHud.textContent, /^rebuilding ·/);
+assert.match(partialHud.textContent, /2 stale/);
+assert.match(partialHud.title, /Service freshness: rebuilding/);
+assert.match(partialHud.title, /Reason: published read incomplete/);
+assert.match(renderEvidenceMarkup(partialModel.items[0], now),
+  /identity<\/b> · known · stale · observed 30s ago · work-items · incomplete/);
+
 const offlineHud = {textContent: '', className: '', title: ''};
 renderModelStatusElement(offlineHud, {
   model: null, streamState: 'stale', streamError: 'event stream disconnected; reconnecting',
