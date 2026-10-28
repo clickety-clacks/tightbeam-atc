@@ -317,7 +317,7 @@
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
-import { unknownItemFacts, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
+import { unknownItemFacts, unknownItemType, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
 import { agentSampleTimes, applyModelDelta, canInspectNode, evidencePageQuery,
          evidenceFreshnessLabel, evidenceRecordAuthor, factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, knownStage,
@@ -351,7 +351,7 @@ const THEMES = {
     retired:0x33363a, arcA:0xb08d57, arcB:0x22252a,
     tetherRun:0x6fae4e, tetherWait:0xc9a835, tetherSched:0xb9bfc7, pulse:0xb08d57, pulseSub:0x5f6670, pulseUser:0x6f9ecf,
     discBlack:0x000000, discY:0xc9a835, discG:0x2c7a4b, discN:0x555b63,
-    shell:0x9fd8b4, halo:0xc9a835, orphan:0xc4453c,
+    shell:0x9fd8b4, orphan:0xc4453c,
     flashRun:0x6fae4e, flashWait:0xc9a835,
     metalness:.55, roughness:.3, agentMetal:.75, agentRough:.35, baseEmissive:.25, edges:false,
     amb:0x8a8a92, keyC:0xfff2dd, rimC:0x5b7285,
@@ -370,7 +370,7 @@ const THEMES = {
     retired:0xcdc7b8, arcA:0x26323c, arcB:0xd8dfe6,
     tetherRun:0x2e7d4f, tetherWait:0xb8860b, tetherSched:0x1b232b, pulse:0xc23b22, pulseSub:0x8a97a3, pulseUser:0x3d6ea8,
     discBlack:0x000000, discY:0xc9a227, discG:0x2e7d5b, discN:0x9aa7b3,
-    shell:0x4e8a6e, halo:0xb8860b, orphan:0xc23b22,
+    shell:0x4e8a6e, orphan:0xc23b22,
     flashRun:0x2e7d4f, flashWait:0xb8860b,
     metalness:.05, roughness:.85, agentMetal:.05, agentRough:.9, baseEmissive:.0, edges:true,
     amb:0xffffff, keyC:0xfff8ec, rimC:0xb8c7d9,
@@ -1495,8 +1495,9 @@ function renderLegend(){
     `<span style="margin-left:10px"><span class="sw" style="background:${hx(T.discBlack)};border:1px solid currentColor"></span>black ring = canonical branch contains the code</span>` +
     `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = explicit ready-to-merge verdict</span>` +
     `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = durable non-code item</span>` +
-    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = code merge state unknown</span>` +
-    `<span style="margin-left:10px;color:${hx(T.factUnknown)}">? = an item fact is not confirmed; hover or focus it to see which</span>` +
+    `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = code is not confirmed merged</span>` +
+    `<span style="margin-left:10px;color:${hx(T.factUnknown)}">? on a work item = code or non-code type is unknown</span>` +
+    `<span style="margin-left:10px;color:${hx(T.factUnknown)}">◇ on an agent = parent is unknown</span>` +
     `<span style="margin-left:10px;color:${hx(T.orphan)}">◌ red ring around an item = orphaned, no live holder</span>` +
     `<span style="margin-left:10px;color:${hx(T.pulse)}">traveling dot = wake</span>` +
     `<span style="margin-left:8px;color:${hx(T.pulse)}">strobing line = message</span>` +
@@ -1577,7 +1578,7 @@ function buildGround(agents){
       sp.position.set(0, 1.15, 0); m.add(sp);
     }
     if (!parentKnown(a)){
-      const marker = labelSprite('?');
+      const marker = labelSprite('◇');
       marker.scale.multiplyScalar(.72);
       marker.position.set(.65, .55, 0); m.add(marker);
     }
@@ -1645,6 +1646,8 @@ function buildItems(items){
     if (active.length){ active.forEach(h=>anchor.add(APOS[h])); anchor.multiplyScalar(1/active.length); anchor.y = 0; }
     else if (holdersKnown) anchor.set(-55 + (idx%24)*4.6, 0, 62 + Math.floor(idx/24)*5);
     else anchor.set(55 + (idx%24)*4.6, 0, 62 + Math.floor(idx/24)*5);
+    /* closedAt may describe a completed assignment; only item state closes
+       the work item for placement. */
     const closed = w.state === 'closed';
     /* Altitude IS evidence: items descend as attests accumulate and rest on
        the floor once the evidence is complete (stage>=5) or the item closes.
@@ -1673,10 +1676,8 @@ function buildItems(items){
     /* Ring color is an explicit service verdict. Do not infer it from code,
        merge lookups, or ready-to-merge fields in the browser. */
     const ring = ringMeaning(w.ring, w.evidence?.ring?.status, w.evidence?.ring?.complete);
-    const unknownFacts = unknownItemFacts({stageKnown: stage !== null, holdersKnown,
-      landed, ring});
     const dcol = ({black:T.discBlack, green:T.discG, 'light-gray':T.discN, yellow:T.discY})[ring];
-    if (unknownFacts.length){
+    if (unknownItemType(w)){
       const marker = labelSprite('?');
       marker.scale.multiplyScalar(.72);
       marker.position.set(0, 1.35, 0);
@@ -1729,11 +1730,6 @@ function buildItems(items){
       seg.userData = {itemMesh:mesh, hid, state:st, mat:lm, geo:lg};
       tetherGroup.add(seg);
     });
-    if (w.stalled){
-      const halo = new THREE.Mesh(new THREE.RingGeometry(.8,.98,32),
-        new THREE.MeshBasicMaterial({color:T.halo, side:THREE.DoubleSide, transparent:true, opacity:.7}));
-      halo.userData={pulse:true}; mesh.add(halo);
-    }
     if (w.state==='open' && holdersKnown && !active.length){
       /* orphan mark: a billboard ring AROUND the item, so it never reads as a
          landing marker on the ground */
@@ -2824,11 +2820,11 @@ function nodeContent(u, clamp){
     const ringLabels = {black:'black · canonical branch contains code',
       green:'green · explicit ready-to-merge verdict',
       'light-gray':'light gray · durable non-code item',
-      yellow:'yellow · code merge state unknown', none:'none',
+      yellow:'yellow · code is not confirmed merged', none:'none',
       unknown:'merge status is not confirmed'};
     const unknownDetails = accessibleUnknownDetails(unknownItemFacts({
       stageKnown: !u.stageUnknown, holdersKnown: !u.holdersUnknown,
-      landed: u.landed, ring}));
+      item: w, landed: u.landed}));
     const assignmentOpen = factCountValue(w.assignments?.open, w.evidence?.assignments);
     const assignmentTerminal = factCountValue(w.assignments?.terminal, w.evidence?.assignments);
     const turnsKnown = w.evidence?.turns?.status==='known' && w.turns !== null && w.turns !== undefined
@@ -2840,13 +2836,12 @@ function nodeContent(u, clamp){
           + (w.evidence.turns.complete===false ? '<br>incomplete inventory' : '')
       : w.evidence.turns.complete===true ? 'no turns active' : 'unknown · incomplete inventory';
     const mergeEvidence = w.evidence?.merged;
-    const mergeUnconfirmed = u.landed && ring === 'unknown';
-    const merged = mergeEvidence?.status==='known' && mergeEvidence.complete!==false
-      ? (w.merged===true ? 'in the branch' : w.merged===false ? 'not in the branch'
-        : (mergeUnconfirmed ? 'merge status is not confirmed' : 'unknown'))
+    const mergeKnown = mergeEvidence?.status==='known' && mergeEvidence.complete!==false
+      && typeof w.merged==='boolean';
+    const mergeUnconfirmed = u.landed && !mergeKnown;
+    const merged = mergeKnown ? (w.merged ? 'in the branch' : 'not in the branch')
       : (mergeUnconfirmed ? 'merge status is not confirmed' : 'unknown');
-    const code = factText(w, 'code', w.code,
-      value=>value===true ? 'code' : value===false ? 'non-code' : 'unknown');
+    const code = w.code===true ? 'code' : w.code===false ? 'non-code' : 'unknown';
     const holders = Array.isArray(w.holders) ? w.holders : null;
     const noHolder = w.state!=='open' ? '' : holders===null ? ' · holder unknown'
       : holders.some(id=>byId[id]&&!byId[id].retired) ? '' : ' · no live holder';
@@ -3334,7 +3329,7 @@ function updateSpatialTargets(){
         u.w.evidence?.ring?.complete);
       const unknownDetails = accessibleUnknownDetails(unknownItemFacts({
         stageKnown: !u.stageUnknown, holdersKnown: !u.holdersUnknown,
-        landed: u.landed, ring}));
+        item: u.w, landed: u.landed}));
       const label = 'Work item ' + (u.w.short || u.w.id) + ': ' + u.w.title;
       button.setAttribute('aria-label', unknownDetails ? label + '. ' + unknownDetails + '.' : label);
     } else {
