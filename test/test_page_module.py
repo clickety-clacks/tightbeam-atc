@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 import tempfile
@@ -48,6 +49,44 @@ class PageModuleSmokeTest(unittest.TestCase):
         self.assertNotRegex(module, r"\bpickAllHover\b")
         self.assertRegex(module, r"window\.__atc\s*=\s*\{[\s\S]*?pickNode,\s*pickHoverNodes,")
         self.assertRegex(module, r"function touchHoldKeys\(e\)\s*\{\s*return pickHoverNodes\(e\)")
+
+        evaluation = r'''import assert from 'node:assert/strict';
+import vm from 'node:vm';
+const moduleSource = __MODULE_SOURCE__;
+const objectStart = moduleSource.indexOf('window.__atc = {');
+const objectEnd = moduleSource.indexOf('\n};', objectStart) + 3;
+assert.ok(objectStart >= 0 && objectEnd > objectStart, 'window.__atc initializer must exist');
+const noop = () => {};
+const context = vm.createContext({
+  window: {},
+  clearRect: noop, frameDistance: noop, frameTo: noop, filteredView: noop,
+  neighbourhoodView: noop, pickNode: noop, pickHoverNodes: noop,
+  pickArrow: noop, pickClick: noop, arrowInScope: noop, focusArrow: noop,
+  selectables: [], selKey: noop, inScope: noop, setInputMode: noop, apiPull: noop,
+});
+new vm.Script('"use strict";\n' + moduleSource.slice(objectStart, objectEnd)).runInContext(context);
+assert.equal(typeof context.window.__atc.pickHoverNodes, 'function');
+
+const holdStart = moduleSource.indexOf('function touchHoldKeys(e){');
+const holdEnd = moduleSource.indexOf('\n}', holdStart) + 2;
+assert.ok(holdStart >= 0 && holdEnd > holdStart, 'touchHoldKeys must exist');
+const holdContext = vm.createContext({
+  pickHoverNodes: () => [{key: 'i:item'}],
+  selKey: node => node.key,
+});
+new vm.Script('"use strict";\n' + moduleSource.slice(holdStart, holdEnd) +
+  '\nglobalThis.heldKeys = touchHoldKeys({});').runInContext(holdContext);
+assert.deepEqual(Array.from(holdContext.heldKeys), ['i:item']);
+'''.replace("__MODULE_SOURCE__", json.dumps(module))
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".mjs") as smoke_file:
+            smoke_file.write(evaluation)
+            smoke_file.flush()
+            result = subprocess.run(
+                [shutil.which("node"), smoke_file.name],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(0, result.returncode, result.stderr)
 
 
 if __name__ == "__main__":
