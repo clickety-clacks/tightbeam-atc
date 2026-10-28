@@ -18,8 +18,17 @@ draw labelled arrows between them.
   tree: the root deepest, leaves at the surface, each family in its own sector.
   Colour is recency — solid blue for an agent that has just acted, fading to
   grey by an hour idle. Size shrinks with depth.
-- **Floating solids above the grid are work items.** Altitude and colour show the highest recorded evidence stage, from 0 to 6.
-  Missing evidence stays unknown; later evidence does not manufacture earlier steps.
+- **Floating solids above the grid are work items.** Open unfinished work is placed by where it
+  stands in its assignment life first. Work not yet started and not carded to anyone floats in a
+  cloud high above the org. Work carded to an active agent sits lower, over that agent, with a
+  line to it. Work that has started but is not carded to an active agent forms a ring around the
+  org's perimeter at middle height. Within each of these, colour shows the furthest evidence
+  recorded on any of the item's assignments, from 0 to 4, and lower sits further along. That is
+  not completion of the item: open work stays in its tier until the item is closed, and never
+  sits on the floor. When assignment state cannot be established, the item is not placed in any
+  of them: it waits off to the side with a `?`, and hover says why. Closed, iceboxed and failed
+  items keep their own placement. Missing evidence stays unknown; later evidence does not
+  manufacture earlier steps.
 - **On the floor, a ring says what happened.** Black means merge proven by Git. Green means an explicit ready-to-merge verdict.
   Light gray means durably non-code. Yellow means code with unknown merge status.
   A floating item has no merge ring; floor position alone does not prove a merge.

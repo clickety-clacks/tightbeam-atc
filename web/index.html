@@ -318,6 +318,9 @@
 <script type="module">
 import * as THREE from 'three';
 import { unknownItemFacts, unknownItemType, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
+import { deterministicItemScatter, prepareWorkTierLayout,
+         OPEN_WORK_LEGEND, OPEN_WORK_STAGE_QUALIFIER,
+         workItemDisplay, workPlacementAltitude, workPlacementText } from './work-item-tiers.mjs';
 import { agentSampleTimes, applyModelDelta, canInspectNode, evidencePageQuery,
          evidenceFreshnessLabel, evidenceRecordAuthor, factAge, factCountValue, factListValue, factValue, idleAgeSeconds,
          isEvidencePage, isModelDelta, knownStage,
@@ -533,16 +536,17 @@ const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0
    the user has dragged the camera into, not just the canonical home view */
 let orbitR = 66, orbitH = 36, orbitUserOwned = false;
 const orbitTgt = HOME_TGT.clone();
-/* The resting turntable centres the live org. Known orphans stay off to the
-   side; unknown custody remains in the population instead of being treated as
-   an orphan. With nothing to average, the old fixed point stands in. */
+/* The resting turntable centres the live org and includes the cloud and
+   perimeter tiers. Confirmed parked items stay off to the side; unknown
+   custody remains in the population instead of being treated as an orphan. */
 const _ht = new THREE.Vector3();
 function homeTarget(){
   const c = new THREE.Vector3();
   let n = 0;
   itemMeshes.forEach(m => {
     const w = m.userData.w;
-    if (!w || (Array.isArray(w.holders) && !w.holders.length)) return; /* known orphan */
+    if (!w || (Array.isArray(w.holders) && !w.holders.length
+        && !['cloud', 'perimeter'].includes(m.userData.placement?.tier))) return; /* parked area */
     c.add(m.getWorldPosition(_ht)); n++;
   });
   Object.values(agentMeshes).forEach(m => {
@@ -553,15 +557,15 @@ function homeTarget(){
   return n ? c.multiplyScalar(1 / n) : HOME_TGT.clone();
 }
 
-/* The resting frame is SOLVED from the live org, not a fixed radius. The old
-   constant 66/34 had to be wide enough for the whole board, so the view opened
-   framed on everything — including retired agents and known orphan work parked
-   off to one side. Frame the same population homeTarget() centres on. */
+/* The resting frame is SOLVED from the live org, not a fixed radius. Frame the
+   same population homeTarget() centres on, while leaving parked work and
+   retired agents outside the opening view. */
 function livePoints(){
   const pts = [];
   selectables().forEach(m => {
     const u = m.userData;
-    if (u.w && Array.isArray(u.w.holders) && !u.w.holders.length) return; /* known orphan */
+    if (u.w && Array.isArray(u.w.holders) && !u.w.holders.length
+        && !['cloud', 'perimeter'].includes(u.placement?.tier)) return; /* parked area */
     if (u.a && u.a.retired) return;                   /* retired agents */
     fitPoints(m, pts);
   });
@@ -804,8 +808,7 @@ function applyTheme(){
   renderLegend();
   measureLegend();
   if (typeof renderSwatches === 'function' && tagBox.style.display === 'block') renderSwatches();
-  if (DATA){ buildGround(DATA.agents); buildItems(DATA.items); buildLinks(DATA.links);
-             applyView(); }
+  if (DATA){ buildTieredScene(DATA.agents, DATA.items); buildLinks(DATA.links); applyView(); }
 }
 
 /* the ghost set is derived from focus alone — never stored independently */
@@ -1491,7 +1494,7 @@ function renderLegend(){
     `<span style="margin-left:12px">hedron flashing = turn waiting · working ring = turn running (agents and work items)</span>` +
     `<br><span style="color:${hx(T.liveHot)}">● blue agent = acted just now</span>` +
     `<span style="margin-left:8px;color:${hx(T.liveCold)}">● grey = idle an hour or more</span>` +
-    `<span style="margin-left:10px">discs hang below the grid · floating solids = work items (altitude = evidence remaining) · floor solids = landed</span>` +
+    `<span style="margin-left:10px">discs hang below the grid · ${OPEN_WORK_LEGEND} · floor solids = landed (never open work)</span>` +
     `<span style="margin-left:10px"><span class="sw" style="background:${hx(T.discBlack)};border:1px solid currentColor"></span>black ring = canonical branch contains the code</span>` +
     `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = explicit ready-to-merge verdict</span>` +
     `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = durable non-code item</span>` +
@@ -1526,7 +1529,7 @@ function paintAgentMesh(mesh, a, now=Date.now()){
   mesh.userData.baseStroke.copy(mesh.userData.lineMat.color);
   mesh.userData.flash = flash;
 }
-function buildGround(agents){
+function buildGround(agents, tierLayout=null){
   disposeGroup(groundGroup); agentMeshes = {}; APOS = {}; byId = {};
   agents.forEach(a=>byId[a.id]=a);
   const children = {};
@@ -1557,9 +1560,10 @@ function buildGround(agents){
      Keep it in a separate detached area until the relationship is known. */
   const placed = new Set(Object.keys(APOS));
   agents.filter(a=>!placed.has(a.id)).forEach((a,i)=>{
-    const scatterPos = scatter(a.id);
-    APOS[a.id] = new THREE.Vector3(66 + (i%8)*4.6 + scatterPos.x*.45,
-                                   -4.2, 54 + Math.floor(i/8)*4.6 + scatterPos.z*.45);
+    const fallbackScatter = deterministicItemScatter(a.id);
+    const sidePosition = tierLayout?.detachedAgentPositions?.get(a.id);
+    APOS[a.id] = new THREE.Vector3(sidePosition?.x ?? 66 + (i%8)*4.6 + fallbackScatter.x*.45,
+                                   -4.2, sidePosition?.z ?? 54 + Math.floor(i/8)*4.6 + fallbackScatter.z*.45);
   });
   agents.forEach(a=>{
     const d = DEPTH[a.id] ?? 2;
@@ -1624,52 +1628,48 @@ function buildLinks(links){
   });
 }
 
-/* deterministic scatter from the item id: stable across model rebuilds, so items
-   sharing a centroid spread out instead of forming a column */
-function scatter(id){
-  let h = 2166136261;
-  for (let i = 0; i < id.length; i++){ h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
-  const a = ((h >>> 0) % 3600) / 3600 * Math.PI * 2;
-  const r = 1.1 + (((h >>> 12) & 1023) / 1023) * 3.4;
-  return {x: Math.cos(a) * r, z: Math.sin(a) * r, phase: a};
-}
 /* accumulated rotation, kept across rebuilds so the spin does not snap back
    to zero when the service model changes */
 const spin = new Map();
 
-function buildItems(items){
+function buildItems(items, tierLayout=null){
+  const layout = tierLayout || prepareWorkTierLayout(items, Object.values(byId));
   disposeGroup(itemGroup); disposeGroup(tetherGroup); itemMeshes = [];
   items.forEach((w,idx)=>{
+    const placement = layout.placements.get(w.id) || null;
+    const unfinished = w.state === 'open';
     const holdersKnown = Array.isArray(w.holders);
     const active = holdersKnown ? w.holders.filter(h=>byId[h] && !byId[h].retired) : [];
     const anchor = new THREE.Vector3();
     if (active.length){ active.forEach(h=>anchor.add(APOS[h])); anchor.multiplyScalar(1/active.length); anchor.y = 0; }
-    else if (holdersKnown) anchor.set(-55 + (idx%24)*4.6, 0, 62 + Math.floor(idx/24)*5);
-    else anchor.set(55 + (idx%24)*4.6, 0, 62 + Math.floor(idx/24)*5);
     /* closedAt may describe a completed assignment; only item state closes
        the work item for placement. */
     const closed = w.state === 'closed';
-    /* Altitude IS evidence: items descend as attests accumulate and rest on
-       the floor once the evidence is complete (stage>=5) or the item closes.
-       Unknown stage is placed in its own neutral position; it never borrows
-       stage zero or stage six. */
+    /* Open work stays in its assignment tier. Its real stage remains in the
+       detail text, while colour and tier altitude cap at stage four. */
     const stageKnown = factValue(w, 'stage', w.stage).known
       && w.evidence?.stage?.complete!==false && knownStage(w.stage);
     const stage = stageKnown ? w.stage : null;
-    const landed = (stage !== null && stage >= 5) || closed;
-    const col = stage !== null ? T.stage[stage]
+    const display = workItemDisplay(w, stage);
+    const colorStage = display.colorStage;
+    const landed = display.landed;
+    const col = colorStage !== null ? T.stage[colorStage]
               : (closed ? T.itemClosed : T.factUnknown);
-    const sc = scatter(w.short || w.id);
-    const pos = landed
-      ? new THREE.Vector3(anchor.x + sc.x, 1.05, anchor.z + 3.2 + sc.z)
-      : new THREE.Vector3(anchor.x + sc.x,
-                          stage === null ? 27 + (idx%3)*.8
-                            : 6 + (4 - Math.min(stage, 4))*4.2 + (idx%3)*.8,
-                          anchor.z + sc.z);
+    const sc = deterministicItemScatter(w.short || w.id);
+    const cloud = layout.cloudPositions.get(w.id);
+    const perimeter = layout.perimeterPositions.get(w.id);
+    const side = layout.sideItemPositions.get(w.id);
+    const x = cloud?.x ?? perimeter?.x ?? side?.x ?? anchor.x + sc.x;
+    const z = cloud?.z ?? perimeter?.z ?? side?.z ?? anchor.z + sc.z;
+    const offset = (idx%3)*.8;
+    const y = landed ? 1.05 : placement
+      ? workPlacementAltitude(placement, stage, offset, cloud?.texture || 0)
+      : stage === null ? 27 + offset : 6 + (4 - Math.min(stage, 4))*4.2 + offset;
+    const pos = new THREE.Vector3(x, y, landed ? z + 3.2 : z);
     const igeo = new THREE.IcosahedronGeometry(landed ? .475 : .525, 0);
     const mesh = diagramMesh(igeo, col);
     mesh.position.copy(pos);
-    Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, closed, landed,
+    Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, closed, landed, unfinished, placement,
       stageUnknown:stage === null, holdersUnknown:!holdersKnown, baseY: landed? null : pos.y});
     mesh.rotation.y = spin.get(w.id) || 0;
     itemGroup.add(mesh); itemMeshes.push(mesh);
@@ -1677,7 +1677,7 @@ function buildItems(items){
        merge lookups, or ready-to-merge fields in the browser. */
     const ring = ringMeaning(w.ring, w.evidence?.ring?.status, w.evidence?.ring?.complete);
     const dcol = ({black:T.discBlack, green:T.discG, 'light-gray':T.discN, yellow:T.discY})[ring];
-    if (unknownItemType(w)){
+    if (unknownItemType(w) || (unfinished && (stage === null || placement?.tier === 'unknown'))){
       const marker = labelSprite('?');
       marker.scale.multiplyScalar(.72);
       marker.position.set(0, 1.35, 0);
@@ -1730,7 +1730,7 @@ function buildItems(items){
       seg.userData = {itemMesh:mesh, hid, state:st, mat:lm, geo:lg};
       tetherGroup.add(seg);
     });
-    if (w.state==='open' && holdersKnown && !active.length){
+    if (unfinished && placement?.tier !== 'unknown' && holdersKnown && !active.length){
       /* orphan mark: a billboard ring AROUND the item, so it never reads as a
          landing marker on the ground */
       const ring = new THREE.Mesh(new THREE.RingGeometry(.78,.9,48),
@@ -1740,6 +1740,13 @@ function buildItems(items){
       mesh.add(ring);
     }
   });
+}
+
+function buildTieredScene(agents, items){
+  const tierLayout = prepareWorkTierLayout(items, agents);
+  buildGround(agents, tierLayout);
+  buildItems(items, tierLayout);
+  return tierLayout;
 }
 
 /* ---------- wake pulses ---------- */
@@ -2240,8 +2247,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
     if (sceneChanged){
       rebuildWithViewerState(savedView, ()=>{
         clearHover();
-        buildGround(model.agents);
-        buildItems(model.items);
+        buildTieredScene(model.agents, model.items);
         buildLinks(model.links);
       }, restoreViewerModelState);
       migrateViewKeys();
@@ -2280,7 +2286,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
     if (previous){
       try {
         rebuildWithViewerState(savedView, ()=>{
-          buildGround(previous.agents); buildItems(previous.items); buildLinks(previous.links);
+          buildTieredScene(previous.agents, previous.items); buildLinks(previous.links);
           applyView({preserveCamera:true});
         }, restoreViewerModelState);
         restoredPrevious = true;
@@ -2288,7 +2294,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
     } else {
       try {
         rebuildWithViewerState(savedView, ()=>{
-          buildGround([]); buildItems([]); buildLinks([]); applyView({preserveCamera:true});
+          buildTieredScene([], []); buildLinks([]); applyView({preserveCamera:true});
         }, restoreViewerModelState);
       } catch (rollbackError){ restoredPrevious = false; }
     }
@@ -2846,10 +2852,13 @@ function nodeContent(u, clamp){
     const noHolder = w.state!=='open' ? '' : holders===null ? ' · holder unknown'
       : holders.some(id=>byId[id]&&!byId[id].retired) ? '' : ' · no live holder';
     const verdict = w.readyToMerge===true ? ' · ready-to-merge verdict filed' : '';
+    const placementLine = u.unfinished ? workPlacementText(u.placement, byId) : '';
+    const stageQualifier = u.unfinished ? OPEN_WORK_STAGE_QUALIFIER : '';
     return '<span class="t">' + esc(w.short || w.id) + '</span>'
       + '<div' + (clamp ? ' class="clamp5"' : '') + '>' + esc(w.title || 'title unknown') + '</div>'
-      + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · stage ' + stage
+      + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · stage ' + stage + stageQualifier
       + ' · ' + merged + ' · ' + code + ' · ring ' + esc(ringLabels[ring]) + verdict + noHolder
+      + (placementLine ? '<span class="k">placement</span><span class="seg">' + esc(placementLine) + '</span>' : '')
       + (unknownDetails ? '<span class="k">?</span><span class="seg">'
         + esc(unknownDetails) + '</span>' : '')
       + '<span class="k">attests</span><span class="seg">' + listFact('attests', w.attestKinds) + '</span>'
