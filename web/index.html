@@ -2432,7 +2432,7 @@ document.getElementById('touchcontrols').addEventListener('click', e => {
 window.__atc = {
   /* framing internals, so a fit that looks wrong can be interrogated rather
      than guessed at: which constraint bound, and how much room it asked for */
-  clearRect, frameDistance, frameTo, filteredView, neighbourhoodView, pickNode, pickAllHover,
+  clearRect, frameDistance, frameTo, filteredView, neighbourhoodView, pickNode, pickHoverNodes,
   pickArrow, pickClick, arrowInScope, focusArrow,
   /* CSS-pixel screen position of a node or an arrow's curve/label, so a test
      can dispatch a REAL pointer event at that pixel rather than calling the
@@ -2500,7 +2500,7 @@ function cancelTouchHold(clear = true){
   touchHold = null;
 }
 function touchHoldKeys(e){
-  return pickAllHover(e).map(selKey).filter(Boolean);
+  return pickHoverNodes(e).map(selKey).filter(Boolean);
 }
 function startTouchHold(e){
   if (e.pointerType !== 'touch') return;
