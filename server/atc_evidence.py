@@ -190,7 +190,10 @@ def merge_ring(stage, merged, ready, code):
         return "green"
     if code is False:
         return "light-gray"
-    if code is True and merged is None:
+    if code is True:
+        # Yellow means the item is code but the canonical branch has not
+        # confirmed it merged. That includes both an unknown lookup and a
+        # confirmed negative lookup.
         return "yellow"
     return None
 

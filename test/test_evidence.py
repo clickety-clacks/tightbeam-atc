@@ -77,7 +77,7 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual("green", merge_ring(stage, None, True, True))
         self.assertEqual("black", merge_ring(stage, True, True, True))
         self.assertEqual("light-gray", merge_ring(stage, None, False, False))
-        self.assertIsNone(merge_ring(stage, False, False, True))
+        self.assertEqual("yellow", merge_ring(stage, False, False, True))
         self.assertIsNone(merge_ring(4, True, True, True))
 
     def test_review_window_is_measured_from_actual_attest_times(self):
