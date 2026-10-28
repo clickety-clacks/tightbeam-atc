@@ -19,7 +19,7 @@ class ViewerWorkTierTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
 
     def test_readme_explains_all_open_work_placements(self):
-        readme = (ROOT / "README.md").read_text()
+        readme = " ".join((ROOT / "README.md").read_text().split())
         for phrase in (
             "cloud high above the org",
             "with a line to it",
