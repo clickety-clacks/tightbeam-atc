@@ -327,6 +327,7 @@ import { agentSampleTimes, applyModelDelta, canInspectNode, evidencePageQuery,
          prepareModelSnapshot, rebuildWithViewerState, renderEvidenceMarkup, renderModelStatusElement,
          captureHoverScroll, captureViewerState, clientToNdc, ndcToClient,
          hoverCardLimits, fitHoverCard, resolveHoverNodes, restoreHoverScroll,
+         singleHoverNodes, isHoverCardEventTarget,
          restoreViewerState,
          ringMeaning, sceneSignature, shouldAcceptModel, shouldAcceptSnapshot } from './viewer-semantics.mjs';
 import { OrbitControls } from './addons/controls/OrbitControls.js';
@@ -2559,9 +2560,10 @@ function activateHit(hit){
     orbitUserOwned = true; userMoved = false;
   }
 }
+const hoverLayer = document.getElementById('hovercards');
 function activateAt(e){ activateHit(pickClick(e)); }
 addEventListener('pointerdown', e=>{
-  if (view.input === 'brush' || !onCanvas(e)) return;
+  if (view.input === 'brush' || isHoverCardEventTarget(e.target, hoverLayer) || !onCanvas(e)) return;
   canvasPointers.add(e.pointerId);
   if (canvasPointers.size === 1){
     tapGesture = {id:e.pointerId, x:e.clientX, y:e.clientY,
@@ -2603,7 +2605,9 @@ function finishTapGesture(e, cancelled){
   if (!canvasPointers.size) tapGesture = null;
 }
 addEventListener('pointerup', e=>{
-  if (view.input !== 'brush' && onCanvas(e)) finishTapGesture(e, false);
+  if (view.input === 'brush') return;
+  if (isHoverCardEventTarget(e.target, hoverLayer)) return finishTapGesture(e, true);
+  if (onCanvas(e)) finishTapGesture(e, false);
 });
 addEventListener('pointercancel', e=>finishTapGesture(e, true));
 addEventListener('lostpointercapture', e=>finishTapGesture(e, true));
@@ -2995,32 +2999,33 @@ function setMouseFromClient(clientX, clientY){
    for clicking and brushing, but asking what it IS must always be answerable —
    a focused view that goes silent when you point at its surroundings tells you
    nothing about why they were excluded. */
-function pickAllHover(ev, max = 4){
+function pickHoverNodes(ev){
   setMouseFromClient(ev.clientX, ev.clientY);
   ray.setFromCamera(mouse, camera);
-  const out = [], seen = new Set();
+  const out = [];
   const sprites = [];
   selectables().forEach(m => (m.userData.tagSprites || []).forEach(sp => { if (sp.visible) sprites.push(sp); }));
   const consider = o => {
+    if (out.length) return;
     const owner = ownerOf(o);
     /* Ghosts remain inspectable context. Scope limits activation and brushing,
        while hover only excludes hidden layers and non-node geometry. */
     if (!owner || !canInspectNode({type: owner.userData.type,
                                   layerVisible: nodeLayerOn(owner)})) return;
     const k = selKey(owner);
-    if (!k || seen.has(k)) return;
-    seen.add(k); out.push(owner);
+    if (!k) return;
+    out.push(owner);
   };
   ray.intersectObjects(sprites, false).forEach(h => consider(h.object));
   ray.intersectObjects([...itemMeshes, ...Object.values(agentMeshes)], true)
-     .forEach(h => { if (out.length < max) consider(h.object); });
+     .forEach(h => consider(h.object));
   /* same near-miss tolerance the click uses, so hover and click agree */
   if (!out.length){
     const near = nodeNearPointer(ev, m => canInspectNode({type: m.userData.type,
                                                          layerVisible: nodeLayerOn(m)}));
     if (near) consider(near);
   }
-  return out.slice(0, max);
+  return singleHoverNodes(out);
 }
 
 /* what the pointer is over right now — the frame loop strobes these toward
@@ -3034,7 +3039,6 @@ const hoverLeaders = [];
 const HOVER_HOLD = 34;   /* px: how far a hovered node may drift and keep its card */
 const HOVER_WHITE = new THREE.Color(0xffffff);
 
-const hoverLayer = document.getElementById('hovercards');
 const leaderSvg = document.getElementById('leaders');
 const _hv = new THREE.Vector3();
 let hoverGrace = null;
@@ -3133,7 +3137,7 @@ function showHover(nodes, ev, restoredScroll = null){
 
 function restoreHoverByKey(keys, scrollByKey = null){
   if (!keys.length) return;
-  const nodes = resolveHoverNodes(keys, meshForKey);
+  const nodes = singleHoverNodes(resolveHoverNodes(keys, meshForKey));
   if (!nodes.length) return;
   if (hoverGrace !== null) clearTimeout(hoverGrace);
   hoverGrace = null;
@@ -3178,12 +3182,12 @@ function refreshInspectionAges(now=Date.now()){
 
 addEventListener('pointermove', e => {
   if (e.pointerType === 'touch') return;
-  if (hoverLayer.contains(e.target)){
+  if (isHoverCardEventTarget(e.target, hoverLayer)){
     clearTimeout(hoverGrace); hoverGrace = null;
     return;
   }
   if (!onCanvas(e)){ clearTimeout(hoverGrace); hoverGrace = null; return clearHover(); }
-  const nodes = pickAllHover(e);
+  const nodes = pickHoverNodes(e);
   if (!nodes.length){
     /* Nodes drift under a stationary pointer, so an empty pick usually means
        the thing bobbed off the cursor rather than that the pointer left it.

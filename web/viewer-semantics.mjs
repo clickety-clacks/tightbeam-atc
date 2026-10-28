@@ -51,6 +51,18 @@ export function restoreHoverScroll(key, element, offsets) {
   if (offsets?.has(key)) element.scrollTop = offsets.get(key);
 }
 
+/* A pointer has one visible hover target, even when several meshes share its
+   ray. Keep this rule on both fresh picks and scene-rebuild restoration. */
+export function singleHoverNodes(nodes) {
+  return Array.isArray(nodes) ? nodes.slice(0, 1) : [];
+}
+
+/* Hint cards are interactive DOM overlays; input over them must not be routed
+   back into the canvas's scene picker. */
+export function isHoverCardEventTarget(target, hoverLayer) {
+  return Boolean(target && hoverLayer?.contains?.(target));
+}
+
 /* Scene rebuilds replace meshes; resolve the visible hover keys against the
    current scene and leave removed entities behind. */
 export function resolveHoverNodes(keys, resolveByKey) {
