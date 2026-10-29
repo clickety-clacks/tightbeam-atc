@@ -1,4 +1,5 @@
 import { ringMeaning } from './viewer-semantics.mjs';
+import { OPEN_WORK_STAGE_QUALIFIER } from './work-item-tiers.mjs';
 
 const text = value => typeof value === 'string' && value.trim() ? value : null;
 
@@ -18,9 +19,13 @@ function hintFact(entity, fact, value, render) {
   return {value: label, qualifiers};
 }
 
-function hintFactText(fact) {
-  if (!fact) return 'unknown';
-  return [...fact.qualifiers, fact.value].join(' · ');
+function hintFactText(fact, additionalQualifier = null) {
+  if (!fact) return additionalQualifier ? `unknown (${additionalQualifier})` : 'unknown';
+  const qualifiers = fact.qualifiers.join(', ')
+    + (additionalQualifier ? `${fact.qualifiers.length ? '; ' : ''}${additionalQualifier}` : '');
+  return qualifiers
+    ? `${fact.value} (${qualifiers})`
+    : fact.value;
 }
 
 const TURN_LABELS = {run: 'running', wait: 'queued', idle: 'idle'};
@@ -28,7 +33,7 @@ const RING_LABELS = {
   black: 'merged',
   green: 'ready to merge',
   'light-gray': 'non-code',
-  yellow: 'merge not confirmed',
+  yellow: 'not confirmed',
   none: 'not at merge stage',
   unknown: null,
 };
@@ -43,7 +48,7 @@ export function agentHintSummary(agent) {
 
   return {
     identity: name ? hintFactText(name) : text(agent?.id) || 'Agent identity unknown',
-    summary: `state ${hintFactText(identity)} · turn ${hintFactText(turn)}`,
+    summary: `state: ${hintFactText(identity)} · turn: ${hintFactText(turn)}`,
   };
 }
 
@@ -57,12 +62,14 @@ export function itemHintSummary(item) {
   const ring = ringMeaning(item?.ring, item?.evidence?.ring?.status,
     item?.evidence?.ring?.complete);
   const ringFact = hintFact(item, 'ring', ring, value => RING_LABELS[value] || null);
-  const merge = ring === 'unknown' ? 'merge status not confirmed' : hintFactText(ringFact);
+  const merge = ring === 'unknown' ? 'not confirmed' : hintFactText(ringFact);
+  const stageText = hintFactText(stage,
+    item?.state === 'open' ? OPEN_WORK_STAGE_QUALIFIER : null);
 
   return {
     identity: text(item?.short) || text(item?.id) || 'Work item identity unknown',
     title: title ? hintFactText(title) : 'Title unknown',
-    summary: `state ${hintFactText(state)} · stage ${hintFactText(stage)}`
-      + ` · open assignments ${hintFactText(openAssignments)} · ${merge}`,
+    summary: `state: ${hintFactText(state)} · stage: ${stageText}`
+      + ` · open assignments: ${hintFactText(openAssignments)} · merge status: ${merge}`,
   };
 }

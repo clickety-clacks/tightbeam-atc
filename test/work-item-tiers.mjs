@@ -84,7 +84,7 @@ assert.equal(workItemDisplay({state: 'closed'}, 0).landed, true,
   'closed items retain their floor placement');
 
 assert.equal(OPEN_WORK_STAGE_QUALIFIER,
-  ' · furthest evidence on any of its assignments; the item is still open');
+  'furthest evidence on any of its assignments; the item is still open');
 assert.equal(OPEN_WORK_LEGEND,
   'open unfinished work: cloud above = not started, not carded · near an agent with a line = carded · ring around the org = started, not carded to an active agent · ? off to the side = assignment state unknown · within a tier, lower and greener = further along');
 

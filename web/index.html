@@ -2824,13 +2824,16 @@ function evidenceNotesMarkup(itemId){
 function nodeHintContent(u){
   if (u.type === 'item'){
     const hint = itemHintSummary(u.w);
+    const placement = u.unfinished ? workPlacementText(u.placement, byId) : '';
     return '<span class="t">' + esc(hint.identity) + '</span>'
       + '<div>' + esc(hint.title) + '</div>'
-      + '<span class="k">state</span><span class="seg">' + esc(hint.summary) + '</span>';
+      + '<span class="seg">' + esc(hint.summary) + '</span>'
+      + (placement ? '<span class="k">placement</span><span class="seg">'
+        + esc(placement) + '</span>' : '');
   }
   const hint = agentHintSummary(u.a);
   return '<span class="t">' + esc(hint.identity) + '</span>'
-    + '<span class="k">state</span><span class="seg">' + esc(hint.summary) + '</span>';
+    + '<span class="seg">' + esc(hint.summary) + '</span>';
 }
 function nodeContent(u, compact){
   if (compact) return nodeHintContent(u);
@@ -2870,7 +2873,7 @@ function nodeContent(u, compact){
       : holders.some(id=>byId[id]&&!byId[id].retired) ? '' : ' · no live holder';
     const verdict = w.readyToMerge===true ? ' · ready-to-merge verdict filed' : '';
     const placementLine = u.unfinished ? workPlacementText(u.placement, byId) : '';
-    const stageQualifier = u.unfinished ? OPEN_WORK_STAGE_QUALIFIER : '';
+    const stageQualifier = u.unfinished ? ' · ' + OPEN_WORK_STAGE_QUALIFIER : '';
     return '<span class="t">' + esc(w.short || w.id) + '</span>'
       + '<div>' + esc(w.title || 'title unknown') + '</div>'
       + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · stage ' + stage + stageQualifier

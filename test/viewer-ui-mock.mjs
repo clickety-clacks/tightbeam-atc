@@ -83,7 +83,7 @@ const knownAgentHint = agentHintSummary({
 });
 assert.deepEqual(knownAgentHint, {
   identity: 'Reviewer',
-  summary: 'state active · turn running',
+  summary: 'state: active · turn: running',
 });
 const unconfirmedAgentHint = agentHintSummary({
   id: 'agent-2', name: 'Builder', retired: false, turn: 'wait', evidence: {
@@ -92,10 +92,10 @@ const unconfirmedAgentHint = agentHintSummary({
   },
 });
 assert.equal(unconfirmedAgentHint.summary,
-  'state unconfirmed · active · turn unconfirmed · queued');
-assert.equal(unconfirmedAgentHint.identity, 'unconfirmed · Builder');
+  'state: active (unconfirmed) · turn: queued (unconfirmed)');
+assert.equal(unconfirmedAgentHint.identity, 'Builder (unconfirmed)');
 assert.equal(agentHintSummary({id: 'agent-3', retired: false, turn: 'idle'}).summary,
-  'state unknown · turn unknown');
+  'state: unknown · turn: unknown');
 
 const knownItemHint = itemHintSummary({
   id: 'wi-1234567890', short: 'wi-1234567', title: 'Repair the viewer', state: 'open',
@@ -109,7 +109,8 @@ const knownItemHint = itemHintSummary({
 });
 assert.deepEqual(knownItemHint, {
   identity: 'wi-1234567', title: 'Repair the viewer',
-  summary: 'state open · stage 4 · open assignments 2 · merge not confirmed',
+  summary: 'state: open · stage: 4 (furthest evidence on any of its assignments; the item is still open)'
+    + ' · open assignments: 2 · merge status: not confirmed',
 });
 const partialItemHint = itemHintSummary({
   id: 'wi-unknown', title: 'Unverified item', state: 'open', stage: 5, ring: 'yellow',
@@ -123,7 +124,28 @@ const partialItemHint = itemHintSummary({
   },
 });
 assert.equal(partialItemHint.summary,
-  'state open · stage unconfirmed · 5 · open assignments unknown · unconfirmed · merge not confirmed');
+  'state: open · stage: 5 (unconfirmed; furthest evidence on any of its assignments; the item is still open)'
+    + ' · open assignments: unknown · merge status: not confirmed (unconfirmed)');
+
+const unknownMergeHint = itemHintSummary({
+  id: 'wi-unknown-merge', title: 'Unknown merge', state: 'open', stage: 2,
+  assignments: {open: 0}, ring: 'unknown', evidence: {},
+});
+assert.equal(unknownMergeHint.summary,
+  'state: unknown · stage: unknown (furthest evidence on any of its assignments; the item is still open)'
+    + ' · open assignments: unknown · merge status: not confirmed');
+const closedItemHint = itemHintSummary({
+  id: 'wi-closed', title: 'Closed work', state: 'closed', stage: 5,
+  assignments: {open: 0}, ring: 'black', evidence: {
+    identity: {status: 'known', freshness: 'live', complete: true},
+    stage: {status: 'known', freshness: 'live', complete: true},
+    assignments: {status: 'known', freshness: 'live', complete: true},
+    ring: {status: 'known', freshness: 'live', complete: true},
+  },
+});
+assert.equal(closedItemHint.summary,
+  'state: closed · stage: 5 · open assignments: 0 · merge status: merged',
+  'non-open items have no unfinished-stage qualifier');
 
 /* The same model and DOM seam used by the HUD must expose global state, ages,
    and the distinction between feed updates and bounded reconciliation. */
