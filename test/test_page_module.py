@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -140,6 +141,19 @@ assert.match(context.detail, /wi-full-detail/);
                 text=True,
             )
         self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_hover_card_backgrounds_are_opaque(self):
+        page = (ROOT / "web" / "index.html").read_text()
+        selectors = (
+            ("dark", r"#hovercards\s+\.hc\s*\{([^}]*)\}"),
+            ("light", r"body\.light\s+#hovercards\s+\.hc\s*\{([^}]*)\}"),
+        )
+        for theme, selector in selectors:
+            with self.subTest(theme=theme):
+                match = re.search(selector, page)
+                self.assertIsNotNone(match, f"{theme} hover card style must exist")
+                color = re.search(r"background\s*:\s*(#[0-9a-fA-F]{6})\s*;", match.group(1))
+                self.assertIsNotNone(color, f"{theme} hover card background must be opaque")
 
 
 if __name__ == "__main__":
