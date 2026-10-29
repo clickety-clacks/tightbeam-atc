@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   applyModelDelta, captureHoverScroll, captureViewerState, clientToNdc, ndcToClient,
   fitHoverCard, hoverCardLimits, rebuildWithViewerState, restoreHoverScroll,
+  singleHoverNodes, isHoverCardEventTarget,
   renderEvidenceMarkup, renderModelStatusElement, restoreViewerState, sceneSignature,
   resolveHoverNodes,
 } from '../web/viewer-semantics.mjs';
@@ -51,6 +52,18 @@ const rebuiltHoverCard = {scrollTop: 0};
 restoreHoverScroll('i:wi-1', rebuiltHoverCard, hoverScroll);
 assert.equal(rebuiltHoverCard.scrollTop, 430,
   'a long card retains its reading position when a model rebuild replaces its mesh');
+
+const itemUnderPointer = {id: 'item'};
+const unrelatedAgentUnderPointer = {id: 'agent'};
+assert.deepEqual(singleHoverNodes([itemUnderPointer, unrelatedAgentUnderPointer]), [itemUnderPointer],
+  'one pointer ray produces one hint, choosing its nearest hit');
+assert.deepEqual(singleHoverNodes([]), [], 'an empty pointer ray produces no hint');
+const hintCard = {}, hintChild = {}, sceneNode = {};
+const hintLayer = {contains: target => target === hintCard || target === hintChild};
+assert.equal(isHoverCardEventTarget(hintChild, hintLayer), true,
+  'events from inside a hint card are intercepted before canvas picking');
+assert.equal(isHoverCardEventTarget(sceneNode, hintLayer), false,
+  'scene pointer events remain eligible outside hint cards');
 
 const rebuiltMeshes = new Map([
   ['i:wi-1', {id: 'replacement-item'}],
