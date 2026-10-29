@@ -2872,7 +2872,7 @@ function nodeContent(u, compact){
     const placementLine = u.unfinished ? workPlacementText(u.placement, byId) : '';
     const stageQualifier = u.unfinished ? OPEN_WORK_STAGE_QUALIFIER : '';
     return '<span class="t">' + esc(w.short || w.id) + '</span>'
-      + '<div' + (clamp ? ' class="clamp5"' : '') + '>' + esc(w.title || 'title unknown') + '</div>'
+      + '<div>' + esc(w.title || 'title unknown') + '</div>'
       + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · stage ' + stage + stageQualifier
       + ' · ' + merged + ' · ' + code + ' · ring ' + esc(ringLabels[ring]) + verdict + noHolder
       + (placementLine ? '<span class="k">placement</span><span class="seg">' + esc(placementLine) + '</span>' : '')
@@ -2885,8 +2885,8 @@ function nodeContent(u, compact){
       + '<span class="k">evidence age and source</span>' + evidenceMarkup(w)
       + '<span class="k">turns</span><span class="seg">' + acts + '</span>'
       /* the pane has room, and this is the id the CLI will accept */
-      + (clamp ? '' : evidenceNotesMarkup(w.id)
-        + '<span class="k">id</span><span class="seg">' + esc(w.id) + '</span>');
+      + evidenceNotesMarkup(w.id)
+      + '<span class="k">id</span><span class="seg">' + esc(w.id) + '</span>';
   }
   const a = u.a;
   const openItems = ((DATA&&DATA.items)||[]).filter(w=>w.state==='open');

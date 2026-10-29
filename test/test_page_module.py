@@ -88,6 +88,59 @@ assert.deepEqual(Array.from(holdContext.heldKeys), ['i:item']);
             )
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_work_item_detail_renders_full_evidence(self):
+        parser = InlineModuleParser()
+        parser.feed((ROOT / "web" / "index.html").read_text())
+        module = "".join(parser.parts)
+        self.assertTrue(module.strip(), "index.html must contain an inline module script")
+
+        evaluation = r'''import assert from 'node:assert/strict';
+import vm from 'node:vm';
+const moduleSource = __MODULE_SOURCE__;
+const contentStart = moduleSource.indexOf('function nodeContent(u, compact){');
+const contentEnd = moduleSource.indexOf('\nconst detailEl', contentStart);
+assert.ok(contentStart >= 0 && contentEnd > contentStart, 'nodeContent must exist');
+const context = vm.createContext({
+  esc: value => String(value ?? ''),
+  factText: (_entity, _fact, value, render) => render(value),
+  factListValue: () => 'full list evidence',
+  factCountValue: value => value ?? 'unknown',
+  knownStage: () => true,
+  ringMeaning: () => 'unknown',
+  unknownItemFacts: () => ({}),
+  accessibleUnknownDetails: () => '',
+  evidenceMarkup: () => '<div>full source evidence</div>',
+  evidenceNotesMarkup: () => '<div>full attest evidence</div>',
+  workPlacementText: () => '',
+  OPEN_WORK_STAGE_QUALIFIER: '',
+  byId: {},
+});
+const item = {
+  type: 'item', stageUnknown: false, holdersUnknown: false,
+  landed: false, unfinished: false,
+  w: {
+    id: 'wi-full-detail', short: 'wi-full-detail', title: 'Focused work item',
+    state: 'open', stage: 4, ring: 'unknown', code: true,
+    evidence: {}, assignments: {open: 0, terminal: 0}, turns: null, holders: [],
+  },
+};
+new vm.Script('"use strict";\n' + moduleSource.slice(contentStart, contentEnd) +
+  '\nglobalThis.detail = nodeContent(globalThis.item, false);').runInContext(
+    Object.assign(context, {item}));
+assert.match(context.detail, /full source evidence/);
+assert.match(context.detail, /full attest evidence/);
+assert.match(context.detail, /wi-full-detail/);
+'''.replace("__MODULE_SOURCE__", json.dumps(module))
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".mjs") as smoke_file:
+            smoke_file.write(evaluation)
+            smoke_file.flush()
+            result = subprocess.run(
+                [shutil.which("node"), smoke_file.name],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(0, result.returncode, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
