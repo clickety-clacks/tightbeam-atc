@@ -1,7 +1,7 @@
 /* Spatial and wording rules for unfinished work. Kept pure so the same
    placement contract can be exercised without a browser or service. */
 const ACTIVE_REASON = "a card holder's agent record is unavailable";
-export const OPEN_WORK_STAGE_QUALIFIER = ' · furthest evidence on any of its assignments; the item is still open';
+export const OPEN_WORK_STAGE_QUALIFIER = 'furthest evidence on any of its assignments; the item is still open';
 export const OPEN_WORK_LEGEND = 'open unfinished work: cloud above = not started, not carded · near an agent with a line = carded · ring around the org = started, not carded to an active agent · ? off to the side = assignment state unknown · within a tier, lower and greener = further along';
 
 function agentFor(agentsById, id) {
