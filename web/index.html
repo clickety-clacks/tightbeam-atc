@@ -127,7 +127,7 @@
      node — without that the cards are just a pile of facts about nothing in
      particular. */
   #hovercards { position:fixed; inset:0; pointer-events:none; z-index:8; }
-  #hovercards .hc { position:absolute; background:#1b1e22f2; color:#d8d6d1;
+  #hovercards .hc { position:absolute; background:#1b1e22; color:#d8d6d1;
     border:1px solid #3a3d42; border-left:3px solid #b08d57; border-radius:4px;
     padding:7px 11px; font-size:12.5px; line-height:1.5;
     width:min(300px, calc(100vw - 24px)); box-sizing:border-box;
@@ -143,7 +143,7 @@
     pointer-events:none; z-index:7; overflow:visible; }
   #leaders line { stroke:#b08d57; stroke-width:1.2; stroke-dasharray:3 4; opacity:.85; }
   #leaders circle { fill:#b08d57; }
-  body.light #hovercards .hc { background:#faf7eef5; color:#26323c;
+  body.light #hovercards .hc { background:#faf7ee; color:#26323c;
     border-color:#b8c7d9; border-left-color:#c23b22; }
   body.light #hovercards .hc .t { color:#c23b22; }
   body.light #hovercards .hc .seg { color:#5c6b78; }
@@ -318,6 +318,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { unknownItemFacts, unknownItemType, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
+import { agentHintSummary, itemHintSummary } from './viewer-hints.mjs';
 import { deterministicItemScatter, prepareWorkTierLayout,
          OPEN_WORK_LEGEND, OPEN_WORK_STAGE_QUALIFIER,
          workItemDisplay, workPlacementAltitude, workPlacementText } from './work-item-tiers.mjs';
@@ -2820,7 +2821,19 @@ function evidenceNotesMarkup(itemId){
     + '<button type="button" class="evidence-action" data-item-evidence-load="' + esc(itemId) + '"'
     + disabled + '>' + esc(label) + '</button></div>';
 }
-function nodeContent(u, clamp){
+function nodeHintContent(u){
+  if (u.type === 'item'){
+    const hint = itemHintSummary(u.w);
+    return '<span class="t">' + esc(hint.identity) + '</span>'
+      + '<div>' + esc(hint.title) + '</div>'
+      + '<span class="k">state</span><span class="seg">' + esc(hint.summary) + '</span>';
+  }
+  const hint = agentHintSummary(u.a);
+  return '<span class="t">' + esc(hint.identity) + '</span>'
+    + '<span class="k">state</span><span class="seg">' + esc(hint.summary) + '</span>';
+}
+function nodeContent(u, compact){
+  if (compact) return nodeHintContent(u);
   if (u.type === 'item'){
     const w = u.w;
     const listFact = (fact, value) => esc(factListValue(value, w.evidence?.[fact]));
@@ -2859,7 +2872,7 @@ function nodeContent(u, clamp){
     const placementLine = u.unfinished ? workPlacementText(u.placement, byId) : '';
     const stageQualifier = u.unfinished ? OPEN_WORK_STAGE_QUALIFIER : '';
     return '<span class="t">' + esc(w.short || w.id) + '</span>'
-      + '<div' + (clamp ? ' class="clamp5"' : '') + '>' + esc(w.title || 'title unknown') + '</div>'
+      + '<div>' + esc(w.title || 'title unknown') + '</div>'
       + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · stage ' + stage + stageQualifier
       + ' · ' + merged + ' · ' + code + ' · ring ' + esc(ringLabels[ring]) + verdict + noHolder
       + (placementLine ? '<span class="k">placement</span><span class="seg">' + esc(placementLine) + '</span>' : '')
@@ -2872,8 +2885,8 @@ function nodeContent(u, clamp){
       + '<span class="k">evidence age and source</span>' + evidenceMarkup(w)
       + '<span class="k">turns</span><span class="seg">' + acts + '</span>'
       /* the pane has room, and this is the id the CLI will accept */
-      + (clamp ? '' : evidenceNotesMarkup(w.id)
-        + '<span class="k">id</span><span class="seg">' + esc(w.id) + '</span>');
+      + evidenceNotesMarkup(w.id)
+      + '<span class="k">id</span><span class="seg">' + esc(w.id) + '</span>';
   }
   const a = u.a;
   const openItems = ((DATA&&DATA.items)||[]).filter(w=>w.state==='open');

@@ -6,6 +6,7 @@ import {
   renderEvidenceMarkup, renderModelStatusElement, restoreViewerState, sceneSignature,
   resolveHoverNodes,
 } from '../web/viewer-semantics.mjs';
+import { agentHintSummary, itemHintSummary } from '../web/viewer-hints.mjs';
 
 /* Pointer and projected pixels share the canvas's CSS-pixel rectangle, even
    when it is offset from or smaller than the browser viewport. */
@@ -72,6 +73,57 @@ const rebuiltMeshes = new Map([
 assert.deepEqual(resolveHoverNodes(['i:wi-1', 'i:removed', 'a:agent-1'],
   key => rebuiltMeshes.get(key)),
 [rebuiltMeshes.get('i:wi-1'), rebuiltMeshes.get('a:agent-1')]);
+
+const knownAgentHint = agentHintSummary({
+  id: 'agent-1', name: 'Reviewer', archetype: 'reviewer-code', harness: 'codex', model: 'model-x',
+  retired: false, turn: 'run', evidence: {
+    identity: {status: 'known', freshness: 'live', complete: true},
+    turn: {status: 'known', freshness: 'live', complete: true},
+  },
+});
+assert.deepEqual(knownAgentHint, {
+  identity: 'Reviewer',
+  summary: 'state active · turn running',
+});
+const unconfirmedAgentHint = agentHintSummary({
+  id: 'agent-2', name: 'Builder', retired: false, turn: 'wait', evidence: {
+    identity: {status: 'known', freshness: 'unconfirmed', complete: true},
+    turn: {status: 'known', freshness: 'unconfirmed', complete: true},
+  },
+});
+assert.equal(unconfirmedAgentHint.summary,
+  'state unconfirmed · active · turn unconfirmed · queued');
+assert.equal(unconfirmedAgentHint.identity, 'unconfirmed · Builder');
+assert.equal(agentHintSummary({id: 'agent-3', retired: false, turn: 'idle'}).summary,
+  'state unknown · turn unknown');
+
+const knownItemHint = itemHintSummary({
+  id: 'wi-1234567890', short: 'wi-1234567', title: 'Repair the viewer', state: 'open',
+  stage: 4, ring: 'yellow', assignments: {open: 2},
+  evidence: {
+    identity: {status: 'known', freshness: 'live', complete: true},
+    stage: {status: 'known', freshness: 'live', complete: true},
+    assignments: {status: 'known', freshness: 'live', complete: true},
+    ring: {status: 'known', freshness: 'live', complete: true},
+  },
+});
+assert.deepEqual(knownItemHint, {
+  identity: 'wi-1234567', title: 'Repair the viewer',
+  summary: 'state open · stage 4 · open assignments 2 · merge not confirmed',
+});
+const partialItemHint = itemHintSummary({
+  id: 'wi-unknown', title: 'Unverified item', state: 'open', stage: 5, ring: 'yellow',
+  assignments: {open: 3},
+  evidence: {
+    identity: {status: 'known', freshness: 'live', complete: true},
+    stage: {status: 'known', freshness: 'unconfirmed', complete: true},
+    assignments: {status: 'known', freshness: 'stale', complete: false},
+    ring: {status: 'known', freshness: 'unconfirmed', complete: true,
+      unconfirmedSince: 1000},
+  },
+});
+assert.equal(partialItemHint.summary,
+  'state open · stage unconfirmed · 5 · open assignments unknown · unconfirmed · merge not confirmed');
 
 /* The same model and DOM seam used by the HUD must expose global state, ages,
    and the distinction between feed updates and bounded reconciliation. */
