@@ -318,6 +318,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { unknownItemFacts, unknownItemType, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
+import { agentHintSummary, itemHintSummary } from './viewer-hints.mjs';
 import { deterministicItemScatter, prepareWorkTierLayout,
          OPEN_WORK_LEGEND, OPEN_WORK_STAGE_QUALIFIER,
          workItemDisplay, workPlacementAltitude, workPlacementText } from './work-item-tiers.mjs';
@@ -2820,7 +2821,19 @@ function evidenceNotesMarkup(itemId){
     + '<button type="button" class="evidence-action" data-item-evidence-load="' + esc(itemId) + '"'
     + disabled + '>' + esc(label) + '</button></div>';
 }
-function nodeContent(u, clamp){
+function nodeHintContent(u){
+  if (u.type === 'item'){
+    const hint = itemHintSummary(u.w);
+    return '<span class="t">' + esc(hint.identity) + '</span>'
+      + '<div>' + esc(hint.title) + '</div>'
+      + '<span class="k">state</span><span class="seg">' + esc(hint.summary) + '</span>';
+  }
+  const hint = agentHintSummary(u.a);
+  return '<span class="t">' + esc(hint.identity) + '</span>'
+    + '<span class="k">state</span><span class="seg">' + esc(hint.summary) + '</span>';
+}
+function nodeContent(u, compact){
+  if (compact) return nodeHintContent(u);
   if (u.type === 'item'){
     const w = u.w;
     const listFact = (fact, value) => esc(factListValue(value, w.evidence?.[fact]));
