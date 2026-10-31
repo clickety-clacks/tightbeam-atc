@@ -154,6 +154,12 @@
     border-radius:5px; padding:6px 10px; pointer-events:none; max-width:100%;
     box-sizing:border-box; overflow-wrap:anywhere; }
   #inputavailability { color:#e0685c; }
+  #renderstatus { position:fixed; z-index:20; left:50%; top:50%; transform:translate(-50%,-50%);
+    display:none; max-width:min(90vw, 520px); padding:10px 14px; border:1px solid #3a3d42;
+    border-radius:6px; color:#d8d6d1; background:#101214ed; font-size:12px;
+    letter-spacing:.05em; text-align:center; pointer-events:none; }
+  #renderstatus.visible { display:block; }
+  body.light #renderstatus { color:#26323c; background:#f2eee2ed; border-color:#b8c7d9; }
   body.light { background:#f2eee2; }
   html:has(body.light) { background:#f2eee2; }
   body.light #hud { color:#5c6b78; background:#f2eee2e8; border-color:#c3cdd8; } body.light #hud b { color:#c23b22; }
@@ -310,6 +316,7 @@
 <svg id="leaders"></svg>
 <div id="hovercards"></div>
 <div id="spatialtargets" aria-label="Interactive nodes"></div>
+<div id="renderstatus" role="status" aria-live="polite"></div>
 <div id="detail"></div>
 <div id="tagbox">tag <span class="who"></span><input id="taginput" type="text"
   placeholder="type a note, enter to attach" maxlength="80"><div id="tagswatches"></div></div>
@@ -317,6 +324,7 @@
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
+import { areProgramsValid, createRenderLoop } from './render-loop.mjs';
 import { unknownItemFacts, unknownItemType, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
 import { agentHintSummary, itemHintSummary } from './viewer-hints.mjs';
 import { deterministicItemScatter, prepareWorkTierLayout,
@@ -391,9 +399,19 @@ const camera = new THREE.PerspectiveCamera(55, canvasBounds.width/canvasBounds.h
 camera.position.set(0, 34, 66);
 const renderer = new THREE.WebGLRenderer({antialias:true});
 document.body.appendChild(renderer.domElement);
+let renderLoop = null;
+let rendererRebuildPending = false;
+function requestRender(){ renderLoop?.invalidate(); }
+function setRenderStatus(message){
+  const status = document.getElementById('renderstatus');
+  status.textContent = message || '';
+  status.classList.toggle('visible', Boolean(message));
+}
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.maxPolarAngle = Math.PI*0.82;   /* the org hangs below the grid — let the camera dip under */
-let userMoved = false; controls.addEventListener('start', ()=>userMoved=true);
+let userMoved = false;
+controls.addEventListener('start', ()=>{ userMoved=true; requestRender(); });
+controls.addEventListener('change', requestRender);
 const amb = new THREE.AmbientLight(0xffffff, .55); scene.add(amb);
 const key = new THREE.DirectionalLight(0xffffff, 1.1); key.position.set(30,50,20); scene.add(key);
 const rim = new THREE.DirectionalLight(0xffffff, .5); rim.position.set(-30,20,-30); scene.add(rim);
@@ -1958,6 +1976,7 @@ async function apiPull(){
   try {
     const d = await apiFetch(`/pull?since=${apiSeq}`);
     if (typeof d?.seq !== 'number') throw new Error('bad shape');
+    let visualChanged = false;
     /* a new generation means the service restarted: sequence numbers and tag
        revisions from the old one mean nothing, so resynchronise rather than
        trying to apply a delta across the discontinuity */
@@ -1973,14 +1992,16 @@ async function apiPull(){
     if (!apiJoined){ apiJoined = true; apiSeq = d.seq; }
     else if (d.gap) apiSeq = d.seq;
     else for (const c of (d.commands || [])){
-      try { applyCommand(c); } catch(e){ /* one bad command must not wedge the loop */ }
+      try { applyCommand(c); visualChanged = true; } catch(e){ /* one bad command must not wedge the loop */ }
     }
     if (d.tagsRev !== apiTagsRev){
       apiTagsRev = d.tagsRev; tags = Array.isArray(d.tags) ? d.tags : []; buildTags();
+      visualChanged = true;
     }
     if (d.arrowsRev !== arrowsRev){
       arrowsRev = d.arrowsRev; arrows = Array.isArray(d.arrows) ? d.arrows : []; buildArrows();
       checkArrowFocusValidity();   /* the selected arrow may have just been deleted */
+      visualChanged = true;
     }
     if (d.searchesRev !== searchesRev){
       searchesRev = d.searchesRev;
@@ -1989,6 +2010,7 @@ async function apiPull(){
     }
     if (typeof d.seq === 'number' && d.seq >= apiSeq) apiSeq = d.seq;
     apiUp = true;
+    if (visualChanged) requestRender();
   } catch(e){ apiUp = false; }
 }
 
@@ -2118,6 +2140,7 @@ function applyCommand(c){
   } else if (c.kind === 'fit'){
     if (c.on) fitSelection(); else if (camMark) restoreCamera();
   }
+  requestRender();
 }
 
 /* ids arrive bare from the API; internally they carry a kind prefix. The kind
@@ -2276,6 +2299,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
     spawnWakes(); spawnMessages();
     renderModelStatus();
     resumePendingEvidenceReloads(model);
+    requestRender();
     return true;
   } catch (error){
     DATA = previous;
@@ -2308,6 +2332,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
       : !previous && restoredPrevious ? 'model rebuild failed; empty scene retained'
       : 'model rebuild failed; rendered scene may be incomplete';
     renderModelStatus();
+    requestRender();
     return false;
   }
 }
@@ -4278,8 +4303,58 @@ function heartbeat(t, period){
 }
 
 const clock = new THREE.Clock();
+function rendererProgramsValid(){
+  return areProgramsValid(renderer.getContext(), renderer.info.programs || []);
+}
+function rebuildRendererPrograms(){
+  if (renderer.getContext().isContextLost()) return false;
+  scene.traverse(object => {
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    materials.filter(Boolean).forEach(material => { material.needsUpdate = true; });
+  });
+  renderer.compile(scene, camera);
+  return rendererProgramsValid();
+}
+function prepareRenderer(){
+  if (renderer.getContext().isContextLost()){
+    setRenderStatus('Graphics context lost. Waiting for recovery…');
+    renderLoop?.pause();
+    return false;
+  }
+  if (rendererRebuildPending || !rendererProgramsValid()){
+    rendererRebuildPending = false;
+    try {
+      if (!rebuildRendererPrograms()) throw new Error('shader program is invalid');
+    } catch (error){
+      console.error('ATC: graphics programs could not be restored', error);
+      setRenderStatus('The map could not restore its graphics programs. Waiting for recovery…');
+      renderLoop?.pause();
+      return false;
+    }
+  }
+  return true;
+}
+function activeRenderInterval(controlsChanged){
+  const chromeMoving = Math.abs(chromeOff.x - chromeAim.x) > .25 ||
+                       Math.abs(chromeOff.y - chromeAim.y) > .25;
+  if (flight || chromeMoving || controlsChanged || hoverKeys.size || pulses.length || msgLines.length)
+    return 1000 / 60;
+
+  const agents = Object.values(agentMeshes);
+  const running = agents.some(mesh => mesh.userData.flash === 'run') ||
+    itemMeshes.some(mesh => mesh.userData.workingRing || mesh.children.some(child =>
+      child.userData.pulse || child.userData.act === 'run')) ||
+    linkGroup.children.some(link => link.userData.state === 'run');
+  if (running) return 1000 / 30;
+
+  const waiting = agents.some(mesh => mesh.userData.flash === 'wait') ||
+    itemMeshes.some(mesh => mesh.userData.waitFlash) ||
+    linkGroup.children.some(link => link.userData.state === 'wait');
+  return waiting ? 1000 : 0;
+}
 function tickFrame(){
-  requestAnimationFrame(tickFrame);
+  if (!prepareRenderer()) return 0;
+  if (fitQueued){ fitQueued = false; fitViewport(); }
   const t = clock.getElapsedTime();
   if (Math.abs(chromeOff.x - chromeAim.x) > .25 || Math.abs(chromeOff.y - chromeAim.y) > .25){
     /* .09 settles to within a few pixels across the flight's ~33 frames while
@@ -4497,7 +4572,7 @@ function tickFrame(){
     p.material.opacity = 1-p.userData.t;
   }
   positionTagBox();
-  controls.update();
+  const controlsChanged = controls.update();
   updateSpatialTargets();
   if (hoverLeaders.length) aimLeaders();   /* the nodes just moved */
   if (strobe){
@@ -4509,6 +4584,13 @@ function tickFrame(){
     });
   }
   renderer.render(scene, camera);
+  if (!rendererProgramsValid()){
+    setRenderStatus('The map paused because a graphics program is invalid. Waiting for recovery…');
+    renderLoop?.pause();
+    return 0;
+  }
+  setRenderStatus('');
+  return activeRenderInterval(controlsChanged);
 }
 /* CSS decides the canvas box; we only match the drawing buffer to it. Passing
    false to setSize leaves the CSS size alone, so the two cannot disagree. */
@@ -4531,7 +4613,7 @@ let fitQueued = false;
 function queueFit(){
   if (fitQueued) return;
   fitQueued = true;
-  requestAnimationFrame(() => { fitQueued = false; fitViewport(); });
+  requestRender();
 }
 addEventListener('resize', queueFit);
 addEventListener('orientationchange', queueFit);
@@ -4539,7 +4621,23 @@ window.visualViewport?.addEventListener('resize', queueFit);
 window.visualViewport?.addEventListener('scroll', queueFit);
 new ResizeObserver(queueFit).observe(document.body);
 fitViewport();
-tickFrame();
+renderLoop = createRenderLoop({
+  canvas: renderer.domElement,
+  draw: tickFrame,
+  isContextValid: () => !renderer.getContext().isContextLost(),
+  onContextLost(){
+    setRenderStatus('Graphics context lost. Waiting for recovery…');
+  },
+  onContextRestored(){
+    rendererRebuildPending = true;
+    setRenderStatus('Restoring the map…');
+    renderLoop?.resume();
+  },
+});
+for (const eventName of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'wheel',
+                         'click', 'dblclick', 'keydown', 'input', 'change', 'message']){
+  addEventListener(eventName, requestRender, {passive:true});
+}
 </script>
 </body>
 </html>
