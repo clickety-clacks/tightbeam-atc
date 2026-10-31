@@ -10,6 +10,91 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is required for render-loop tests")
 class RenderLoopTest(unittest.TestCase):
+    def test_context_generation_disposal_guard_skips_stale_gpu_cleanup(self):
+        module_url = json.dumps((ROOT / "web" / "context-generation.mjs").as_uri())
+        script = f'''import assert from 'node:assert/strict';
+import {{ createContextGeneration }} from {module_url};
+
+const contexts = createContextGeneration();
+contexts.advance();
+let deletes = 0;
+let staleReleases = 0;
+const staleHandler = contexts.guard(() => {{ deletes++; }}, () => {{ staleReleases++; }});
+contexts.advance();
+staleHandler({{}});
+assert.equal(deletes, 0, 'a prior context must not delete handles from its lost context');
+assert.equal(staleReleases, 1, 'a stale resource listener must release itself');
+staleHandler({{}});
+assert.equal(staleReleases, 1, 'a stale handler releases only once');
+
+const currentHandler = contexts.guard(() => {{ deletes++; }});
+currentHandler({{}});
+assert.equal(deletes, 1, 'resources from the active context still use normal cleanup');
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", script],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_orbit_controls_idle_updates_do_not_emit_change_for_an_in_range_target(self):
+        controls_url = json.dumps((ROOT / "web" / "addons" / "controls" / "OrbitControls.js").as_uri())
+        three_url = json.dumps((ROOT / "web" / "three.module.js").as_uri())
+        script = f'''import assert from 'node:assert/strict';
+import {{ mkdtemp, readFile, rm, writeFile }} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {{ pathToFileURL }} from 'node:url';
+import {{ PerspectiveCamera }} from {three_url};
+
+const temporary = await mkdtemp(path.join(os.tmpdir(), 'atc-orbit-controls-'));
+try {{
+  const controlsSource = await readFile(new URL({controls_url}), 'utf8');
+  const rewritten = controlsSource.replace("from 'three';", `from ${{JSON.stringify(new URL({three_url}).href)}};`);
+  assert.notEqual(rewritten, controlsSource, 'the controls module should use the checked-in Three.js module');
+  const modulePath = path.join(temporary, 'OrbitControls.mjs');
+  await writeFile(modulePath, rewritten);
+  const {{ OrbitControls }} = await import(pathToFileURL(modulePath));
+  const camera = new PerspectiveCamera(55, 1, 0.1, 500);
+  camera.position.set(38.125, 42.375, 67.625);
+  const element = {{style: {{}}, addEventListener() {{}}, removeEventListener() {{}}}};
+  const controls = new OrbitControls(camera, element);
+  controls.enableDamping = true;
+  controls.target.set(7.12345, 2.23456, -4.56789);
+  controls.cursor.set(1.23456, -0.56789, 2.34567);
+  camera.lookAt(controls.target);
+  controls.update();
+  const stableTarget = controls.target.clone();
+  let changes = 0;
+  controls.addEventListener('change', () => {{ changes++; }});
+  for (let i = 0; i < 120; i++)
+    assert.equal(controls.update(), false, 'an unchanged in-range camera should stay idle');
+  assert.ok(controls.target.equals(stableTarget), 'an in-range target must remain bit-for-bit stable');
+  assert.equal(changes, 0, 'idle control updates must not invalidate rendering');
+  controls.dispose();
+
+  const limitedCamera = new PerspectiveCamera(55, 1, 0.1, 500);
+  limitedCamera.position.set(20, 4, 0);
+  const limited = new OrbitControls(limitedCamera, element);
+  limited.cursor.set(1, 2, 3);
+  limited.target.set(20, 2, 3);
+  limited.maxTargetRadius = 5;
+  limited.update();
+  assert.ok(Math.abs(limited.target.distanceTo(limited.cursor) - 5) < 1e-10,
+    'out-of-range targets must still be clamped to the configured radius');
+  limited.dispose();
+}} finally {{
+  await rm(temporary, {{recursive:true, force:true}});
+}}
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", script],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_idle_hidden_context_loss_and_restore_gates(self):
         module_url = json.dumps((ROOT / "web" / "render-loop.mjs").as_uri())
         script = f'''import assert from 'node:assert/strict';

@@ -3,6 +3,8 @@
  * Copyright 2010-2023 Three.js Authors
  * SPDX-License-Identifier: MIT
  */
+import { createContextGeneration } from './context-generation.mjs';
+
 const REVISION = '158';
 
 const MOUSE = { LEFT: 0, MIDDLE: 1, RIGHT: 2, ROTATE: 0, DOLLY: 1, PAN: 2 };
@@ -17247,12 +17249,13 @@ function WebGLExtensions( gl ) {
 
 }
 
-function WebGLGeometries( gl, attributes, info, bindingStates ) {
+function WebGLGeometries( gl, attributes, info, bindingStates, contextGeneration ) {
 
 	const geometries = {};
 	const wireframeAttributes = new WeakMap();
 
-	function onGeometryDispose( event ) {
+	let onGeometryDispose;
+	onGeometryDispose = contextGeneration.guard( event => {
 
 		const geometry = event.target;
 
@@ -17305,7 +17308,11 @@ function WebGLGeometries( gl, attributes, info, bindingStates ) {
 
 		info.memory.geometries --;
 
-	}
+	}, event => {
+		const geometry = event.target;
+		geometry.removeEventListener( 'dispose', onGeometryDispose );
+		delete geometries[ geometry.id ];
+	} );
 
 	function get( object, geometry ) {
 
@@ -23692,7 +23699,7 @@ function WebGLState( gl, extensions, capabilities ) {
 
 }
 
-function WebGLTextures( _gl, extensions, state, properties, capabilities, utils, info ) {
+function WebGLTextures( _gl, extensions, state, properties, capabilities, utils, info, contextGeneration ) {
 
 	const isWebGL2 = capabilities.isWebGL2;
 	const maxTextures = capabilities.maxTextures;
@@ -23931,7 +23938,8 @@ function WebGLTextures( _gl, extensions, state, properties, capabilities, utils,
 
 	//
 
-	function onTextureDispose( event ) {
+	let onTextureDispose;
+	onTextureDispose = contextGeneration.guard( event => {
 
 		const texture = event.target;
 
@@ -23945,9 +23953,12 @@ function WebGLTextures( _gl, extensions, state, properties, capabilities, utils,
 
 		}
 
-	}
+	}, event => {
+		event.target.removeEventListener( 'dispose', onTextureDispose );
+	} );
 
-	function onRenderTargetDispose( event ) {
+	let onRenderTargetDispose;
+	onRenderTargetDispose = contextGeneration.guard( event => {
 
 		const renderTarget = event.target;
 
@@ -23955,7 +23966,9 @@ function WebGLTextures( _gl, extensions, state, properties, capabilities, utils,
 
 		deallocateRenderTarget( renderTarget );
 
-	}
+	}, event => {
+		event.target.removeEventListener( 'dispose', onRenderTargetDispose );
+	} );
 
 	//
 
@@ -28472,8 +28485,10 @@ class WebGLRenderer {
 		let background, morphtargets, bufferRenderer, indexedBufferRenderer;
 
 		let utils, bindingStates, uniformsGroups;
+		const contextGeneration = createContextGeneration();
 
 		function initGLContext() {
+			contextGeneration.advance();
 
 			extensions = new WebGLExtensions( _gl );
 
@@ -28487,12 +28502,12 @@ class WebGLRenderer {
 
 			info = new WebGLInfo( _gl );
 			properties = new WebGLProperties();
-			textures = new WebGLTextures( _gl, extensions, state, properties, capabilities, utils, info );
+			textures = new WebGLTextures( _gl, extensions, state, properties, capabilities, utils, info, contextGeneration );
 			cubemaps = new WebGLCubeMaps( _this );
 			cubeuvmaps = new WebGLCubeUVMaps( _this );
 			attributes = new WebGLAttributes( _gl, capabilities );
 			bindingStates = new WebGLBindingStates( _gl, extensions, attributes, capabilities );
-			geometries = new WebGLGeometries( _gl, attributes, info, bindingStates );
+			geometries = new WebGLGeometries( _gl, attributes, info, bindingStates, contextGeneration );
 			objects = new WebGLObjects( _gl, geometries, attributes, info );
 			morphtargets = new WebGLMorphtargets( _gl, capabilities, textures );
 			clipping = new WebGLClipping( properties );

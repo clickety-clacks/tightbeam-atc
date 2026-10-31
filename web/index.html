@@ -4331,7 +4331,10 @@ function activeRenderInterval(controlsChanged){
     pulses:pulses.length > 0, messages:msgLines.length > 0});
 }
 function tickFrame(){
-  if (!prepareRenderer()) return 0;
+  if (renderer.getContext().isContextLost()){
+    renderLoop?.pause();
+    return 0;
+  }
   if (deferredSceneUpdates.pending){
     try {
       deferredSceneUpdates.flush();
@@ -4364,6 +4367,7 @@ function tickFrame(){
       return 0;
     }
   }
+  if (!prepareRenderer()) return 0;
   if (fitQueued){ fitQueued = false; fitViewport(); }
   const t = clock.getElapsedTime();
   if (Math.abs(chromeOff.x - chromeAim.x) > .25 || Math.abs(chromeOff.y - chromeAim.y) > .25){
