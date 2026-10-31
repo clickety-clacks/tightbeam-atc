@@ -32,19 +32,14 @@ draw labelled arrows between them.
 - **On the floor, a ring says what happened.** Black means merge proven by Git. Green means an explicit ready-to-merge verdict.
   Light gray means durably non-code. Yellow means code with unknown merge status.
   A floating item has no merge ring; floor position alone does not prove a merge.
-- **An agent taking a turn wears a rippling ring** — one sine travelling round
-  a circle, drawn three times at the same frequency and amplitude with the
-  period and radius offset slightly, in red, green and blue. Where they coincide
-  they sum back to white; where they pull apart you see the fringes. It is
-  chromatic aberration on purpose, and it reads as vibration rather than as
-  three rings. A queued turn keeps a slow flash instead: waiting should not look
-  like effort.
+- **An agent taking a turn wears a colored ring.** A queued turn has a steady
+  visible glow, so waiting does not look like effort.
 - **A line from an item to an agent is turn state.** Green while a turn is
   executing, yellow while one is queued and has not started, faint ink for an
   open card with no turn at all.
-- **A line between agents is an obligation**, carrying a white pulse that runs
-  toward whoever owes the turn. Yellow while it waits in their queue, green once
-  it is running.
+- **A line between agents is an obligation**, with a steady brightness gradient
+  pointing toward whoever owes the turn. Yellow while it waits in their queue,
+  green once it is running.
 - **A travelling dot is a wake firing** — one agent's prompt reaching another.
   **A strobing line is a message**: substrate messages rise from below, operator
   messages descend from above.

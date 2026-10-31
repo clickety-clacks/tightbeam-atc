@@ -317,6 +317,8 @@
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
+import { areProgramsValid, createRenderLoop, renderInterval,
+         scheduleVisualChange } from './render-loop.mjs';
 import { unknownItemFacts, unknownItemType, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
 import { agentHintSummary, itemHintSummary } from './viewer-hints.mjs';
 import { deterministicItemScatter, prepareWorkTierLayout,
@@ -337,7 +339,7 @@ import { LineSegmentsGeometry } from './addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from './addons/lines/LineMaterial.js';
 const edgeMats = new Set();
 let searchTimer = null;      /* declared here so setFilter, above the box, can cancel it */
-const TETHER_SEGS = 40;   /* subdivisions per tether, for the traveling wave */
+const TETHER_SEGS = 40;   /* subdivisions keep the directional color ramp smooth */
 
 const AGENT_R = .8;
 
@@ -391,9 +393,14 @@ const camera = new THREE.PerspectiveCamera(55, canvasBounds.width/canvasBounds.h
 camera.position.set(0, 34, 66);
 const renderer = new THREE.WebGLRenderer({antialias:true});
 document.body.appendChild(renderer.domElement);
+let renderLoop = null;
+let rendererRebuildPending = false;
+function requestRender(){ renderLoop?.invalidate(); }
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.maxPolarAngle = Math.PI*0.82;   /* the org hangs below the grid — let the camera dip under */
-let userMoved = false; controls.addEventListener('start', ()=>userMoved=true);
+let userMoved = false;
+controls.addEventListener('start', ()=>{ userMoved=true; requestRender(); });
+controls.addEventListener('change', requestRender);
 const amb = new THREE.AmbientLight(0xffffff, .55); scene.add(amb);
 const key = new THREE.DirectionalLight(0xffffff, 1.1); key.position.set(30,50,20); scene.add(key);
 const rim = new THREE.DirectionalLight(0xffffff, .5); rim.position.set(-30,20,-30); scene.add(rim);
@@ -534,13 +541,13 @@ let hiAgents = null, hiItems = null, hiRelations = null;
 const DIM = 0.2;
 const ITEM_DIM = 0.1;
 const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0);
-/* ambient tabletop orbit — parameterized so it can resume from any framing
-   the user has dragged the camera into, not just the canonical home view */
+/* Camera orbit parameters are retained across view transitions, but the
+   resting view does not rotate without user interaction. */
 let orbitR = 66, orbitH = 36, orbitUserOwned = false;
 const orbitTgt = HOME_TGT.clone();
-/* The resting turntable centres the live org and includes the cloud and
-   perimeter tiers. Confirmed parked items stay off to the side; unknown
-   custody remains in the population instead of being treated as an orphan. */
+/* The resting camera centres the live org and includes the cloud and perimeter
+   tiers. Confirmed parked items stay off to the side; unknown custody remains
+   in the population instead of being treated as an orphan. */
 const _ht = new THREE.Vector3();
 function homeTarget(){
   const c = new THREE.Vector3();
@@ -585,6 +592,7 @@ function restingPose(ang){
 function flyTo(pos, target, after){
   flight = {p0:camera.position.clone(), p1:pos.clone(),
             t0:controls.target.clone(), t1:target.clone(), k:0, after};
+  requestRender();
 }
 /* End a superseded camera transaction at the pose currently on screen. The
    orbit adopts that exact pose, so canceling a flight never jumps to either
@@ -1102,8 +1110,7 @@ function frameTo(pts, center, e, {margin = 1.15, floor = 6} = {}){
 
 /* The chrome is asymmetric, so the middle of the canvas is not the middle of
    what a viewer can actually see. Displace the projection by the difference:
-   the camera keeps looking straight at its subject — so OrbitControls and the
-   ambient spin both turn around that subject — while the image lands in the
+   the camera keeps looking straight at its subject while the image lands in the
    space the bar, the legend and the detail pane leave free. */
 const chromeOff = {x: 0, y: 0}, chromeAim = {x: 0, y: 0};
 function commitChromeOffset(){
@@ -1493,7 +1500,7 @@ function renderLegend(){
     `<br><span style="color:${hx(T.tetherRun)}">━ green: turn executing now</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherSched)}">━ faint: holds an open card, no turn</span>` +
     `<span style="margin-left:12px;color:${hx(T.tetherWait)}">━ yellow: turn queued, not started</span>` +
-    `<span style="margin-left:12px">hedron flashing = turn waiting · working ring = turn running (agents and work items)</span>` +
+    `<span style="margin-left:12px">steady hexagon glow = turn waiting · working ring = turn running (agents and work items)</span>` +
     `<br><span style="color:${hx(T.liveHot)}">● blue agent = acted just now</span>` +
     `<span style="margin-left:8px;color:${hx(T.liveCold)}">● grey = idle an hour or more</span>` +
     `<span style="margin-left:10px">discs hang below the grid · ${OPEN_WORK_LEGEND} · floor solids = landed (never open work)</span>` +
@@ -1614,25 +1621,33 @@ function buildLinks(links){
     if (!APOS[l.from] || !APOS[l.to]) return;
     if (!byId[l.from] || !byId[l.to]) return;
     const col = l.state === 'run' ? T.tetherRun : T.tetherWait;
+    const color = new THREE.Color(col);
+    const A = APOS[l.from], B = APOS[l.to];
+    const pos = new Float32Array(TETHER_SEGS*6);
+    const rgb = new Float32Array(TETHER_SEGS*6);
+    for (let i=0; i<TETHER_SEGS; i++){
+      const f0 = i/TETHER_SEGS, f1 = (i+1)/TETHER_SEGS, k = i*6;
+      pos[k] = A.x + (B.x-A.x)*f0; pos[k+1] = A.y + (B.y-A.y)*f0 + .25; pos[k+2] = A.z + (B.z-A.z)*f0;
+      pos[k+3] = A.x + (B.x-A.x)*f1; pos[k+4] = A.y + (B.y-A.y)*f1 + .25; pos[k+5] = A.z + (B.z-A.z)*f1;
+      for (let e=0; e<2; e++){
+        const progress = e ? f1 : f0;
+        const bright = progress * progress;
+        const j = k + e*3;
+        rgb[j] = color.r + (1-color.r)*bright;
+        rgb[j+1] = color.g + (1-color.g)*bright;
+        rgb[j+2] = color.b + (1-color.b)*bright;
+      }
+    }
     const lm = new LineMaterial({color:0xffffff, linewidth:2.6, transparent:true,
                                  opacity:.5, vertexColors:true});
     lm.resolution.set(canvasBounds.width, canvasBounds.height); edgeMats.add(lm);
-    const lg = new LineSegmentsGeometry()
-      .setPositions(new Array(TETHER_SEGS*6).fill(0))
-      .setColors(new Array(TETHER_SEGS*6).fill(0));
+    const lg = new LineSegmentsGeometry().setPositions(pos).setColors(rgb);
     const seg = new LineSegments2(lg, lm);
     seg.frustumCulled = false;
-    seg.userData = {from:l.from, to:l.to, state:l.state, mat:lm, geo:lg,
-                    col:new THREE.Color(col), head:Math.random(),
-                    pos:new Float32Array(TETHER_SEGS*6),
-                    rgb:new Float32Array(TETHER_SEGS*6)};
+    seg.userData = {from:l.from, to:l.to, state:l.state, mat:lm, geo:lg};
     linkGroup.add(seg);
   });
 }
-
-/* accumulated rotation, kept across rebuilds so the spin does not snap back
-   to zero when the service model changes */
-const spin = new Map();
 
 function buildItems(items, tierLayout=null){
   const layout = tierLayout || prepareWorkTierLayout(items, Object.values(byId));
@@ -1672,8 +1687,7 @@ function buildItems(items, tierLayout=null){
     const mesh = diagramMesh(igeo, col);
     mesh.position.copy(pos);
     Object.assign(mesh.userData, {type:'item', w, phase:sc.phase, closed, landed, unfinished, placement,
-      stageUnknown:stage === null, holdersUnknown:!holdersKnown, baseY: landed? null : pos.y});
-    mesh.rotation.y = spin.get(w.id) || 0;
+      stageUnknown:stage === null, holdersUnknown:!holdersKnown});
     itemGroup.add(mesh); itemMeshes.push(mesh);
     /* Ring color is an explicit service verdict. Do not infer it from code,
        merge lookups, or ready-to-merge fields in the browser. */
@@ -1783,12 +1797,12 @@ function spawnWakes(){
     const k = w.id || (w.from+'>'+w.to);
     if (seenWakes.has(k)) return;
     seenWakes.set(k, Date.now());
-    setTimeout(()=>{
+    scheduleVisualChange(()=>{
       if (document.hidden || !APOS[w.from] || !APOS[w.to]) return;
       const pu = new THREE.Mesh(pulseGeo, new THREE.MeshBasicMaterial({color:T.pulse, transparent:true}));
       pu.userData={curve:msgCurve({from:w.from, to:w.to, kind:'agent'}), t:0};
       scene.add(pu); pulses.push(pu);
-    }, Math.random()*(firstBatch ? 20000 : 1500));
+    }, Math.random()*(firstBatch ? 20000 : 1500), requestRender);
   });
 }
 
@@ -1800,7 +1814,7 @@ function spawnMessages(){
     const k = m.id || ((m.from||m.kind)+'>'+m.to);
     if (seenMsgs.has(k)) return;
     seenMsgs.set(k, Date.now());
-    setTimeout(()=>{
+    scheduleVisualChange(()=>{
       if (document.hidden || !APOS[m.to]) return;
       if (m.kind === 'agent' && !APOS[m.from]) return;
       const col = m.kind==='substrate' ? T.pulseSub : m.kind==='user' ? T.pulseUser : T.pulse;
@@ -1813,7 +1827,7 @@ function spawnMessages(){
                        peak: m.kind==='substrate' ? .45 : .85,
                        phase: Math.random()*6.28};
       scene.add(line); msgLines.push(line);
-    }, Math.random()*(firstBatch ? 20000 : 1500));
+    }, Math.random()*(firstBatch ? 20000 : 1500), requestRender);
   });
   firstBatch = false;
 }
@@ -1861,9 +1875,8 @@ function showTagBox(){
   positionTagBox();
 }
 function hideTagBox(){ tagBox.style.display = 'none'; tagInput.blur(); }
-/* The composer sits just under the node it writes to, and tracks it — the node
-   keeps bobbing and the camera keeps turning, so a fixed corner would drift
-   away from its subject. */
+/* The composer sits just under the node it writes to and tracks camera changes,
+   so a fixed corner would drift away from its subject. */
 const _tv = new THREE.Vector3();
 function positionTagBox(){
   if (tagBox.style.display !== 'block') return;
@@ -1958,6 +1971,7 @@ async function apiPull(){
   try {
     const d = await apiFetch(`/pull?since=${apiSeq}`);
     if (typeof d?.seq !== 'number') throw new Error('bad shape');
+    let visualChanged = false;
     /* a new generation means the service restarted: sequence numbers and tag
        revisions from the old one mean nothing, so resynchronise rather than
        trying to apply a delta across the discontinuity */
@@ -1973,14 +1987,16 @@ async function apiPull(){
     if (!apiJoined){ apiJoined = true; apiSeq = d.seq; }
     else if (d.gap) apiSeq = d.seq;
     else for (const c of (d.commands || [])){
-      try { applyCommand(c); } catch(e){ /* one bad command must not wedge the loop */ }
+      try { applyCommand(c); visualChanged = true; } catch(e){ /* one bad command must not wedge the loop */ }
     }
     if (d.tagsRev !== apiTagsRev){
       apiTagsRev = d.tagsRev; tags = Array.isArray(d.tags) ? d.tags : []; buildTags();
+      visualChanged = true;
     }
     if (d.arrowsRev !== arrowsRev){
       arrowsRev = d.arrowsRev; arrows = Array.isArray(d.arrows) ? d.arrows : []; buildArrows();
       checkArrowFocusValidity();   /* the selected arrow may have just been deleted */
+      visualChanged = true;
     }
     if (d.searchesRev !== searchesRev){
       searchesRev = d.searchesRev;
@@ -1989,6 +2005,7 @@ async function apiPull(){
     }
     if (typeof d.seq === 'number' && d.seq >= apiSeq) apiSeq = d.seq;
     apiUp = true;
+    if (visualChanged) requestRender();
   } catch(e){ apiUp = false; }
 }
 
@@ -2118,6 +2135,7 @@ function applyCommand(c){
   } else if (c.kind === 'fit'){
     if (c.on) fitSelection(); else if (camMark) restoreCamera();
   }
+  requestRender();
 }
 
 /* ids arrive bare from the API; internally they carry a kind prefix. The kind
@@ -2276,6 +2294,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
     spawnWakes(); spawnMessages();
     renderModelStatus();
     resumePendingEvidenceReloads(model);
+    requestRender();
     return true;
   } catch (error){
     DATA = previous;
@@ -2308,6 +2327,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
       : !previous && restoredPrevious ? 'model rebuild failed; empty scene retained'
       : 'model rebuild failed; rendered scene may be incomplete';
     renderModelStatus();
+    requestRender();
     return false;
   }
 }
@@ -2505,9 +2525,8 @@ function touchHoldKeys(e){
 }
 function startTouchHold(e){
   if (e.pointerType !== 'touch') return;
-  /* Nodes keep bobbing during the 450 ms. Capture what the finger actually
-     pressed, then re-resolve those keys after a feed rebuild instead of
-     raycasting a later frame and losing a node that moved away underneath. */
+  /* Capture what the finger actually pressed, then re-resolve those keys after
+     a feed rebuild instead of raycasting against a changed scene. */
   const hold = {id:e.pointerId, x:e.clientX, y:e.clientY, shown:false,
                 keys:touchHoldKeys(e)};
   hold.timer = setTimeout(() => {
@@ -2553,7 +2572,7 @@ function activateHit(hit){
   } else {
     camMark = null;
     clearFocus();
-    /* user had hand-rotated: resume the tabletop spin exactly where they left it */
+    /* preserve the hand-rotated camera pose as the new resting view */
     const d = camera.position.clone().sub(controls.target);
     orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
     orbitAngle = Math.atan2(d.x, d.z);
@@ -3044,13 +3063,11 @@ function pickHoverNodes(ev){
   return singleHoverNodes(out);
 }
 
-/* what the pointer is over right now — the frame loop strobes these toward
-   white, so the connection between a card and its node is visible in the scene
-   as well as along the leader */
+/* what the pointer is over right now — a steady highlight connects each card
+   to its node in the scene as well as along the leader */
 const hoverKeys = new Set();
-/* Nodes bob, so a leader aimed once is wrong a frame later — it has to be
-   re-aimed every frame at the node's current position. The cards stay put:
-   text that jitters is unreadable, and only the line has to track. */
+/* Leaders are re-aimed while the camera moves. The cards stay put: text that
+   jitters is unreadable, and only the line has to track. */
 const hoverLeaders = [];
 const HOVER_HOLD = 34;   /* px: how far a hovered node may drift and keep its card */
 const HOVER_WHITE = new THREE.Color(0xffffff);
@@ -3072,6 +3089,7 @@ function clearHover(){
   if (hoverLayer.childElementCount) hoverLayer.textContent = '';
   if (leaderSvg.childElementCount) leaderSvg.textContent = '';
   tip.style.display = 'none';
+  requestRender();
 }
 
 function showHover(nodes, ev, restoredScroll = null){
@@ -3079,6 +3097,7 @@ function showHover(nodes, ev, restoredScroll = null){
   hoverLayer.textContent = ''; leaderSvg.textContent = '';
   hoverKeys.clear(); hoverLeaders.length = 0;
   nodes.forEach(n => { const k = selKey(n); if (k) hoverKeys.add(k); });
+  requestRender();
   if (!nodes.length) return;
 
   const {left, top, width:W, height:H} = canvasBounds;
@@ -3205,10 +3224,8 @@ addEventListener('pointermove', e => {
   if (!onCanvas(e)){ clearTimeout(hoverGrace); hoverGrace = null; return clearHover(); }
   const nodes = pickHoverNodes(e);
   if (!nodes.length){
-    /* Nodes drift under a stationary pointer, so an empty pick usually means
-       the thing bobbed off the cursor rather than that the pointer left it.
-       Keep whatever is already hovered while it stays near — a card set that
-       tears down and rebuilds every time an item breathes is unusable — and
+    /* Keep the current hover while its node stays near the pointer — a card set that
+       tears down and rebuilds after every small pointer movement is unusable — and
        only give up once the pointer is genuinely somewhere else. */
     const held = hoverLeaders.filter(L => {
       const q = screenOf(L.node);
@@ -3221,9 +3238,8 @@ addEventListener('pointermove', e => {
   }
   clearTimeout(hoverGrace); hoverGrace = null;
   /* Lay the cards out only when the SET under the pointer changes. Rebuilding
-     on every pointer event re-anchored them to the cluster's centre, which
-     bobs with the nodes — so the smallest hand movement shuffled the cards
-     around. The line tracks the animation; the cards hold still. */
+     on every pointer event re-anchors them to the cluster's centre, so the
+     smallest hand movement would shuffle the cards around. */
   const keys = nodes.map(selKey).filter(Boolean);
   if (keys.length === hoverKeys.size && keys.every(k => hoverKeys.has(k))) return;
   showHover(nodes, e);
@@ -3478,10 +3494,8 @@ function arrowCurve(a, b, rank){
   mid.addScaledVector(ARROW_UP, len * .17 + 1.1)
      .addScaledVector(side, ((rank % 2 ? 1 : -1) * Math.ceil(rank / 2)) * len * .13);
   const curve = new THREE.QuadraticBezierCurve3(a.clone(), mid, b.clone());
-  /* Arc-length sampling is what makes the trim a real distance, and the table
-     behind it is rebuilt every time the curve is — which is every frame, since
-     the nodes bob. 200 divisions (the default) is precision nobody can see on a
-     gentle arc; 24 is indistinguishable and an order of magnitude cheaper. */
+  /* Arc-length sampling makes the trim a real distance. A gentle arc needs far
+     fewer divisions than the default to look smooth. */
   curve.arcLengthDivisions = 24;
   return curve;
 }
@@ -3595,9 +3609,7 @@ function buildArrows(){
   });
 }
 
-/* Positions everything that hangs off the curve. Split out because the nodes
-   bob, so the curve has to be re-laid every few frames, not only when the set
-   of arrows changes. */
+/* Position everything that hangs off an arrow curve. */
 function placeArrow(g, curve){
   const span = arrowSpan(curve);
   const len = curve.getLength() * (span.u1 - span.u0);
@@ -3768,7 +3780,9 @@ function selectionChanged(){
   if (!view.fit) return;
   if (!view.selection.size) return;        /* the last one out is handled above */
   clearTimeout(refitTimer);
-  refitTimer = setTimeout(() => { if (view.fit && view.selection.size) refitToSelection(); }, 260);
+  refitTimer = scheduleVisualChange(() => {
+    if (view.fit && view.selection.size) refitToSelection();
+  }, 260, requestRender);
 }
 
 function refitToSelection(){
@@ -3800,8 +3814,8 @@ function setInputMode(mode){
     ?.setAttribute('aria-pressed', String(brushing));
   renderStack();                     /* the strip names the input mode too */
 }
-/* Unconditional hard reset of the focus transaction: no layer, camera released
-   to ambient orbit. Goes through focusLayer/projectFocus like every other
+/* Unconditional hard reset of the focus transaction: no layer, camera returned
+   to the resting view. Goes through focusLayer/projectFocus like every other
    focus write. endFocus() is the transactional exit that also performs a
    policy camera action; clearFocus() is the plain reset used where there is
    provably nothing to pop. */
@@ -3811,7 +3825,7 @@ function clearFocus(){
   assertFocusInvariant();
   if (typeof hideTagBox === 'function') hideTagBox();
   if (typeof detailEl !== 'undefined') detailEl.style.display = 'none';
-  view.framing = 'none';                 /* releases the camera to ambient orbit */
+  view.framing = 'none';                 /* releases the camera to the resting view */
   applyView();                           /* focus drives dimming: re-derive now */
 }
 function setRadius(px){
@@ -3860,11 +3874,9 @@ addEventListener('lostpointercapture', e => {
   finishBrush(e.pointerId, true);
 }, true);
 
-/* f/space is a round trip: the first press remembers exactly where the camera
-   was — position, target, and the ambient orbit's angle, radius, height and
-   centre — then flies to the selection. The next press restores all of it, so
-   you land back in the same zoom, pan and rotation you left, still turning if
-   it was turning. */
+/* f/space is a round trip: the first press remembers the camera pose and its
+   framing center, then flies to the selection. The next press restores the
+   same zoom, pan and rotation. */
 let camMark = null;
 /* the camera move a click (or an API focus) performs on a node */
 function flyToNode(o){
@@ -3891,9 +3903,7 @@ function flyToNode(o){
     const e = approachDir(pt, .30);
     ({camPos, target} = frameTo(pts, pt, e, {margin: 2.0, floor: 7}));
   }
-  /* Hand the ambient spin the same centre the framing used, the way the filter
-     and selection framings do — otherwise a focused view either sat frozen or
-     resumed carouselling around the org's root rather than the subject. */
+  /* Retain the selected framing as the navigation center for later restores. */
   flyTo(camPos, target.clone(), () => {
     const d = camPos.clone().sub(target);
     orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
@@ -4059,8 +4069,8 @@ function checkArrowFocusValidity(){
 }
 
 /* One camera pose: everything a flight needs to put the view back exactly —
-   position, target, and the ambient orbit's angle, radius, height and centre,
-   plus the framing bookkeeping. Used by BOTH the fit bookmark (camMark) and the
+   position, target, azimuth and framing center, plus the framing bookkeeping.
+   Used by BOTH the fit bookmark (camMark) and the
    focus transaction's lowerPose, which stay separate transactions. */
 function captureCamera(){
   return {
@@ -4135,8 +4145,7 @@ function fitSelection(){
      actually be lit, then re-derive so the rest of the org ghosts */
   view.fit = true;
   const {camPos, target} = frameTo(pts, c, e);
-  /* hand the ambient orbit a new centre so it carousels around the selection
-     once the flight lands, instead of resuming around the org's root */
+  /* retain the selected framing as the navigation center for later restores */
   markCamera();                                /* first press: remember here */
   flyTo(camPos, target.clone(), () => {
     const d = camPos.clone().sub(target);
@@ -4151,29 +4160,18 @@ function fitSelection(){
 }
 
 /* ---------- animate ---------- */
-/* ---------- the working ring ----------
-   Same frequency, same amplitude, the period offset between the three. */
+/* ---------- the working ring ---------- */
 const RING_SEGS = 90;          /* points around the loop */
-/* The Siri look: several sines superimposed along a line, each its own colour
-   and translucent, crossing one another as they go. Wrapped round a circle
-   here. Each ring carries its OWN set of modes rather than the same shape at a
-   different radius — that is what makes them cross and interleave instead of
-   nesting like contour lines. The rates do not divide into each other, so the
-   composite never repeats. */
+/* Several colored contours cross and interleave around the ring. */
 const RING_WAVES = [
-  { rot: 0,   modes: [{k:5, a:1.00, r:1.00}, {k:3, a:.60, r:.71}, {k:8, a:.30, r:1.33}] },
-  { rot: .70, modes: [{k:4, a:.95, r:.83}, {k:7, a:.50, r:1.19}, {k:2, a:.45, r:.61}] },
-  { rot: 1.4, modes: [{k:6, a:.90, r:1.11}, {k:3, a:.55, r:.67}, {k:9, a:.28, r:1.53}] },
+  { rot: 0,   modes: [{k:5, a:1.00}, {k:3, a:.60}, {k:8, a:.30}] },
+  { rot: .70, modes: [{k:4, a:.95}, {k:7, a:.50}, {k:2, a:.45}] },
+  { rot: 1.4, modes: [{k:6, a:.90}, {k:3, a:.55}, {k:9, a:.28}] },
 ];
-const RING_NORM = 1 / 1.55;    /* keep the summed swing near RING_AMP */
+const RING_NORM = 1 / 1.55;
 
-const RING_AMP = .105;         /* how far the edge travels, as a fraction of R */
-const RING_SPEED = 2.1;        /* how fast it oscillates, in place */
-/* The aberration is radial as well as temporal. A phase offset alone moves a
-   point by a fraction of the amplitude, which is sub-pixel on a small disc, so
-   the three drew on top of each other and summed to plain white everywhere. A
-   lens splits its components across the radius; so does this. */
-const RING_SPLIT = [0, .045, .09];    /* period offset, in turns */
+const RING_AMP = .105;         /* fixed contour depth as a fraction of R */
+const RING_SPLIT = [0, .045, .09];    /* fixed radial contour offset */
 /* nearly the same radius: they should overlap and cross, not sit in rings */
 const RING_SPREAD = [1, 1.012, 1.024];
 
@@ -4211,24 +4209,26 @@ function ensureRings(m){
    from the same scratch array all drew whichever was computed last — three
    identical loops stacked on each other, which is exactly why the split was
    invisible and the result was a solid white line. */
-function updateRings(m, t){
+function initializeRings(m){
+  if (m.userData.ringsInitialized){
+    const dim = m.userData.dim ?? 1;
+    m.userData.rings.forEach(seg => {
+      seg.material.opacity = .1 * (dim < .999 ? .5 : 1);
+      if (m.userData.workingRing) seg.lookAt(camera.position);
+      seg.visible = m.userData.workingRing ? layerState.workItems : layerState.agents;
+    });
+    return;
+  }
   const R = m.userData.ringR ??
     (m.userData.ringR = (m.geometry?.parameters?.radius || .8) * 1.25);
   const rings = ensureRings(m);
   const dim = m.userData.dim ?? 1;
   rings.forEach((seg, i) => {
     const buf = seg.userData.buf ??= new Float32Array(RING_SEGS * 6);
-    /* A STANDING wave: the lobes stay where they are and swell and invert in
-       place, rather than the pattern rotating round the ring. So the angle term
-       and the time term are separate factors — sin(kθ) fixes where the nodes
-       are, sin(ωt) drives them. Twice a cycle the amplitude passes through zero
-       and the ring is briefly a perfect circle, which is what makes it read as
-       something vibrating rather than something spinning. */
     const wave = RING_WAVES[i];
     const anchor = (m.userData.phase || 0) + wave.rot;
     const tOff = RING_SPLIT[i] * Math.PI * 2;
-    /* how hard each mode is driven right now — where its nodes sit does not move */
-    const drive = wave.modes.map((md, q) => Math.sin(t * RING_SPEED * md.r + tOff + q * 1.9) * md.a);
+    const drive = wave.modes.map((md, q) => Math.sin(tOff + q * 1.9) * md.a);
     const wob = a => {
       let v = 0;
       for (let q = 0; q < wave.modes.length; q++)
@@ -4242,8 +4242,7 @@ function updateRings(m, t){
       const r1 = Ri * (1 + RING_AMP * wob(a1));
       const o = j * 6;
       if (m.userData.workingRing){
-        /* Work items spin in world space, so their ring lives in XY and its
-           own orientation faces the camera instead of inheriting that spin. */
+        /* Work item rings live in XY and face the camera. */
         buf[o]   = Math.cos(a0) * r0; buf[o+1] = Math.sin(a0) * r0; buf[o+2] = 0;
         buf[o+3] = Math.cos(a1) * r1; buf[o+4] = Math.sin(a1) * r1; buf[o+5] = 0;
       } else {
@@ -4251,12 +4250,10 @@ function updateRings(m, t){
         buf[o+3] = Math.cos(a1) * r1; buf[o+4] = 0; buf[o+5] = Math.sin(a1) * r1;
       }
     }
-    /* setPositions builds fresh attributes every call. The buffer is ours and
-       its size never changes, so hand it over once and thereafter just tell the
-       GPU the contents moved — this runs every frame for every working agent. */
+    /* The shape is fixed; upload its vertex buffer once. */
     if (seg.userData.wired) seg.geometry.attributes.instanceStart.data.needsUpdate = true;
     else { seg.geometry.setPositions(buf); seg.userData.wired = true; }
-    /* A ghosted agent is still working, so the ring keeps moving and simply
+    /* A ghosted agent is still working, so the ring remains visible and simply
        goes translucent with the rest of it. Hiding it outright — the rule tags
        follow — would have said the opposite: that the work had stopped. */
     /* 10% at full strength. Ghosting halves it rather than applying the scene's
@@ -4266,6 +4263,7 @@ function updateRings(m, t){
     if (m.userData.workingRing) seg.lookAt(camera.position);
     seg.visible = m.userData.workingRing ? layerState.workItems : layerState.agents;
   });
+  m.userData.ringsInitialized = true;
 }
 
 /* lub-dub: a sharp contraction, a softer one just after it, then rest.
@@ -4278,8 +4276,44 @@ function heartbeat(t, period){
 }
 
 const clock = new THREE.Clock();
+function rendererProgramsValid(){
+  return areProgramsValid(renderer.getContext(), renderer.info.programs || []);
+}
+function rebuildRendererPrograms(){
+  if (renderer.getContext().isContextLost()) return false;
+  scene.traverse(object => {
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    materials.filter(Boolean).forEach(material => { material.needsUpdate = true; });
+  });
+  renderer.compile(scene, camera);
+  return rendererProgramsValid();
+}
+function prepareRenderer(){
+  if (renderer.getContext().isContextLost()){
+    renderLoop?.pause();
+    return false;
+  }
+  if (rendererRebuildPending || !rendererProgramsValid()){
+    rendererRebuildPending = false;
+    try {
+      if (!rebuildRendererPrograms()) throw new Error('shader program is invalid');
+    } catch (error){
+      console.error('ATC: graphics programs could not be restored', error);
+      renderLoop?.pause();
+      return false;
+    }
+  }
+  return true;
+}
+function activeRenderInterval(controlsChanged){
+  const chromeMoving = Math.abs(chromeOff.x - chromeAim.x) > .25 ||
+                       Math.abs(chromeOff.y - chromeAim.y) > .25;
+  return renderInterval({cameraMoving:!!flight || chromeMoving, controlsChanged,
+    pulses:pulses.length > 0, messages:msgLines.length > 0});
+}
 function tickFrame(){
-  requestAnimationFrame(tickFrame);
+  if (!prepareRenderer()) return 0;
+  if (fitQueued){ fitQueued = false; fitViewport(); }
   const t = clock.getElapsedTime();
   if (Math.abs(chromeOff.x - chromeAim.x) > .25 || Math.abs(chromeOff.y - chromeAim.y) > .25){
     /* .09 settles to within a few pixels across the flight's ~33 frames while
@@ -4295,31 +4329,15 @@ function tickFrame(){
     camera.position.lerpVectors(flight.p0, flight.p1, e);
     controls.target.lerpVectors(flight.t0, flight.t1, e);
     if (flight.k >= 1){ flight.after?.(); flight = null; }
-  } else if (!userMoved && view.framing!=='restoring' && view.input!=='brush'
-             && !spatialMedia.matches){
-    orbitAngle += .00057;          /* the ambient turntable, at two thirds */
-    camera.position.set(orbitTgt.x + Math.sin(orbitAngle)*orbitR,
-                        orbitTgt.y + orbitH,
-                        orbitTgt.z + Math.cos(orbitAngle)*orbitR);
-    controls.target.copy(orbitTgt); camera.lookAt(orbitTgt);
   }
-  /* Strobe whatever the pointer is over. This runs after shading has set each
-     material from its base colour, so it is a pure overlay: nothing else has
-     to know about hover, and letting go restores the real colour on the next
-     frame without bookkeeping. */
-  const strobe = hoverKeys.size ? .35 + .35 * Math.sin(t * 9) : 0;
+  /* Keep the hover overlay steady so its appearance does not depend on other
+     reasons the renderer happened to draw a frame. */
+  const hoverTint = hoverKeys.size ? .55 : 0;
   const dimming = !!hiAgents;
   const fa = id => (!dimming || hiAgents.has(id)) ? 1 : DIM;
   const fi = id => (!dimming || hiItems.has(id)) ? 1 : ITEM_DIM;
-  /* The nodes bob, so an arrow anchored to two of them has to be re-laid. Every
-     third frame is indistinguishable from every frame at this amplitude and
-     costs a third as much geometry churn. */
-  /* Every frame while there are few: an arrow that lags its node is an arrow
-     pointing slightly beside it, and pointing AT the thing is the whole job.
-     Measured at 6.7ms a frame for twelve arrows on software rendering, which
-     is fine — but the board allows a hundred, so past a couple of dozen it
-     falls back to every third frame and trades a degree of aim for the frame
-     rate. */
+  /* Re-lay arrows on each requested frame so they remain attached during a
+     camera transition or model change. */
   const many = arrowGroup.children.length > 24;
   if (arrowGroup.children.length && (!many || (arrowFrame = (arrowFrame + 1) % 3) === 0))
     relayArrows();
@@ -4380,18 +4398,12 @@ function tickFrame(){
         ch.material.opacity = (ch.userData.isTag ? 1 : .85) * f;
       });
     }
-    /* An agent taking a turn wears a rippling ring: one sine travelling round
-       a circle, drawn three times at the same frequency and amplitude with the
-       period offset a little each time, in red, green and blue. Where the three
-       coincide they sum back to white; where the offset pulls them apart you
-       see the colour fringes. It is chromatic aberration on purpose — a white
-       line split into its components — which reads as vibration rather than as
-       three separate rings. */
+    /* Running and queued turns keep their indicators in the paused frame. */
     if (u && u.flash === 'run' && u.a){
-      updateRings(m, t);
+      initializeRings(m);
       if (u.lineMat) u.lineMat.opacity = .5 * (u.dim ?? 1);
     } else if (u && u.flash === 'wait' && u.lineMat){
-      u.lineMat.opacity = (.18 + (0.5+0.5*Math.sin(t*2.2+u.phase)) * .55) * (u.dim ?? 1);
+      u.lineMat.opacity = .45 * (u.dim ?? 1);
     }
   });
   itemGroup.children.forEach(m=>{
@@ -4408,20 +4420,8 @@ function tickFrame(){
       if (u.lineMat){ u.lineMat.opacity = .6 * f; u.lineMat.visible = layerState.workItems && !u.selected; }
       u.dim = f;
     }
-    /* A FOCUSED item holds still: the tag and composer anchored to it would
-       otherwise jitter, which is hard to read and hard to click. Selection is
-       not inspection — a brushed item keeps whatever motion it had. */
-    /* Coarse non-hover input needs a stable semantic region long enough for
-       the system to acquire it. Keep decorative item bob/rotation on desktop,
-       but hold items still while projected spatial targets are active. */
-    const heldStill = u.w && (view.focus.key === 'i:' + u.w.id || spatialMedia.matches);
-    if (u.baseY){
-      m.position.y = heldStill ? u.baseY : u.baseY + Math.sin(t*1.2+u.phase)*.25;
-    }
-    if (u.w && !heldStill) m.rotation.y += .003;
-    if (u.w) spin.set(u.w.id, m.rotation.y);
-    if (u.workingRing) updateRings(m, t);
-    if (u.waitFlash && u.lineMat){ u.lineMat.opacity = (.15 + (0.5+0.5*Math.sin(t*2.6+u.phase))*.6) * (u.dim ?? 1); }
+    if (u.workingRing) initializeRings(m);
+    if (u.waitFlash && u.lineMat){ u.lineMat.opacity = .45 * (u.dim ?? 1); }
     m.children.forEach(ch=>{
       /* an item's tag must ghost with its node, or a dimmed scene keeps a
          bright label floating over nothing */
@@ -4435,8 +4435,8 @@ function tickFrame(){
         return;
       }
       ch.visible = layerState.workItems;
-      if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=(.4+Math.abs(Math.sin(t*3))*.5)*(u.dim ?? 1); const sc=1+Math.sin(t*3)*.18; ch.scale.set(sc,sc,sc); }
-      if (ch.userData.act==='run'){ ch.material.opacity = (.04 + (0.5+0.5*Math.sin(t*2.2))*.18) * (u.dim ?? 1); }
+      if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=.7 * (u.dim ?? 1); ch.scale.setScalar(1.08); }
+      if (ch.userData.act==='run'){ ch.material.opacity = .13 * (u.dim ?? 1); }
       if (ch.userData.orphanRing){ ch.lookAt(camera.position); ch.material.opacity = .55 * (u.dim ?? 1); }
     });
   });
@@ -4453,35 +4453,13 @@ function tickFrame(){
     u.mat.opacity = (u.state==='hold' ? .22 : .4) * tetherLit;
     u.geo.setPositions([p.x,p.y,p.z, _end.x,_end.y,_end.z]);
   });
-  /* agent-to-agent links carry the travelling pulse: white crest running from
-     the sender to whoever owes the turn */
+  /* Agent links keep a fixed brightness gradient pointing toward the owner. */
   linkGroup.children.forEach(o=>{
     const u = o.userData;
-    const A = APOS[u.from], B = APOS[u.to];
-    if (!A || !B){ o.visible = false; return; }
-    o.visible = true;
-    const fast = u.state === 'run';
     const linkLit = hiRelations
       ? hiRelations.has('link:' + u.from + '|' + u.to) ? 1 : DIM
       : Math.min(fa(u.from), fa(u.to));
     u.mat.opacity = .5 * linkLit;
-    u.head = (u.head + (fast ? .011 : .006)) % 1;
-    const pos = u.pos, rgb = u.rgb;
-    for (let i = 0; i < TETHER_SEGS; i++){
-      const f0 = i/TETHER_SEGS, f1 = (i+1)/TETHER_SEGS, k = i*6;
-      pos[k]   = A.x + (B.x-A.x)*f0; pos[k+1] = A.y + (B.y-A.y)*f0 + .25; pos[k+2] = A.z + (B.z-A.z)*f0;
-      pos[k+3] = A.x + (B.x-A.x)*f1; pos[k+4] = A.y + (B.y-A.y)*f1 + .25; pos[k+5] = A.z + (B.z-A.z)*f1;
-      for (let e = 0; e < 2; e++){
-        const f = e ? f1 : f0;
-        let d = Math.abs(f - u.head); if (d > .5) d = 1 - d;
-        const hot = Math.min(1, Math.exp(-(d*d)/.0022) * (fast ? 1.25 : 1));
-        const j = k + e*3;
-        rgb[j]   = u.col.r + (1-u.col.r)*hot;
-        rgb[j+1] = u.col.g + (1-u.col.g)*hot;
-        rgb[j+2] = u.col.b + (1-u.col.b)*hot;
-      }
-    }
-    u.geo.setPositions(pos); u.geo.setColors(rgb);
   });
   for (let i=msgLines.length-1;i>=0;i--){
     const l = msgLines[i], u = l.userData;
@@ -4497,18 +4475,27 @@ function tickFrame(){
     p.material.opacity = 1-p.userData.t;
   }
   positionTagBox();
-  controls.update();
+  const controlsChanged = controls.update();
   updateSpatialTargets();
   if (hoverLeaders.length) aimLeaders();   /* the nodes just moved */
-  if (strobe){
+  if (hoverTint){
     selectables().forEach(m => {
       const k = selKey(m);
       if (!k || !hoverKeys.has(k)) return;
-      m.material.color.lerp(HOVER_WHITE, strobe);
-      if (m.userData.lineMat) m.userData.lineMat.color.lerp(HOVER_WHITE, strobe);
+      const base = m.userData.selected ? m.userData.baseStroke : m.userData.baseFill;
+      if (base) m.material.color.copy(base);
+      if (m.userData.lineMat && m.userData.baseStroke)
+        m.userData.lineMat.color.copy(m.userData.baseStroke);
+      m.material.color.lerp(HOVER_WHITE, hoverTint);
+      if (m.userData.lineMat) m.userData.lineMat.color.lerp(HOVER_WHITE, hoverTint);
     });
   }
   renderer.render(scene, camera);
+  if (!rendererProgramsValid()){
+    renderLoop?.pause();
+    return 0;
+  }
+  return activeRenderInterval(controlsChanged);
 }
 /* CSS decides the canvas box; we only match the drawing buffer to it. Passing
    false to setSize leaves the CSS size alone, so the two cannot disagree. */
@@ -4531,7 +4518,7 @@ let fitQueued = false;
 function queueFit(){
   if (fitQueued) return;
   fitQueued = true;
-  requestAnimationFrame(() => { fitQueued = false; fitViewport(); });
+  requestRender();
 }
 addEventListener('resize', queueFit);
 addEventListener('orientationchange', queueFit);
@@ -4539,7 +4526,19 @@ window.visualViewport?.addEventListener('resize', queueFit);
 window.visualViewport?.addEventListener('scroll', queueFit);
 new ResizeObserver(queueFit).observe(document.body);
 fitViewport();
-tickFrame();
+renderLoop = createRenderLoop({
+  canvas: renderer.domElement,
+  draw: tickFrame,
+  isContextValid: () => !renderer.getContext().isContextLost(),
+  onContextRestored(){
+    rendererRebuildPending = true;
+    renderLoop?.resume();
+  },
+});
+for (const eventName of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'wheel',
+                         'click', 'dblclick', 'keydown', 'input', 'change', 'message']){
+  addEventListener(eventName, requestRender, {passive:true});
+}
 </script>
 </body>
 </html>
