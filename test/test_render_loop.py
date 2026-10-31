@@ -110,6 +110,70 @@ assert.equal(areProgramsValid({{...gl, isProgram: candidate => candidate === fai
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_delayed_visual_change_invalidates_an_idle_loop(self):
+        module_url = json.dumps((ROOT / "web" / "render-loop.mjs").as_uri())
+        script = f'''import assert from 'node:assert/strict';
+import {{ createRenderLoop, scheduleVisualChange }} from {module_url};
+
+const document = {{ hidden: false, addEventListener() {{}}, removeEventListener() {{}} }};
+let nextId = 1;
+const frames = new Map();
+let draws = 0;
+const loop = createRenderLoop({{
+  document,
+  requestFrame(callback) {{ const id = nextId++; frames.set(id, callback); return id; }},
+  cancelFrame(id) {{ frames.delete(id); }},
+  draw() {{ draws++; return 0; }},
+}});
+function drawOneFrame() {{
+  const [id, callback] = frames.entries().next().value ?? [];
+  assert.ok(id, 'a frame should be queued');
+  frames.delete(id);
+  callback(0);
+}}
+
+drawOneFrame();
+assert.equal(loop.scheduled, false, 'the unchanged scene should be idle');
+const objects = [];
+let delayedCallback;
+scheduleVisualChange(() => objects.push('wake'), 240, loop.invalidate,
+  (callback, delay) => {{ assert.equal(delay, 240); delayedCallback = callback; return 9; }});
+assert.equal(loop.scheduled, false, 'waiting for the visual timer should not draw');
+delayedCallback();
+assert.deepEqual(objects, ['wake']);
+assert.equal(frames.size, 1, 'adding a delayed visual should request a frame');
+drawOneFrame();
+assert.equal(draws, 2);
+assert.equal(loop.scheduled, false, 'the scene should settle after the new visual draws');
+loop.destroy();
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", script],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_render_interval_stops_for_unchanged_status_and_hover(self):
+        module_url = json.dumps((ROOT / "web" / "render-loop.mjs").as_uri())
+        script = f'''import assert from 'node:assert/strict';
+import {{ renderInterval }} from {module_url};
+
+assert.equal(renderInterval(), 0, 'an unchanged scene must not keep drawing');
+assert.equal(renderInterval({{hovered:true, running:true}}), 0,
+  'persistent status and hover state must not keep an animation loop alive');
+assert.equal(renderInterval({{cameraMoving:true}}), 1000 / 60);
+assert.equal(renderInterval({{controlsChanged:true}}), 1000 / 60);
+assert.equal(renderInterval({{pulses:true}}), 1000 / 60);
+assert.equal(renderInterval({{messages:true}}), 1000 / 60);
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", script],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_live_invalidation_bypasses_animation_throttle(self):
         module_url = json.dumps((ROOT / "web" / "render-loop.mjs").as_uri())
         script = f'''import assert from 'node:assert/strict';

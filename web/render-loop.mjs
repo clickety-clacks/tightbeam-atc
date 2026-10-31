@@ -13,6 +13,22 @@ export function areProgramsValid(gl, programs = []) {
   return true;
 }
 
+export function scheduleVisualChange(callback, delay, invalidate,
+                                     setTimer = (fn, ms) => globalThis.setTimeout(fn, ms)) {
+  if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+  if (typeof invalidate !== 'function') throw new TypeError('invalidate must be a function');
+  if (typeof setTimer !== 'function') throw new TypeError('setTimer must be a function');
+  return setTimer(() => {
+    try { callback(); }
+    finally { invalidate(); }
+  }, delay);
+}
+
+export function renderInterval({cameraMoving = false, controlsChanged = false,
+                                pulses = false, messages = false} = {}) {
+  return cameraMoving || controlsChanged || pulses || messages ? 1000 / 60 : 0;
+}
+
 export function createRenderLoop({
   canvas,
   document: documentTarget = globalThis.document,
