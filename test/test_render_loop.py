@@ -13,7 +13,7 @@ class RenderLoopTest(unittest.TestCase):
     def test_idle_hidden_context_loss_and_restore_gates(self):
         module_url = json.dumps((ROOT / "web" / "render-loop.mjs").as_uri())
         script = f'''import assert from 'node:assert/strict';
-import {{ areProgramsValid, createRenderLoop }} from {module_url};
+import {{ areProgramsValid, createDeferredUpdateGate, createRenderLoop }} from {module_url};
 
 class Target {{
   listeners = new Map();
@@ -39,12 +39,14 @@ let draws = 0;
 let lostEvents = 0;
 let restoredEvents = 0;
 let animationDelay = 0;
+let contextValid = true;
 const loop = createRenderLoop({{
   canvas, document, now: () => time,
   requestFrame(callback) {{ const id = nextId++; frames.set(id, callback); return id; }},
   cancelFrame(id) {{ frames.delete(id); }},
   setTimer(callback, delay) {{ const id = nextId++; timers.set(id, {{callback, delay}}); return id; }},
   clearTimer(id) {{ timers.delete(id); }},
+  isContextValid() {{ return contextValid; }},
   draw() {{ draws++; return animationDelay; }},
   onContextLost() {{ lostEvents++; }},
   onContextRestored() {{ restoredEvents++; }},
@@ -58,6 +60,7 @@ function drawOneFrame() {{
 
 drawOneFrame();
 assert.equal(draws, 1);
+assert.equal(loop.suspended, false);
 assert.equal(loop.scheduled, false, 'an unchanged scene must go idle');
 
 animationDelay = 200;
@@ -68,11 +71,13 @@ loop.invalidate();
 assert.equal(frames.size, 1, 'a live change should queue a prompt frame');
 document.hidden = true;
 document.dispatch('visibilitychange');
+assert.equal(loop.suspended, true, 'hidden pages suspend model scene work');
 assert.equal(frames.size, 0, 'hiding the page must cancel a queued frame');
 loop.invalidate();
 assert.equal(loop.scheduled, false, 'hidden pages must not draw');
 document.hidden = false;
 document.dispatch('visibilitychange');
+assert.equal(loop.suspended, false, 'showing the page resumes scene work');
 drawOneFrame();
 assert.equal(draws, 3, 'showing the page must redraw the current scene');
 assert.equal(timers.size, 1, 'active motion should resume at its throttled rate');
@@ -82,13 +87,19 @@ canvas.dispatch('webglcontextlost', {{preventDefault() {{ prevented = true; }}}}
 loop.invalidate();
 assert.equal(prevented, true, 'context loss must be prevented so the browser can restore it');
 assert.equal(loop.contextLost, true);
+assert.equal(loop.suspended, true, 'a lost WebGL context suspends model scene work');
 assert.equal(lostEvents, 1);
 assert.equal(loop.scheduled, false, 'lost contexts must not draw');
 canvas.dispatch('webglcontextrestored');
+assert.equal(loop.suspended, false, 'context restoration resumes scene work');
 drawOneFrame();
 assert.equal(loop.contextLost, false);
 assert.equal(restoredEvents, 1);
 assert.equal(draws, 4, 'context restore must redraw the scene');
+contextValid = false;
+assert.equal(loop.suspended, true, 'an invalid renderer context suspends model scene work');
+contextValid = true;
+assert.equal(loop.suspended, false);
 loop.destroy();
 assert.equal(document.listeners.get('visibilitychange').size, 0);
 
@@ -102,6 +113,59 @@ assert.equal(areProgramsValid({{...gl, isContextLost: () => true}}, [{{program}}
 const failedLink = {{}};
 assert.equal(areProgramsValid({{...gl, isProgram: candidate => candidate === failedLink,
   getProgramParameter: () => false}}, [{{program: failedLink}}]), false);
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", script],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_hidden_scene_rebuilds_coalesce_and_catch_up_to_latest_model(self):
+        module_url = json.dumps((ROOT / "web" / "render-loop.mjs").as_uri())
+        script = f'''import assert from 'node:assert/strict';
+import {{ createDeferredUpdateGate }} from {module_url};
+
+let suspended = true;
+let acceptedRevision = 0;
+let renderedRevision = 0;
+let visibleFrameRevision = null;
+let rebuilds = 0;
+const updates = createDeferredUpdateGate(() => suspended);
+function drawFrame() {{ visibleFrameRevision = renderedRevision; }}
+function acceptRevision(revision) {{
+  acceptedRevision = revision;
+  updates.run(() => {{ renderedRevision = acceptedRevision; rebuilds++; }});
+}}
+
+acceptRevision(1);
+acceptRevision(2);
+assert.equal(acceptedRevision, 2, 'model ingestion continues while rendering is suspended');
+assert.equal(renderedRevision, 0, 'scene construction waits while hidden');
+assert.equal(rebuilds, 0);
+assert.equal(updates.pending, true);
+assert.equal(updates.flush(), false, 'a hidden page cannot flush scene work');
+
+suspended = false;
+assert.equal(updates.flush(), true, 'showing the page reconciles before drawing');
+assert.equal(renderedRevision, 2, 'catch-up uses only the latest accepted model');
+assert.equal(rebuilds, 1, 'several hidden updates coalesce into one rebuild');
+drawFrame();
+assert.equal(visibleFrameRevision, 2, 'the first visible frame uses the caught-up scene');
+assert.equal(updates.pending, false);
+assert.equal(updates.flush(), false, 'a completed catch-up is not repeated');
+
+suspended = true;
+acceptRevision(3);
+acceptRevision(4);
+assert.equal(renderedRevision, 2, 'context loss also defers scene construction');
+suspended = false;
+assert.equal(updates.flush(), true);
+assert.equal(renderedRevision, 4, 'context restoration catches up to the latest revision');
+
+acceptRevision(5);
+assert.equal(renderedRevision, 5, 'visible updates remain immediate');
+assert.equal(rebuilds, 3);
 '''
         result = subprocess.run(
             [shutil.which("node"), "--input-type=module", "-e", script],

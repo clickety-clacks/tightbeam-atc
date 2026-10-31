@@ -25,6 +25,48 @@ export function scheduleVisualChange(callback, delay, invalidate,
   }, delay);
 }
 
+export function createDeferredUpdateGate(isSuspended) {
+  if (typeof isSuspended !== 'function') throw new TypeError('isSuspended must be a function');
+  let pendingUpdate = null;
+
+  function run(update) {
+    if (typeof update !== 'function') throw new TypeError('update must be a function');
+    if (isSuspended()) {
+      pendingUpdate = update;
+      return false;
+    }
+
+    const previous = pendingUpdate;
+    pendingUpdate = null;
+    try {
+      update();
+      return true;
+    } catch (error) {
+      pendingUpdate = previous;
+      throw error;
+    }
+  }
+
+  function flush() {
+    if (!pendingUpdate || isSuspended()) return false;
+    const update = pendingUpdate;
+    pendingUpdate = null;
+    try {
+      update();
+      return true;
+    } catch (error) {
+      pendingUpdate = update;
+      throw error;
+    }
+  }
+
+  return {
+    run,
+    flush,
+    get pending() { return pendingUpdate !== null; },
+  };
+}
+
 export function renderInterval({cameraMoving = false, controlsChanged = false,
                                 pulses = false, messages = false} = {}) {
   return cameraMoving || controlsChanged || pulses || messages ? 1000 / 60 : 0;
@@ -150,6 +192,7 @@ export function createRenderLoop({
 
   return {
     invalidate,
+    get suspended() { return !canDraw(); },
     pause() {
       manuallyPaused = true;
       cancelScheduled();

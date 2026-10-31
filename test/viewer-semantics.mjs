@@ -239,6 +239,9 @@ assert.equal(sceneSignature(model), sceneSignature({...model, revision: 9, gener
     observedAt: 3000, unconfirmedSince: 2500},
     ring: {status: 'unknown', observedAt: 3000}}}]}));
 assert.notEqual(sceneSignature(model), sceneSignature({...model, items: [{...model.items[0], stage: 2}]}));
+assert.equal(sceneSignature(model), sceneSignature({...model,
+  revision: 9, wakes: [{id: 'wake-1'}], messages: [{id: 'message-1'}]}),
+  'wake/message effects do not require rebuilding base scene geometry');
 
 assert.equal(knownStage(0), true);
 assert.equal(knownStage(6), true);
