@@ -174,6 +174,49 @@ assert.equal(renderInterval({{messages:true}}), 1000 / 60);
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_sixty_fps_animation_chains_frames_without_a_timer(self):
+        module_url = json.dumps((ROOT / "web" / "render-loop.mjs").as_uri())
+        script = f'''import assert from 'node:assert/strict';
+import {{ createRenderLoop }} from {module_url};
+
+const document = {{ hidden: false, addEventListener() {{}}, removeEventListener() {{}} }};
+let nextId = 1;
+const frames = new Map();
+const timers = new Map();
+let draws = 0;
+const loop = createRenderLoop({{
+  document,
+  requestFrame(callback) {{ const id = nextId++; frames.set(id, callback); return id; }},
+  cancelFrame(id) {{ frames.delete(id); }},
+  setTimer(callback, delay) {{ const id = nextId++; timers.set(id, {{callback, delay}}); return id; }},
+  clearTimer(id) {{ timers.delete(id); }},
+  draw() {{ draws++; return 1000 / 60; }},
+}});
+function drawOneFrame() {{
+  const [id, callback] = frames.entries().next().value ?? [];
+  assert.ok(id, 'an animation frame should be queued');
+  frames.delete(id);
+  callback(0);
+}}
+
+drawOneFrame();
+assert.equal(draws, 1);
+assert.equal(timers.size, 0, 'a 1000/60 ms interval must not queue a timer');
+assert.equal(frames.size, 1, 'the next display frame should be requested directly');
+loop.invalidate();
+assert.equal(frames.size, 1, 'invalidation must not duplicate the queued frame');
+drawOneFrame();
+assert.equal(draws, 2);
+assert.equal(timers.size, 0, 'frame chaining must remain timer-free');
+loop.destroy();
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", script],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_live_invalidation_bypasses_animation_throttle(self):
         module_url = json.dumps((ROOT / "web" / "render-loop.mjs").as_uri())
         script = f'''import assert from 'node:assert/strict';

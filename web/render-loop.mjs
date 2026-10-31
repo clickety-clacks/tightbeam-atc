@@ -1,4 +1,5 @@
 const linkedPrograms = new WeakSet();
+const displayFrameInterval = 1000 / 60;
 
 export function areProgramsValid(gl, programs = []) {
   if (gl.isContextLost()) return false;
@@ -79,6 +80,13 @@ export function createRenderLoop({
 
   function schedule(urgent = false) {
     if (!canDraw() || frameId !== null || timerId !== null || (!dirty && !animationInterval)) return;
+    // requestAnimationFrame is already display-synchronized. Putting a timer
+    // of one frame's duration before it guarantees that the next vsync is
+    // missed, so keep frame-rate animations on the frame clock directly.
+    if (animationInterval > 0 && animationInterval <= displayFrameInterval) {
+      queueFrame();
+      return;
+    }
     const wait = urgent ? 0 : Math.max(0, animationInterval - (now() - lastDraw));
     if (wait > 0 && typeof setTimer === 'function') {
       timerId = setTimer(() => {
