@@ -438,8 +438,9 @@ export function shouldAcceptSnapshot(next, current) {
       && (!Number.isFinite(next.generatedAt) || next.generatedAt === current.generatedAt));
 }
 
-/* Clock, freshness, and evidence-age repaints do not change scene geometry.
-   The agent's idle color is updated in place, so idleFor and idleSince can stay out. */
+/* Clock, freshness, evidence-age, wake, and message updates do not change base
+   scene geometry. Wake/message effects are managed separately; agent idle
+   color is updated in place, so idleFor and idleSince can stay out. */
 export function sceneSignature(model) {
   if (!isModelEnvelope(model)) return '';
   const entity = (row, agent = false) => {
@@ -457,8 +458,6 @@ export function sceneSignature(model) {
     agents: model.agents.map(row=>entity(row, true)),
     items: model.items.map(row=>entity(row)),
     links: model.links,
-    wakes: model.wakes,
-    messages: model.messages,
   });
 }
 

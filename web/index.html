@@ -317,7 +317,7 @@
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
-import { areProgramsValid, createRenderLoop, renderInterval,
+import { areProgramsValid, createDeferredUpdateGate, createRenderLoop, renderInterval,
          scheduleVisualChange } from './render-loop.mjs';
 import { unknownItemFacts, unknownItemType, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
 import { agentHintSummary, itemHintSummary } from './viewer-hints.mjs';
@@ -395,6 +395,7 @@ const renderer = new THREE.WebGLRenderer({antialias:true});
 document.body.appendChild(renderer.domElement);
 let renderLoop = null;
 let rendererRebuildPending = false;
+const deferredSceneUpdates = createDeferredUpdateGate(() => renderLoop?.suspended ?? false);
 function requestRender(){ renderLoop?.invalidate(); }
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.maxPolarAngle = Math.PI*0.82;   /* the org hangs below the grid — let the camera dip under */
@@ -606,7 +607,8 @@ function stopFlightHere(){
   orbitAngle = Math.atan2(d.x, d.z); orbitTgt.copy(controls.target);
   orbitUserOwned = false; userMoved = false;
 }
-let lastModel = null, lastSceneSignature = '';
+let lastModel = null, lastRenderedModel = null, lastSceneSignature = null;
+let pendingSceneRollbackView = null, deferredSceneSyncError = null;
 
 function disposeGroup(g){
   g.traverse(o=>{ if(o.geometry) o.geometry.dispose();
@@ -2242,17 +2244,15 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
   const previousSamples = agentSamples;
   const previousEvidencePages = new Map(itemEvidencePages);
   const previousEvidenceNotices = new Map(itemEvidenceNotices);
-  const previousHoverKeys = hoverLeaders.map(L => L.key).filter(Boolean);
-  const previousHoverScroll = captureHoverScroll(hoverLeaders);
   const versionChanged = Boolean(lastModel && (model.generation!==lastModel.generation
     || model.revision!==lastModel.revision));
   const nextSamples = agentSampleTimes(agentSamples, model,
     {fullSnapshot, upsertedIds:upsertedAgentIds, previousModel:lastModel});
-  const nextSignature = sceneSignature(model);
-  const sceneChanged = nextSignature !== previousSignature;
-  const firstModel = !lastModel;
-  const pose = captureModelPose();
-  const savedView = captureViewerState(view, focusLayer, pose);
+  let nextSignature = previousSignature;
+  let sceneChanged = false;
+  let previousHoverKeys = [];
+  let previousHoverScroll = null;
+  let savedView = null;
   try {
     DATA = model;
     agentSamples = nextSamples;
@@ -2264,32 +2264,48 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
           itemEvidenceNotices.set(itemId, 'The model changed since these notes were loaded. Load the current notes again.');
       }
     }
-    if (sceneChanged){
-      rebuildWithViewerState(savedView, ()=>{
-        clearHover();
-        buildTieredScene(model.agents, model.items);
-        buildLinks(model.links);
-      }, restoreViewerModelState);
-      migrateViewKeys();
-      applyView({preserveCamera:!firstModel});
-    } else {
-      refreshModelReferences(model);
-      if (view.focus.stage===1) renderDetail();
-    }
-    /* The opening frame is chosen once, only if the viewer has not already
-       moved. Later model events never recenter or alter the camera. */
-    if (firstModel && view.framing==='none' && !userMoved && !flight && !orbitUserOwned){
-      const home = restingPose(Math.atan2(camera.position.x, camera.position.z));
-      camera.position.copy(home.pos);
-      orbitTgt.copy(home.target);
-      const d = home.pos.clone().sub(home.target);
-      orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
-      orbitAngle = Math.atan2(d.x, d.z);
-      controls.target.copy(orbitTgt);
-    } else restoreModelPose(pose);
-    if (sceneChanged) restoreHoverByKey(previousHoverKeys, previousHoverScroll);
+    deferredSceneUpdates.run(()=>{
+      previousHoverKeys = hoverLeaders.map(L => L.key).filter(Boolean);
+      previousHoverScroll = captureHoverScroll(hoverLeaders);
+      const pose = captureModelPose();
+      savedView = captureViewerState(view, focusLayer, pose);
+      pendingSceneRollbackView = savedView;
+      nextSignature = sceneSignature(model);
+      sceneChanged = nextSignature !== previousSignature;
+      const firstModel = previousSignature === null;
+      if (sceneChanged){
+        rebuildWithViewerState(savedView, ()=>{
+          clearHover();
+          buildTieredScene(model.agents, model.items);
+          buildLinks(model.links);
+        }, restoreViewerModelState);
+        migrateViewKeys();
+        applyView({preserveCamera:!firstModel});
+      } else {
+        refreshModelReferences(model);
+        if (view.focus.stage===1) renderDetail();
+      }
+      /* The opening frame is chosen once, only if the viewer has not already
+         moved. Later model events never recenter or alter the camera. */
+      if (firstModel && view.framing==='none' && !userMoved && !flight && !orbitUserOwned){
+        const home = restingPose(Math.atan2(camera.position.x, camera.position.z));
+        camera.position.copy(home.pos);
+        orbitTgt.copy(home.target);
+        const d = home.pos.clone().sub(home.target);
+        orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
+        orbitAngle = Math.atan2(d.x, d.z);
+        controls.target.copy(orbitTgt);
+      } else restoreModelPose(pose);
+      if (sceneChanged) restoreHoverByKey(previousHoverKeys, previousHoverScroll);
+      lastSceneSignature = nextSignature;
+      lastRenderedModel = model;
+      if (deferredSceneSyncError){
+        if (streamError===deferredSceneSyncError){ streamState='connected'; streamError=null; renderModelStatus(); }
+        deferredSceneSyncError = null;
+      }
+      pendingSceneRollbackView = null;
+    });
     lastModel = model;
-    lastSceneSignature = nextSignature;
     streamState='connected'; streamError=null;
     spawnWakes(); spawnMessages();
     renderModelStatus();
@@ -2301,7 +2317,9 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
     agentSamples = previousSamples;
     itemEvidencePages.clear(); previousEvidencePages.forEach((value,key)=>itemEvidencePages.set(key,value));
     itemEvidenceNotices.clear(); previousEvidenceNotices.forEach((value,key)=>itemEvidenceNotices.set(key,value));
-    restoreViewerModelState(savedView);
+    if (savedView) restoreViewerModelState(savedView);
+    pendingSceneRollbackView = null;
+    deferredSceneSyncError = null;
     /* A failed scene rebuild restores the prior complete model and view. */
     let restoredPrevious = !previous;
     if (previous){
@@ -2321,6 +2339,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
     }
     if (restoredPrevious) restoreHoverByKey(previousHoverKeys, previousHoverScroll);
     lastSceneSignature = restoredPrevious ? previousSignature : null;
+    lastRenderedModel = restoredPrevious ? previous : null;
     if (view.focus.stage===1) renderDetail();
     streamState='stale'; streamError=previous && restoredPrevious
       ? 'model rebuild failed; previous model retained'
@@ -4312,6 +4331,42 @@ function activeRenderInterval(controlsChanged){
     pulses:pulses.length > 0, messages:msgLines.length > 0});
 }
 function tickFrame(){
+  if (renderer.getContext().isContextLost()){
+    renderLoop?.pause();
+    return 0;
+  }
+  if (deferredSceneUpdates.pending){
+    try {
+      deferredSceneUpdates.flush();
+    } catch (error){
+      console.error('ATC: deferred model scene rebuild failed', error);
+      let restoredPrevious = false;
+      try {
+        const saved = pendingSceneRollbackView
+          || captureViewerState(view, focusLayer, captureModelPose());
+        const previous = lastRenderedModel;
+        rebuildWithViewerState(saved, ()=>{
+          if (previous){
+            buildTieredScene(previous.agents, previous.items);
+            buildLinks(previous.links);
+          } else {
+            buildTieredScene([], []);
+            buildLinks([]);
+          }
+          applyView({preserveCamera:true});
+        }, restoreViewerModelState);
+        pendingSceneRollbackView = null;
+        restoredPrevious = true;
+      } catch (rollbackError){
+        console.error('ATC: previous scene could not be restored', rollbackError);
+      }
+      deferredSceneSyncError = restoredPrevious
+        ? 'model rebuild failed; previous scene retained'
+        : 'model rebuild failed; rendered scene may be incomplete';
+      streamState='stale'; streamError=deferredSceneSyncError; renderModelStatus();
+      return 0;
+    }
+  }
   if (!prepareRenderer()) return 0;
   if (fitQueued){ fitQueued = false; fitViewport(); }
   const t = clock.getElapsedTime();

@@ -256,10 +256,15 @@ class OrbitControls extends EventDispatcher {
 
 				}
 
-				// Limit the target distance from the cursor to create a sphere around the center of interest
-				scope.target.sub( scope.cursor );
-				scope.target.clampLength( scope.minTargetRadius, scope.maxTargetRadius );
-				scope.target.add( scope.cursor );
+				// Avoid a normalize/rescale round trip when the target is already
+				// within the allowed radius. The math is an identity, but its
+				// floating-point result can differ by a few bits on every update.
+				const targetRadius = scope.target.distanceTo( scope.cursor );
+				if ( targetRadius < scope.minTargetRadius || targetRadius > scope.maxTargetRadius ) {
+					scope.target.sub( scope.cursor );
+					scope.target.clampLength( scope.minTargetRadius, scope.maxTargetRadius );
+					scope.target.add( scope.cursor );
+				}
 
 				// adjust the camera position based on zoom only if we're not zooming to the cursor or if it's an ortho camera
 				// we adjust zoom later in these cases
