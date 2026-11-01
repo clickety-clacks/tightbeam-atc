@@ -180,4 +180,3 @@ await vm.runInContext(`(async()=>{
                 text=True,
             )
         self.assertEqual(0, result.returncode, result.stderr)
-
