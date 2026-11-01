@@ -443,6 +443,9 @@ let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses
 let streamState = 'connecting', streamError = null, startupWarning = null,
     modelEventSource = null, resyncTimer = null, startupStatusChecked = false,
     startupStatusPending = null;
+const MODEL_STREAM_RETRY_BASE_MS = 1000;
+const MODEL_STREAM_RETRY_MAX_MS = 2000;
+let modelStreamRetryDelay = MODEL_STREAM_RETRY_BASE_MS;
 let agentSamples = new Map();
 const itemEvidencePages = new Map();
 const itemEvidenceNotices = new Map();
@@ -2350,6 +2353,15 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
     return false;
   }
 }
+function scheduleModelStreamRetry(){
+  if (resyncTimer!==null) return;
+  const delay = modelStreamRetryDelay;
+  modelStreamRetryDelay = Math.min(delay * 2, MODEL_STREAM_RETRY_MAX_MS);
+  resyncTimer = setTimeout(()=>{
+    resyncTimer = null;
+    startModelStream();
+  }, delay);
+}
 function forceModelResync(reason){
   streamState='stale'; streamError=reason; renderModelStatus();
   if (modelEventSource){ modelEventSource.close(); modelEventSource=null; }
@@ -2385,8 +2397,10 @@ async function startModelStream(){
     }
   }
   if (modelEventSource) return;
-  modelEventSource = new EventSource('./api/events');
-  modelEventSource.onopen = ()=>{
+  const source = new EventSource('./api/events');
+  modelEventSource = source;
+  source.onopen = ()=>{
+    if (modelEventSource!==source) return;
     if (DATA && streamState==='stale'){
       streamError='waiting for a full model snapshot after reconnect';
     } else {
@@ -2394,8 +2408,16 @@ async function startModelStream(){
     }
     renderModelStatus();
   };
-  modelEventSource.onerror = ()=>{ streamState='stale'; streamError='event stream disconnected; reconnecting'; renderModelStatus(); };
-  modelEventSource.addEventListener('model', event=>{
+  source.onerror = ()=>{
+    if (modelEventSource!==source) return;
+    streamState='stale'; streamError='event stream disconnected; reconnecting'; renderModelStatus();
+    if (source.readyState===EventSource.CLOSED){
+      modelEventSource = null;
+      scheduleModelStreamRetry();
+    }
+  };
+  source.addEventListener('model', event=>{
+    if (modelEventSource!==source) return;
     let model;
     try { model = JSON.parse(event.data); }
     catch (error){ forceModelResync('invalid JSON model event'); return; }
@@ -2409,8 +2431,10 @@ async function startModelStream(){
     }
     if (!receiveModel(model))
       forceModelResync('model snapshot could not be applied; requesting current snapshot');
+    else modelStreamRetryDelay = MODEL_STREAM_RETRY_BASE_MS;
   });
-  modelEventSource.addEventListener('delta', event=>{
+  source.addEventListener('delta', event=>{
+    if (modelEventSource!==source) return;
     let delta;
     try { delta = JSON.parse(event.data); }
     catch (error){ forceModelResync('invalid JSON delta event'); return; }
@@ -2425,6 +2449,7 @@ async function startModelStream(){
       upsertedAgentIds});
     if (!accepted || lastModel?.revision!==delta.revision)
       forceModelResync('delta could not be applied; requesting full snapshot');
+    else modelStreamRetryDelay = MODEL_STREAM_RETRY_BASE_MS;
   });
 }
 
