@@ -78,6 +78,61 @@ class CanonicalGitTest(unittest.TestCase):
 
             self.assertIsNone(resolver.resolve([ref(commits["unreachable"])]))
 
+    def test_deleted_checkout_discovers_the_explicit_org_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, remote, commits = self._make_shipping_line_remote(
+                root / "org-repo", origin=OTHER_ORG_REMOTE, default_branch="trunk")
+
+            class TrackingResolver(LocalGitResolver):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.target_repositories = []
+
+                def _target_refs(self, remote_name):
+                    self.target_repositories.append(remote_name)
+                    return super()._target_refs(remote_name)
+
+            resolver = TrackingResolver(root / "cache", {OTHER_ORG_REMOTE: remote})
+            identities = (
+                ("clickety-clacks/other-project", commits["default"]),
+                ("github:clickety-clacks/other-project", commits["0.1.14-first"]),
+                ("https://github.com/clickety-clacks/other-project.git",
+                 commits["0.2.0"]),
+                ("ssh://git@github.com/clickety-clacks/other-project.git",
+                 commits["1.0.0"]),
+                ("github.com:clickety-clacks/other-project",
+                 commits["0.1.14-second"]),
+                ("clickety-clacks/other-project#0.1.14",
+                 commits["default"]),
+            )
+            for repo, commit in identities:
+                with self.subTest(repo=repo):
+                    self.assertIs(True, resolver.resolve([{"repo": repo, "commit": commit}]))
+
+            # A missing checkout with an explicit repository identity probes
+            # only that repository; it never broadens into the four fallbacks.
+            self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
+            self.assertIs(True, resolver.resolve([{
+                "repo": "retired:/checkout", "remote": "github:clickety-clacks/other-project",
+                "commit": commits["0.1.14-first"],
+            }]))
+            self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
+
+            self.assertIs(False, resolver.resolve([{
+                "repo": "clickety-clacks/other-project",
+                "commit": commits["quarantine/held-work"],
+            }]))
+            self.assertIsNone(resolver.resolve([{
+                "repo": "clickety-clacks/other-project",
+                "commit": commits["unreachable"],
+            }]))
+            self.assertIsNone(resolver.resolve([{
+                "repo": "https://github.com/example/other-project.git",
+                "commit": commits["default"],
+            }]))
+            self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
+
     def test_quarantine_only_reference_stays_yellow(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -330,7 +385,7 @@ class CanonicalGitTest(unittest.TestCase):
         names = ("0.1.14", "0.2.0", "1.0.0", "feature/change",
                  "candidate/0.1.14", "backport/change", "archive/change",
                  "attic/change", "agent/change", "codex/atc-kungfu-evidence",
-                 "0.1.14-rc.1", "release/0.1.14")
+                 "quarantine/held-work", "0.1.14-rc.1", "release/0.1.14")
         for name in names:
             subprocess.run(["git", "-C", str(source), "switch", "-c", name, base],
                            check=True, capture_output=True, text=True)

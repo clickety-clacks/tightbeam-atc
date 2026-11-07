@@ -19,6 +19,16 @@ CANONICAL_REFS = {
 }
 
 ORG_REMOTE = re.compile(r"git@github\.com:clickety-clacks/[A-Za-z0-9_.-]+\.git\Z", re.IGNORECASE)
+GITHUB_REPOSITORY = re.compile(
+    r"(?:https?://github\.com/|ssh://git@github\.com/|git@github\.com:|"
+    r"github\.com[:/]|github:)(?P<owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?\Z",
+    re.IGNORECASE,
+)
+ORG_REPOSITORY = re.compile(
+    r"clickety-clacks/(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?\Z",
+    re.IGNORECASE,
+)
 RELEASE_LINE = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
 )
@@ -39,6 +49,22 @@ def is_org_remote(remote):
     return isinstance(remote, str) and ORG_REMOTE.fullmatch(remote) is not None
 
 
+def repository_remote(identity):
+    """Return the named organization remote, False for other GitHub repos."""
+    if not isinstance(identity, str):
+        return None
+    identity = identity.strip().split("#", 1)[0].rstrip("/")
+    match = ORG_REPOSITORY.fullmatch(identity)
+    if match:
+        return f"git@github.com:clickety-clacks/{match['repository']}.git"
+    match = GITHUB_REPOSITORY.fullmatch(identity)
+    if not match:
+        return None
+    if match["owner"].casefold() != "clickety-clacks":
+        return False
+    return f"git@github.com:clickety-clacks/{match['repository']}.git"
+
+
 class GitResolver:
     def __init__(self, cache, refs=None, host_routes=None, ttl=300, timeout=4):
         self.cache = Path(cache)
@@ -52,17 +78,21 @@ class GitResolver:
         return subprocess.run(args, capture_output=True, text=True, timeout=self.timeout)
 
     def _origin(self, reference):
-        explicit = normalize_remote(reference.get("remote"))
+        explicit_value = reference.get("remote")
+        explicit = normalize_remote(explicit_value)
         if explicit:
-            return explicit if explicit in self.refs or is_org_remote(explicit) else False
+            if explicit in self.refs or is_org_remote(explicit):
+                return explicit
+            named = repository_remote(explicit_value)
+            return named if named is not None else False
         repo = reference.get("repo")
         cached = self.origins.get(repo)
         if cached and time.monotonic() - cached[0] < self.ttl:
             return cached[1]
-        origin = None
+        origin = repository_remote(repo)
         if isinstance(repo, str) and ":" in repo:
             host, path = repo.split(":", 1)
-            if Path(path).is_absolute():
+            if origin is None and Path(path).is_absolute():
                 command = ["git", "-C", path, "remote", "get-url", "origin"]
                 if host in self.local_hosts:
                     result = self._run(command)

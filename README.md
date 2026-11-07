@@ -218,6 +218,15 @@ following known defaults are the fallback when that lookup is unavailable:
 - `clickety-clacks/lachesis`: `main`
 - `clickety-clacks/tightbeam`: `main`
 
+When a checkout is gone, an explicit organization repository identity in the
+commit reference's `repo` or `remote` field still identifies the GitHub
+repository to check. This accepts `clickety-clacks/<repository>`,
+`github:<owner>/<repository>`, GitHub-domain paths, and GitHub HTTPS or SSH
+repository URLs, including the corresponding `.git` suffix. The resolver
+checks only that named repository; it does not search unrelated organization
+repositories. If a reference has no usable repository identity, the legacy
+registered-repository fallback can establish only a positive ancestry proof.
+
 In addition to the default branch, a branch is a shipping line when its entire
 name is a version number with three numeric components, such as `0.1.8`,
 `0.1.14` or `0.2.0`. This rule includes future release-line branches. Feature,
@@ -227,10 +236,13 @@ names are not shipping lines.
 SSH and HTTPS GitHub origins normalize to the same repository identity. A commit
 is merged when any shipping-line ref proves ancestry or patch identity. A
 negative result requires a complete default-branch and release-line inventory
-and successful absence probes. A missing checkout, unknown repository, missing
-commit, or failed/incomplete lookup reports unknown rather than guessing.
-Git results are retained in the ATC-owned Git cache across process restarts and
-restored as stale evidence until a new lookup confirms them.
+and successful absence probes. An unknown repository, missing commit, or
+failed/incomplete lookup without a prior definite answer reports unknown rather
+than guessing. If a recheck for the same refs is inconclusive, the previous
+definite result remains visible as stale evidence; only a new definite answer
+replaces it. The last attempt time is tracked separately to keep retries
+bounded. Git results are retained in the ATC-owned Git cache across process
+restarts and restored as stale evidence until a new lookup confirms them.
 
 ## Control API
 
