@@ -206,9 +206,11 @@ branch-containment check. An empty list means no landing was observed; the
 shipping-line Git resolver checks the effective refs, and absent Git proof leaves
 merge status unknown.
 
-Each recorded `host:path` checkout is used only to read its `origin`; the service
-then resolves the commit through a service-owned cache for that repository when
-there is no observed landing. The product-owned shipping-line registry covers
+Each recorded `host:path` checkout is used to read its `origin` when available.
+If the checkout is gone, its path basename can nominate a repository candidate
+for Git verification. The service then resolves the commit through a
+service-owned cache when there is no observed landing. The product-owned
+shipping-line registry covers
 repositories in the `clickety-clacks` organization. For each named repository,
 the resolver reads the default branch from the remote's symbolic `HEAD`; the
 following known defaults are the fallback when that lookup is unavailable:
@@ -217,6 +219,20 @@ following known defaults are the fallback when that lookup is unavailable:
 - `clickety-clacks/tightbeam-specs`: `main`
 - `clickety-clacks/lachesis`: `main`
 - `clickety-clacks/tightbeam`: `main`
+
+When a checkout is gone, an explicit organization repository identity in the
+commit reference's `repo` or `remote` field still identifies the GitHub
+repository to check. This accepts `clickety-clacks/<repository>`,
+`github:<owner>/<repository>`, GitHub-domain paths, and GitHub HTTPS or SSH
+repository URLs, including the corresponding `.git` suffix. The resolver
+checks only that named repository; it does not search unrelated organization
+repositories. For a host-qualified checkout path, the resolver uses the
+longest matching known public organization repository slug as a candidate. A
+path name alone does not prove repository identity: Git must establish commit
+containment and the shipping-line result. If the candidate lookup is
+inconclusive, the legacy registered-repository fallback can establish only a
+positive ancestry proof; otherwise the result stays unknown. The resolver does
+not search unrelated organization repositories.
 
 In addition to the default branch, a branch is a shipping line when its entire
 name is a version number with three numeric components, such as `0.1.8`,
@@ -227,9 +243,9 @@ names are not shipping lines.
 SSH and HTTPS GitHub origins normalize to the same repository identity. A commit
 is merged when any shipping-line ref proves ancestry or patch identity. A
 negative result requires a complete default-branch and release-line inventory
-and successful absence probes. A missing checkout, unknown repository, missing
-commit, or failed/incomplete lookup without prior definite evidence reports
-unknown rather than guessing. An inconclusive recheck of unchanged references
+and successful absence probes. An unknown repository, missing commit, or
+failed/incomplete lookup without prior definite evidence reports unknown rather
+than guessing. An inconclusive recheck of unchanged references
 preserves the last definite result and its observation time as stale evidence;
 only a definite answer replaces it. The attempt time is tracked separately to
 keep retries bounded, including after restart. Changed references do not inherit

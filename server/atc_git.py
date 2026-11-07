@@ -1,7 +1,7 @@
 """Canonical Git evidence, cached in ATC's own directory."""
 
 import hashlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import socket
@@ -19,6 +19,30 @@ CANONICAL_REFS = {
 }
 
 ORG_REMOTE = re.compile(r"git@github\.com:clickety-clacks/[A-Za-z0-9_.-]+\.git\Z", re.IGNORECASE)
+GITHUB_REPOSITORY = re.compile(
+    r"(?:https?://github\.com/|ssh://git@github\.com/|git@github\.com:|"
+    r"github\.com[:/]|github:)(?P<owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?\Z",
+    re.IGNORECASE,
+)
+ORG_REPOSITORY = re.compile(
+    r"clickety-clacks/(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?\Z",
+    re.IGNORECASE,
+)
+# Bounded vocabulary for matching checkout directory names to public
+# organization repositories. Explicit repo/remote fields remain unrestricted.
+PUBLIC_ORG_REPOSITORIES = frozenset({
+    "agent-window-resolver", "agentd", "agentd-hub", "argus", "clawdbot",
+    "clawline", "clipmesh", "engram", "ghostty", "gooarchy",
+    "gooarchy-flavorings", "harklight-agent", "harklight-app",
+    "harklight-server", "homebrew-tap", "lachesis", "lachesis-omarchy",
+    "omarchy-ask", "omarchy-key-visualizer", "omarchy-nasa2043-theme",
+    "omarchy-subspace", "omarchy-window-panel", "pimcamp", "scottland",
+    "seldon", "subspace", "subspace-daemon", "surf-ace", "swiftterm",
+    "tightbeam", "tightbeam-atc", "tightbeam-chat", "tightbeam-decisions-omarchy",
+    "tightbeam-design", "tightbeam-specs", "tightbeam-tuner",
+    "tightbeam-workitem-pies", "vimarchy", "xdg-desktop-portal-wlr", "yoohoo",
+})
 RELEASE_LINE = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
 )
@@ -39,6 +63,38 @@ def is_org_remote(remote):
     return isinstance(remote, str) and ORG_REMOTE.fullmatch(remote) is not None
 
 
+def repository_remote(identity):
+    """Return the named organization remote, False for other GitHub repos."""
+    if not isinstance(identity, str):
+        return None
+    identity = identity.strip().split("#", 1)[0].rstrip("/")
+    match = ORG_REPOSITORY.fullmatch(identity)
+    if match:
+        return f"git@github.com:clickety-clacks/{match['repository']}.git"
+    match = GITHUB_REPOSITORY.fullmatch(identity)
+    if not match:
+        return None
+    if match["owner"].casefold() != "clickety-clacks":
+        return False
+    return f"git@github.com:clickety-clacks/{match['repository']}.git"
+
+
+def repository_remote_from_checkout(repo):
+    """Return the longest public org slug candidate in a checkout basename."""
+    if not isinstance(repo, str) or ":" not in repo:
+        return None
+    _, path = repo.split(":", 1)
+    if not path.startswith("/"):
+        return None
+    checkout = PurePosixPath(path.rstrip("/")).name.casefold()
+    matches = [name for name in PUBLIC_ORG_REPOSITORIES
+               if checkout == name or checkout.startswith(name + "-")]
+    if not matches:
+        return None
+    repository = max(matches, key=len)
+    return f"git@github.com:clickety-clacks/{repository}.git"
+
+
 class GitResolver:
     def __init__(self, cache, refs=None, host_routes=None, ttl=300, timeout=4):
         self.cache = Path(cache)
@@ -52,17 +108,21 @@ class GitResolver:
         return subprocess.run(args, capture_output=True, text=True, timeout=self.timeout)
 
     def _origin(self, reference):
-        explicit = normalize_remote(reference.get("remote"))
+        explicit_value = reference.get("remote")
+        explicit = normalize_remote(explicit_value)
         if explicit:
-            return explicit if explicit in self.refs or is_org_remote(explicit) else False
+            if explicit in self.refs or is_org_remote(explicit):
+                return explicit
+            named = repository_remote(explicit_value)
+            return named if named is not None else False
         repo = reference.get("repo")
         cached = self.origins.get(repo)
         if cached and time.monotonic() - cached[0] < self.ttl:
             return cached[1]
-        origin = None
+        origin = repository_remote(repo)
         if isinstance(repo, str) and ":" in repo:
             host, path = repo.split(":", 1)
-            if Path(path).is_absolute():
+            if origin is None and Path(path).is_absolute():
                 command = ["git", "-C", path, "remote", "get-url", "origin"]
                 if host in self.local_hosts:
                     result = self._run(command)
@@ -74,6 +134,8 @@ class GitResolver:
                 if result is not None and result.returncode == 0:
                     found = normalize_remote(result.stdout.strip())
                     origin = found if found in self.refs or is_org_remote(found) else False
+            if origin is None:
+                origin = repository_remote_from_checkout(repo)
         self.origins[repo] = (time.monotonic(), origin)
         return origin
 
@@ -171,6 +233,20 @@ class GitResolver:
             return None
         return lines[0].startswith("-")
 
+    def _registered_ancestry(self, commit):
+        """Use known repositories only for positive ancestry recovery."""
+        probes = []
+        for registered in self.refs:
+            target_refs, _ = self._target_refs(registered)
+            for branch in target_refs:
+                try:
+                    probes.append(self._probe(
+                        registered, branch, commit, ancestry_only=True,
+                        allow_commit_fetch=False))
+                except (OSError, subprocess.TimeoutExpired):
+                    probes.append(None)
+        return True if any(probe is True for probe in probes) else None
+
     def resolve(self, references):
         findings = []
         attempted_commit_fetches = set()
@@ -185,10 +261,13 @@ class GitResolver:
                 findings.append(cached[1])
                 continue
             try:
+                repo_identity = reference.get("repo")
+                path_candidate = None
+                if not reference.get("remote") and repository_remote(repo_identity) is None:
+                    path_candidate = repository_remote_from_checkout(repo_identity)
                 remote = self._origin(reference)
                 if remote is False:
-                    probes = []
-                    complete = False
+                    value = None
                 elif remote:
                     target_refs, complete = self._target_refs(remote)
                     probes = []
@@ -203,23 +282,18 @@ class GitResolver:
                             # A failed branch probe is incomplete evidence for
                             # that branch. Keep checking other shipping lines.
                             probes.append(None)
+                    value = True if any(p is True for p in probes) else (
+                        False if complete and probes and all(p is False for p in probes) else None)
+                    # A checkout basename only nominates a candidate repo. If
+                    # Git cannot establish an answer there, retain the legacy
+                    # bounded positive-only proof across registered repos.
+                    if path_candidate == remote and value is None:
+                        value = self._registered_ancestry(commit)
                 else:
                     # A missing checkout cannot identify its repository. Keep
                     # the existing registered-repository recovery path: only
                     # a positive ancestry proof may recover that identity.
-                    probes = []
-                    for registered in self.refs:
-                        target_refs, _ = self._target_refs(registered)
-                        for branch in target_refs:
-                            try:
-                                probes.append(self._probe(
-                                    registered, branch, commit, ancestry_only=True,
-                                    allow_commit_fetch=False))
-                            except (OSError, subprocess.TimeoutExpired):
-                                probes.append(None)
-                    complete = False
-                value = True if any(p is True for p in probes) else (
-                    False if complete and probes and all(p is False for p in probes) else None)
+                    value = self._registered_ancestry(commit)
             except (OSError, subprocess.TimeoutExpired):
                 value = None
             self.results[key] = (time.monotonic(), value)
