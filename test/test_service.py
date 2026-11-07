@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from atc_service import LiveService, WORK_ITEM_FIELDS
+from atc_payloads import policies_for
 from atc_upstream import Read
 
 
@@ -1054,8 +1055,8 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual("Version 6", self.item()["title"])
 
     def test_summary_payload_supplies_item_facts_and_skips_git_resolution(self):
-        from atc_payloads import BUILD_ID
-        self.service.version = dict(zip(("version", "build", "sha"), BUILD_ID))
+        self.service.version = {"version": "0.1.15", "build": 3866, "sha": "b09a64a9"}
+        self.service.policies = policies_for(self.service.version)
         ref = {"repo": "example/repo", "commit": "a" * 40}
         landing = {"repository": "example/repo", "branch": "main", "commit": "a" * 40,
                    "headCommit": "b" * 40, "pullRequest": 14, "observedAt": 90}
@@ -1130,6 +1131,7 @@ class ServiceRecoveryTest(unittest.TestCase):
 
     def test_summary_count_gap_requests_only_the_matching_attest_scopes(self):
         self.service.version = {"version": "0.1.15", "build": 3866, "sha": "b09a64a9"}
+        self.service.policies = policies_for(self.service.version)
         payload = summarized_work("Count changed", 2, attest_counts={"progress": 2})
         self.assertTrue(self.service.change({
             "resource": "work-items", "op": "upsert", "class": "work_item.updated",
