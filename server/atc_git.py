@@ -29,6 +29,20 @@ ORG_REPOSITORY = re.compile(
     r"clickety-clacks/(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?\Z",
     re.IGNORECASE,
 )
+# Bounded vocabulary for matching checkout directory names to public
+# organization repositories. Explicit repo/remote fields remain unrestricted.
+PUBLIC_ORG_REPOSITORIES = frozenset({
+    "agent-window-resolver", "agentd", "agentd-hub", "argus", "clawdbot",
+    "clawline", "clipmesh", "engram", "ghostty", "gooarchy",
+    "gooarchy-flavorings", "harklight-agent", "harklight-app",
+    "harklight-server", "homebrew-tap", "lachesis", "lachesis-omarchy",
+    "omarchy-ask", "omarchy-key-visualizer", "omarchy-nasa2043-theme",
+    "omarchy-subspace", "omarchy-window-panel", "pimcamp", "scottland",
+    "seldon", "subspace", "subspace-daemon", "surf-ace", "swiftterm",
+    "tightbeam", "tightbeam-atc", "tightbeam-chat", "tightbeam-decisions-omarchy",
+    "tightbeam-design", "tightbeam-specs", "tightbeam-tuner",
+    "tightbeam-workitem-pies", "vimarchy", "xdg-desktop-portal-wlr", "yoohoo",
+})
 RELEASE_LINE = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
 )
@@ -66,19 +80,18 @@ def repository_remote(identity):
 
 
 def repository_remote_from_checkout(repo):
-    """Infer only the repository slug encoded by a standard `*-source` path."""
+    """Match a checkout basename to its longest known public org repo slug."""
     if not isinstance(repo, str) or ":" not in repo:
         return None
     _, path = repo.split(":", 1)
     if not path.startswith("/"):
         return None
-    checkout = PurePosixPath(path.rstrip("/")).name
-    suffix = "-source"
-    if not checkout.endswith(suffix):
+    checkout = PurePosixPath(path.rstrip("/")).name.casefold()
+    matches = [name for name in PUBLIC_ORG_REPOSITORIES
+               if checkout == name or checkout.startswith(name + "-")]
+    if not matches:
         return None
-    repository = checkout[:-len(suffix)]
-    if not repository or not re.fullmatch(r"[A-Za-z0-9_.-]+", repository):
-        return None
+    repository = max(matches, key=len)
     return f"git@github.com:clickety-clacks/{repository}.git"
 
 

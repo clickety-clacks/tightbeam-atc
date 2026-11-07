@@ -12,7 +12,7 @@ from atc_git import CANONICAL_REFS, GitResolver, repository_remote_from_checkout
 ATC_REMOTE = "git@github.com:clickety-clacks/tightbeam-atc.git"
 TIGHTBEAM_REMOTE = "git@github.com:clickety-clacks/tightbeam.git"
 SPECS_REMOTE = "git@github.com:clickety-clacks/tightbeam-specs.git"
-OTHER_ORG_REMOTE = "git@github.com:clickety-clacks/other-project.git"
+CLAWLINE_REMOTE = "git@github.com:clickety-clacks/clawline.git"
 LOCAL_HOST = socket.gethostname().split(".", 1)[0]
 
 
@@ -56,11 +56,11 @@ class CanonicalGitTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source, remote, commits = self._make_shipping_line_remote(
-                root / "org-repo", origin=OTHER_ORG_REMOTE, default_branch="trunk")
-            resolver = LocalGitResolver(root / "cache", {OTHER_ORG_REMOTE: remote})
+                root / "org-repo", origin=CLAWLINE_REMOTE, default_branch="trunk")
+            resolver = LocalGitResolver(root / "cache", {CLAWLINE_REMOTE: remote})
 
             def ref(commit):
-                return {"remote": OTHER_ORG_REMOTE, "commit": commit}
+                return {"remote": CLAWLINE_REMOTE, "commit": commit}
 
             # The dynamically discovered repository default and whole-name
             # version branches are shipping lines, including future versions.
@@ -82,7 +82,7 @@ class CanonicalGitTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _, remote, commits = self._make_shipping_line_remote(
-                root / "org-repo", origin=OTHER_ORG_REMOTE, default_branch="trunk")
+                root / "org-repo", origin=CLAWLINE_REMOTE, default_branch="trunk")
 
             class TrackingResolver(LocalGitResolver):
                 def __init__(self, *args, **kwargs):
@@ -93,17 +93,17 @@ class CanonicalGitTest(unittest.TestCase):
                     self.target_repositories.append(remote_name)
                     return super()._target_refs(remote_name)
 
-            resolver = TrackingResolver(root / "cache", {OTHER_ORG_REMOTE: remote})
+            resolver = TrackingResolver(root / "cache", {CLAWLINE_REMOTE: remote})
             identities = (
-                ("clickety-clacks/other-project", commits["default"]),
-                ("github:clickety-clacks/other-project", commits["0.1.14-first"]),
-                ("https://github.com/clickety-clacks/other-project.git",
+                ("clickety-clacks/clawline", commits["default"]),
+                ("github:clickety-clacks/clawline", commits["0.1.14-first"]),
+                ("https://github.com/clickety-clacks/clawline.git",
                  commits["0.2.0"]),
-                ("ssh://git@github.com/clickety-clacks/other-project.git",
+                ("ssh://git@github.com/clickety-clacks/clawline.git",
                  commits["1.0.0"]),
-                ("github.com:clickety-clacks/other-project",
+                ("github.com:clickety-clacks/clawline",
                  commits["0.1.14-second"]),
-                ("clickety-clacks/other-project#0.1.14",
+                ("clickety-clacks/clawline#0.1.14",
                  commits["default"]),
             )
             for repo, commit in identities:
@@ -112,17 +112,18 @@ class CanonicalGitTest(unittest.TestCase):
 
             # A missing checkout with an explicit repository identity probes
             # only that repository; it never broadens into the four fallbacks.
-            self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
+            self.assertEqual({CLAWLINE_REMOTE}, set(resolver.target_repositories))
             self.assertIs(True, resolver.resolve([{
-                "repo": "retired:/checkout", "remote": "github:clickety-clacks/other-project",
+                "repo": "retired:/checkout", "remote": "github:clickety-clacks/clawline",
                 "commit": commits["0.1.14-first"],
             }]))
-            self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
+            self.assertEqual({CLAWLINE_REMOTE}, set(resolver.target_repositories))
 
-            # Stored commit refs can retain only the host-qualified checkout
-            # path. The standard source-checkout basename identifies exactly
-            # one organization repository after the checkout is deleted.
-            path_only = {"repo": "retired:/workspace/other-project-source"}
+            # Stored refs can contain only a host-qualified checkout path.
+            # The repository slug may be followed by a task-specific suffix.
+            path_only = {
+                "repo": "retired:/workspace/clawline-incomingmessages-spec-recon",
+            }
             for commit_name, expected in (
                     ("default", True), ("0.2.0", True),
                     ("feature/change", False), ("unreachable", None)):
@@ -130,37 +131,59 @@ class CanonicalGitTest(unittest.TestCase):
                     self.assertIs(expected, resolver.resolve([{
                         **path_only, "commit": commits[commit_name],
                     }]))
-            self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
+            self.assertEqual({CLAWLINE_REMOTE}, set(resolver.target_repositories))
 
             self.assertIs(False, resolver.resolve([{
-                "repo": "clickety-clacks/other-project",
+                "repo": "clickety-clacks/clawline",
                 "commit": commits["quarantine/held-work"],
             }]))
             self.assertIsNone(resolver.resolve([{
-                "repo": "clickety-clacks/other-project",
+                "repo": "clickety-clacks/clawline",
                 "commit": commits["unreachable"],
             }]))
             self.assertIsNone(resolver.resolve([{
-                "repo": "https://github.com/example/other-project.git",
+                "repo": "https://github.com/example/clawline.git",
                 "commit": commits["default"],
             }]))
-            self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
+            self.assertEqual({CLAWLINE_REMOTE}, set(resolver.target_repositories))
             self.assertIsNone(resolver.resolve([{
                 "repo": "retired:/workspace/unknown-checkout",
                 "commit": commits["0.2.0"],
             }]))
 
-    def test_observed_org_source_checkout_names_identify_one_repository(self):
-        observed = (
-            "harklight-app", "tightbeam-chat", "surf-ace", "scottland",
-            "harklight-server", "gooarchy", "clawline",
-        )
-        for repository in observed:
-            with self.subTest(repository=repository):
+    def test_observed_checkout_names_match_longest_public_org_repository(self):
+        observed = {
+            "clawline-incomingmessages-spec-recon": "clawline",
+            "clawline-source": "clawline",
+            "gooarchy": "gooarchy",
+            "scottland-review": "scottland",
+            "harklight-app": "harklight-app",
+            "harklight-server": "harklight-server",
+            "surf-ace-source": "surf-ace",
+            "tightbeam-chat": "tightbeam-chat",
+            "tightbeam-recon-source": "tightbeam",
+        }
+        for checkout, repository in observed.items():
+            with self.subTest(checkout=checkout):
                 self.assertEqual(
                     f"git@github.com:clickety-clacks/{repository}.git",
-                    repository_remote_from_checkout(
-                        f"retired:/workspace/{repository}-source"))
+                    repository_remote_from_checkout(f"retired:/workspace/{checkout}"))
+        self.assertIsNone(repository_remote_from_checkout(
+            "retired:/workspace/specs-source"))
+        self.assertIsNone(repository_remote_from_checkout(
+            "retired:/workspace/wal-dispatch-c12-source"))
+
+    def test_unmatched_checkout_path_keeps_registered_ancestry_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, specs_remote, commits = self._make_shipping_line_remote(
+                root / "specs", origin=SPECS_REMOTE)
+            resolver = LocalGitResolver(root / "cache", {SPECS_REMOTE: specs_remote})
+            repo = "retired:/workspace/specs-source"
+            self.assertIsNone(repository_remote_from_checkout(repo))
+            self.assertIs(True, resolver.resolve([{
+                "repo": repo, "commit": commits["default"],
+            }]))
 
     def test_quarantine_only_reference_stays_yellow(self):
         with tempfile.TemporaryDirectory() as tmp:
