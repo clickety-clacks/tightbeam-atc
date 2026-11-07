@@ -228,7 +228,12 @@ SSH and HTTPS GitHub origins normalize to the same repository identity. A commit
 is merged when any shipping-line ref proves ancestry or patch identity. A
 negative result requires a complete default-branch and release-line inventory
 and successful absence probes. A missing checkout, unknown repository, missing
-commit, or failed/incomplete lookup reports unknown rather than guessing.
+commit, or failed/incomplete lookup without prior definite evidence reports
+unknown rather than guessing. An inconclusive recheck of unchanged references
+preserves the last definite result and its observation time as stale evidence;
+only a definite answer replaces it. The attempt time is tracked separately to
+keep retries bounded, including after restart. Changed references do not inherit
+the old result.
 Git results are retained in the ATC-owned Git cache across process restarts and
 restored as stale evidence until a new lookup confirms them.
 
