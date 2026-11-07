@@ -224,8 +224,11 @@ repository to check. This accepts `clickety-clacks/<repository>`,
 `github:<owner>/<repository>`, GitHub-domain paths, and GitHub HTTPS or SSH
 repository URLs, including the corresponding `.git` suffix. The resolver
 checks only that named repository; it does not search unrelated organization
-repositories. If a reference has no usable repository identity, the legacy
-registered-repository fallback can establish only a positive ancestry proof.
+repositories. A host-qualified checkout path also identifies its repository
+when its final directory is named `<repository>-source`; this lets a retired
+checkout resolve from the stored path alone. Other paths without a usable
+repository identity retain the legacy registered-repository fallback, which
+can establish only a positive ancestry proof.
 
 In addition to the default branch, a branch is a shipping line when its entire
 name is a version number with three numeric components, such as `0.1.8`,

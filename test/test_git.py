@@ -119,6 +119,15 @@ class CanonicalGitTest(unittest.TestCase):
             }]))
             self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
 
+            # Stored commit refs can retain only the host-qualified checkout
+            # path. The standard source-checkout basename identifies exactly
+            # one organization repository after the checkout is deleted.
+            self.assertIs(True, resolver.resolve([{
+                "repo": "retired:/workspace/other-project-source",
+                "commit": commits["0.2.0"],
+            }]))
+            self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
+
             self.assertIs(False, resolver.resolve([{
                 "repo": "clickety-clacks/other-project",
                 "commit": commits["quarantine/held-work"],
@@ -132,6 +141,10 @@ class CanonicalGitTest(unittest.TestCase):
                 "commit": commits["default"],
             }]))
             self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
+            self.assertIsNone(resolver.resolve([{
+                "repo": "retired:/workspace/unknown-checkout",
+                "commit": commits["0.2.0"],
+            }]))
 
     def test_quarantine_only_reference_stays_yellow(self):
         with tempfile.TemporaryDirectory() as tmp:

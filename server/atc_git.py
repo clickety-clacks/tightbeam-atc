@@ -1,7 +1,7 @@
 """Canonical Git evidence, cached in ATC's own directory."""
 
 import hashlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import socket
@@ -65,6 +65,23 @@ def repository_remote(identity):
     return f"git@github.com:clickety-clacks/{match['repository']}.git"
 
 
+def repository_remote_from_checkout(repo):
+    """Infer only the repository slug encoded by a standard `*-source` path."""
+    if not isinstance(repo, str) or ":" not in repo:
+        return None
+    _, path = repo.split(":", 1)
+    if not path.startswith("/"):
+        return None
+    checkout = PurePosixPath(path.rstrip("/")).name
+    suffix = "-source"
+    if not checkout.endswith(suffix):
+        return None
+    repository = checkout[:-len(suffix)]
+    if not repository or not re.fullmatch(r"[A-Za-z0-9_.-]+", repository):
+        return None
+    return f"git@github.com:clickety-clacks/{repository}.git"
+
+
 class GitResolver:
     def __init__(self, cache, refs=None, host_routes=None, ttl=300, timeout=4):
         self.cache = Path(cache)
@@ -104,6 +121,8 @@ class GitResolver:
                 if result is not None and result.returncode == 0:
                     found = normalize_remote(result.stdout.strip())
                     origin = found if found in self.refs or is_org_remote(found) else False
+            if origin is None:
+                origin = repository_remote_from_checkout(repo)
         self.origins[repo] = (time.monotonic(), origin)
         return origin
 
