@@ -102,10 +102,46 @@ class GitResolver:
         self.host_routes = host_routes or {}
         self.ttl, self.timeout = ttl, timeout
         self.results, self.origins, self.branches, self.targets = {}, {}, {}, {}
+        # Diagnostics share existing cache lifetimes; they never affect lookup
+        # values, retry timing or persistent merge evidence.
+        self.diagnostics = []
+        self._diagnostic_ref = None
         self.local_hosts = {socket.gethostname(), socket.gethostname().split(".", 1)[0]}
 
     def _run(self, args):
         return subprocess.run(args, capture_output=True, text=True, timeout=self.timeout)
+
+    def _note(self, step, **fields):
+        if self._diagnostic_ref is not None:
+            # Never include argv, checkout paths, stdout/stderr or exception
+            # messages: these can contain credentials supplied to Git/SSH.
+            remote = fields.get("remote")
+            if remote is not None:
+                fields["remote"] = remote if is_org_remote(remote) else "<other>"
+            branch = fields.get("branch")
+            if branch is not None and not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", branch):
+                fields["branch"] = "<other>"
+            self._diagnostic_ref["steps"].append({"step": step, **fields})
+
+    def _steps(self):
+        return self._diagnostic_ref["steps"] if self._diagnostic_ref is not None else []
+
+    def _command(self, step, args, **context):
+        started = time.monotonic()
+        command = "routed-ssh/git" if args[0] == "ssh" else "git"
+        try:
+            result = self._run(args)
+        except Exception as error:
+            self._note(step, command=command, **context,
+                       elapsedMs=round((time.monotonic() - started) * 1000, 3),
+                       error=type(error).__name__,
+                       timeout=isinstance(error, subprocess.TimeoutExpired))
+            raise
+        if result.returncode or step == "raw-fetch":
+            self._note(step, command=command, **context,
+                       elapsedMs=round((time.monotonic() - started) * 1000, 3),
+                       exitCode=result.returncode)
+        return result
 
     def _origin(self, reference):
         explicit_value = reference.get("remote")
@@ -118,16 +154,18 @@ class GitResolver:
         repo = reference.get("repo")
         cached = self.origins.get(repo)
         if cached and time.monotonic() - cached[0] < self.ttl:
+            self._note("origin-cache", remote=cached[1], priorSteps=cached[2])
             return cached[1]
+        step_start = len(self._steps())
         origin = repository_remote(repo)
         if isinstance(repo, str) and ":" in repo:
             host, path = repo.split(":", 1)
             if origin is None and Path(path).is_absolute():
                 command = ["git", "-C", path, "remote", "get-url", "origin"]
                 if host in self.local_hosts:
-                    result = self._run(command)
+                    result = self._command("origin", command)
                 elif host in self.host_routes:
-                    result = self._run(["ssh", "-o", "BatchMode=yes",
+                    result = self._command("origin", ["ssh", "-o", "BatchMode=yes",
                                         self.host_routes[host], shlex.join(command)])
                 else:
                     result = None
@@ -136,19 +174,21 @@ class GitResolver:
                     origin = found if found in self.refs or is_org_remote(found) else False
             if origin is None:
                 origin = repository_remote_from_checkout(repo)
-        self.origins[repo] = (time.monotonic(), origin)
+        self.origins[repo] = (time.monotonic(), origin, self._steps()[step_start:])
         return origin
 
     def _target_refs(self, remote):
         cached = self.targets.get(remote)
         if cached and time.monotonic() - cached[0] < self.ttl:
+            self._note("targets-cache", remote=remote, complete=cached[1][1], priorSteps=cached[2])
             return cached[1]
 
+        step_start = len(self._steps())
         default_ref = None
         heads = set()
         heads_complete = False
         try:
-            default = self._run(["git", "ls-remote", "--symref", remote, "HEAD"])
+            default = self._command("default-branch", ["git", "ls-remote", "--symref", remote, "HEAD"], remote=remote)
             if default.returncode == 0:
                 for line in default.stdout.splitlines():
                     if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
@@ -162,7 +202,7 @@ class GitResolver:
             default_ref = known_defaults[0] if known_defaults else None
 
         try:
-            advertised = self._run(["git", "ls-remote", "--heads", remote])
+            advertised = self._command("shipping-lines", ["git", "ls-remote", "--heads", remote], remote=remote)
             if advertised.returncode == 0:
                 heads_complete = True
                 for line in advertised.stdout.splitlines():
@@ -179,45 +219,53 @@ class GitResolver:
         refs = tuple(dict.fromkeys(([default_ref] if default_ref else []) + version_refs))
         complete = heads_complete and default_ref is not None and default_ref in heads
         result = (refs, complete)
-        self.targets[remote] = (time.monotonic(), result)
+        self._note("targets", remote=remote, complete=complete, count=len(refs))
+        self.targets[remote] = (time.monotonic(), result, self._steps()[step_start:])
         return result
 
     def _branch(self, remote, branch):
         key = (remote, branch)
         cached = self.branches.get(key)
         if cached and time.monotonic() - cached[0] < self.ttl:
+            self._note("branch-cache", remote=remote, branch=branch, available=cached[1] is not None, priorSteps=cached[2])
             return cached[1]
+        step_start = len(self._steps())
         directory = self.cache / (hashlib.sha256(remote.encode()).hexdigest()[:20] + ".git")
         directory.parent.mkdir(parents=True, exist_ok=True)
         if not directory.exists():
-            if self._run(["git", "init", "--bare", "--quiet", str(directory)]).returncode:
+            if self._command("cache-init", ["git", "init", "--bare", "--quiet", str(directory)], remote=remote, branch=branch).returncode:
                 return None
         local_ref = "refs/atc/" + hashlib.sha256(branch.encode()).hexdigest()[:20]
         args = ["git", "--git-dir", str(directory)]
         try:
-            fetched = self._run(args + ["fetch", "--quiet", "--force", remote, branch + ":" + local_ref])
+            fetched = self._command("branch-fetch", args + ["fetch", "--quiet", "--force", remote, branch + ":" + local_ref], remote=remote, branch=branch)
             value = (args, local_ref) if fetched.returncode == 0 else None
         except (OSError, subprocess.TimeoutExpired):
             value = None
-        self.branches[key] = (time.monotonic(), value)
+        self.branches[key] = (time.monotonic(), value, self._steps()[step_start:])
         return value
 
     def _probe(self, remote, branch, commit, ancestry_only=False,
                allow_commit_fetch=True):
+        self._note("probe", remote=remote, branch=branch, ancestryOnly=ancestry_only,
+                   rawFetchAllowance=("disabled-ancestry-only" if ancestry_only else
+                                      "available" if allow_commit_fetch else "exhausted"))
         loaded = self._branch(remote, branch)
         if loaded is None:
             return None
         args, local_ref = loaded
-        if self._run(args + ["cat-file", "-e", commit + "^{commit}"]).returncode:
+        if self._command("commit-object", args + ["cat-file", "-e", commit + "^{commit}"], remote=remote, branch=branch).returncode:
             if ancestry_only or not allow_commit_fetch:
+                self._note("raw-fetch-skipped", remote=remote, branch=branch,
+                           reason="ancestry-only" if ancestry_only else "allowance-exhausted")
                 return None
             try:
-                fetched = self._run(args + ["fetch", "--quiet", remote, commit])
+                fetched = self._command("raw-fetch", args + ["fetch", "--quiet", remote, commit], remote=remote, branch=branch)
             except (OSError, subprocess.TimeoutExpired):
                 return None
             if fetched.returncode:
                 return None
-        ancestry = self._run(args + ["merge-base", "--is-ancestor", commit, local_ref])
+        ancestry = self._command("ancestry", args + ["merge-base", "--is-ancestor", commit, local_ref], remote=remote, branch=branch)
         if ancestry.returncode == 0:
             return True
         if ancestry.returncode != 1:
@@ -225,16 +273,19 @@ class GitResolver:
         if ancestry_only:
             return None
         # Preserve patch-equivalence evidence for cherry-picked/rebased work.
-        equivalent = self._run(args + ["cherry", local_ref, commit, commit + "~1"])
+        equivalent = self._command("patch-equivalence", args + ["cherry", local_ref, commit, commit + "~1"], remote=remote, branch=branch)
         if equivalent.returncode != 0:
             return None
         lines = equivalent.stdout.splitlines()
         if len(lines) != 1 or lines[0][:1] not in {"-", "+"}:
+            self._note("patch-equivalence-output", remote=remote, branch=branch,
+                       error="UnexpectedOutput")
             return None
         return lines[0].startswith("-")
 
     def _registered_ancestry(self, commit):
         """Use known repositories only for positive ancestry recovery."""
+        self._note("fallback", route="registered-ancestry")
         probes = []
         for registered in self.refs:
             target_refs, _ = self._target_refs(registered)
@@ -248,16 +299,25 @@ class GitResolver:
         return True if any(probe is True for probe in probes) else None
 
     def resolve(self, references):
+        self.diagnostics = []
+        self._diagnostic_ref = None
         findings = []
         attempted_commit_fetches = set()
-        for reference in references:
+        for index, reference in enumerate(references):
             commit = reference.get("commit")
+            self._diagnostic_ref = {"index": index, "commit": commit if isinstance(commit, str)
+                                    and re.fullmatch(r"[0-9a-f]{7,64}", commit) else "<invalid>",
+                                    "steps": []}
+            self.diagnostics.append(self._diagnostic_ref)
             if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
+                self._note("invalid-commit")
                 findings.append(None)
                 continue
             key = (reference.get("repo"), reference.get("remote"), commit)
             cached = self.results.get(key)
             if cached and time.monotonic() - cached[0] < self.ttl:
+                self._note("result-cache", value=cached[1], priorSteps=cached[2],
+                           ageMs=round((time.monotonic() - cached[0]) * 1000, 3))
                 findings.append(cached[1])
                 continue
             try:
@@ -266,6 +326,9 @@ class GitResolver:
                 if not reference.get("remote") and repository_remote(repo_identity) is None:
                     path_candidate = repository_remote_from_checkout(repo_identity)
                 remote = self._origin(reference)
+                self._note("origin-selected", remote=remote,
+                           checkoutCandidate=bool(remote) and path_candidate == remote,
+                           available=bool(remote))
                 if remote is False:
                     value = None
                 elif remote:
@@ -294,9 +357,11 @@ class GitResolver:
                     # the existing registered-repository recovery path: only
                     # a positive ancestry proof may recover that identity.
                     value = self._registered_ancestry(commit)
-            except (OSError, subprocess.TimeoutExpired):
+            except (OSError, subprocess.TimeoutExpired) as error:
+                self._note("reference-error", error=type(error).__name__)
                 value = None
-            self.results[key] = (time.monotonic(), value)
+            self.results[key] = (time.monotonic(), value, list(self._steps()))
+            self._note("result", value=value)
             findings.append(value)
         return True if any(v is True for v in findings) else (
             False if findings and all(v is False for v in findings) else None)

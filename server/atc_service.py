@@ -1034,10 +1034,20 @@ class LiveService:
             if job is None:
                 return
             wid, refs = job
+            started = time.monotonic()
+            error_class = None
             try:
                 value = resolver.resolve(refs)
-            except Exception:
+            except Exception as error:
+                error_class = type(error).__name__
                 value = None
+            if value is None:
+                LOG.warning("merge check inconclusive %s", json.dumps({
+                    "item": wid, "worker": threading.current_thread().name,
+                    "elapsedMs": round((time.monotonic() - started) * 1000, 3),
+                    "error": error_class,
+                    "refs": resolver.diagnostics if isinstance(resolver, GitResolver) else [],
+                }, separators=(",", ":")))
             self.events.put(("merged", (wid, refs, value, now_ms())))
 
     def _refresh(self, resource, scope=None, key=None):

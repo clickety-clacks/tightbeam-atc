@@ -257,6 +257,15 @@ not replace it. A negative result does not carry over to a changed ref set.
 Git results are retained in the ATC-owned Git cache across process restarts and
 restored as stale evidence until a new lookup confirms them.
 
+When a natural merge check is inconclusive, the service writes one structured
+`merge check inconclusive` line to its existing log. It identifies the item,
+commit-reference index and hash, worker, selected repository/branch, failed
+command kind and exit/timeout/error class, fetch allowance, fallback and elapsed
+time. Cache hits label earlier diagnostic steps as `priorSteps`; they are not
+new command attempts. Command arguments, checkout paths, output and exception
+messages are omitted to avoid logging credentials. Logging does not add probes
+or change resolution, retry timing or retained merge evidence.
+
 ## Control API
 
 Anything that can reach the service can drive the view. There is no
