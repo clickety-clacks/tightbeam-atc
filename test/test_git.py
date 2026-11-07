@@ -6,10 +6,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
+from atc_evidence import merge_ring
 from atc_git import CANONICAL_REFS, GitResolver
 
 ATC_REMOTE = "git@github.com:clickety-clacks/tightbeam-atc.git"
 TIGHTBEAM_REMOTE = "git@github.com:clickety-clacks/tightbeam.git"
+SPECS_REMOTE = "git@github.com:clickety-clacks/tightbeam-specs.git"
+OTHER_ORG_REMOTE = "git@github.com:clickety-clacks/other-project.git"
 LOCAL_HOST = socket.gethostname().split(".", 1)[0]
 
 
@@ -20,6 +23,8 @@ class LocalGitResolver(GitResolver):
         self.remotes, self.failure = remotes, failure
 
     def _run(self, args):
+        if "ls-remote" in args and self.failure == "listing":
+            return subprocess.CompletedProcess(args, 1, "", "unavailable")
         if "fetch" in args and self.failure == "timeout":
             raise subprocess.TimeoutExpired(args, 4)
         if "fetch" in args and self.failure == "failed":
@@ -45,7 +50,85 @@ class CanonicalGitTest(unittest.TestCase):
             self.assertIsNone(resolver.resolve([ref(source, absent), ref(source, "f" * 40)]))
             self.assertIs(True, resolver.resolve([ref(release, release_landed)]))
             self.assertIs(False, resolver.resolve([ref(release, release_absent)]))
-            self.assertEqual(("refs/heads/main", "refs/heads/0.1.8"), CANONICAL_REFS[TIGHTBEAM_REMOTE])
+            self.assertEqual(("refs/heads/main",), CANONICAL_REFS[TIGHTBEAM_REMOTE])
+
+    def test_default_and_release_line_branches_count_across_org_repositories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, remote, commits = self._make_shipping_line_remote(
+                root / "org-repo", origin=OTHER_ORG_REMOTE, default_branch="trunk")
+            resolver = LocalGitResolver(root / "cache", {OTHER_ORG_REMOTE: remote})
+
+            def ref(commit):
+                return {"remote": OTHER_ORG_REMOTE, "commit": commit}
+
+            # The dynamically discovered repository default and whole-name
+            # version branches are shipping lines, including future versions.
+            for name in ("default", "0.1.14-first", "0.1.14-second", "0.2.0", "1.0.0"):
+                with self.subTest(branch=name):
+                    self.assertIs(True, resolver.resolve([ref(commits[name])]))
+
+            # Branches containing code without landing on a shipping line stay
+            # unmerged, even when their names contain a version number.
+            for name in ("feature/change", "candidate/0.1.14", "backport/change",
+                         "archive/change", "attic/change", "agent/change",
+                         "codex/atc-kungfu-evidence", "0.1.14-rc.1", "release/0.1.14"):
+                with self.subTest(branch=name):
+                    self.assertIs(False, resolver.resolve([ref(commits[name])]))
+
+            self.assertIsNone(resolver.resolve([ref(commits["unreachable"])]))
+
+    def test_quarantine_only_reference_stays_yellow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, remote, commits = self._make_shipping_line_remote(root / "repo")
+            resolver = LocalGitResolver(root / "cache", {TIGHTBEAM_REMOTE: remote})
+            quarantine_only = {"remote": TIGHTBEAM_REMOTE,
+                               "commit": commits["codex/atc-kungfu-evidence"]}
+            self.assertIs(False, resolver.resolve([quarantine_only]))
+            self.assertEqual("yellow", merge_ring(5, False, None, True))
+
+            # This preserved work-item ref is not present in the fixture's
+            # shipping lines; a missing object stays unknown and therefore yellow.
+            preserved_quarantine_ref = {
+                "remote": TIGHTBEAM_REMOTE,
+                "commit": "d505270b2d72570a65f7668395e939b9a254925b",
+            }
+            self.assertIsNone(resolver.resolve([preserved_quarantine_ref]))
+            self.assertEqual("yellow", merge_ring(5, None, None, True))
+
+    def test_correction_ledger_refs_cover_main_release_and_shared_commits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, atc_remote, atc_landed, _, _ = self._make_remote(
+                root / "atc", origin=ATC_REMOTE)
+            _, specs_remote, specs_landed, _, _ = self._make_remote(
+                root / "specs", origin=SPECS_REMOTE)
+            _, tightbeam_remote, release_landed, _ = self._make_release_remote(root / "tightbeam")
+            resolver = LocalGitResolver(root / "cache", {
+                ATC_REMOTE: atc_remote,
+                SPECS_REMOTE: specs_remote,
+                TIGHTBEAM_REMOTE: tightbeam_remote,
+            })
+            corrected_main = {"repo": "retired:/atc", "remote": ATC_REMOTE,
+                              "ref": "refs/heads/main", "commit": atc_landed}
+            corrected_specs = {"remote": SPECS_REMOTE, "commit": specs_landed}
+            release_line = {"repo": "retired:/tightbeam", "remote": TIGHTBEAM_REMOTE,
+                            "ref": "refs/heads/0.1.8", "commit": release_landed}
+
+            self.assertIs(True, resolver.resolve([corrected_main]))
+            self.assertIs(True, resolver.resolve([corrected_specs]))
+            self.assertIs(True, resolver.resolve([release_line]))
+            # Two work items can share the same corrected port commit.
+            self.assertIs(True, resolver.resolve([release_line, dict(release_line)]))
+
+    def test_incomplete_branch_inventory_cannot_prove_absence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, remote, _, _, absent = self._make_remote(root)
+            resolver = LocalGitResolver(root / "cache", {ATC_REMOTE: remote}, "listing")
+            self.assertIsNone(resolver.resolve([{"repo": f"{LOCAL_HOST}:{source}",
+                                                 "commit": absent}]))
 
     def test_https_origin_and_deleted_checkout_canonical_proof(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +203,8 @@ class CanonicalGitTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(source), "push", "origin",
                         "main", "equivalent", "absent"], check=True,
                        capture_output=True, text=True)
+        subprocess.run(["git", "--git-dir", str(remote), "symbolic-ref", "HEAD",
+                        "refs/heads/main"], check=True, capture_output=True, text=True)
         subprocess.run(["git", "-C", str(source), "remote", "set-url", "origin", origin],
                        check=True)
         return source, remote, landed, equivalent, absent
@@ -163,9 +248,78 @@ class CanonicalGitTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(source), "push", "origin",
                         "main", "0.1.8", "candidate"], check=True,
                        capture_output=True, text=True)
+        subprocess.run(["git", "--git-dir", str(remote), "symbolic-ref", "HEAD",
+                        "refs/heads/main"], check=True, capture_output=True, text=True)
         subprocess.run(["git", "-C", str(source), "remote", "set-url", "origin",
                         TIGHTBEAM_REMOTE], check=True)
         return source, remote, landed, absent
+
+    def _make_shipping_line_remote(self, root, origin=TIGHTBEAM_REMOTE, default_branch="main"):
+        root.mkdir(parents=True, exist_ok=True)
+        source = root / "source"
+        remote = root / "canonical.git"
+        subprocess.run(["git", "init", "-b", default_branch, str(source)], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email",
+                        "test@example.com"], check=True)
+        (source / "base.txt").write_text("base\n")
+        subprocess.run(["git", "-C", str(source), "add", "base.txt"], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-m", "base"],
+                       check=True, capture_output=True, text=True)
+        base = self._rev(source, "HEAD")
+
+        commits = {}
+        branches = [default_branch]
+        (source / "default.txt").write_text("default shipping line\n")
+        subprocess.run(["git", "-C", str(source), "add", "default.txt"], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-m", "default shipping line"],
+                       check=True, capture_output=True, text=True)
+        commits["default"] = self._rev(source, "HEAD")
+
+        names = ("0.1.14", "0.2.0", "1.0.0", "feature/change",
+                 "candidate/0.1.14", "backport/change", "archive/change",
+                 "attic/change", "agent/change", "codex/atc-kungfu-evidence",
+                 "0.1.14-rc.1", "release/0.1.14")
+        for name in names:
+            subprocess.run(["git", "-C", str(source), "switch", "-c", name, base],
+                           check=True, capture_output=True, text=True)
+            filename = name.replace("/", "-") + ".txt"
+            (source / filename).write_text(name + "\n")
+            subprocess.run(["git", "-C", str(source), "add", filename], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-m", name],
+                           check=True, capture_output=True, text=True)
+            branches.append(name)
+            if name == "0.1.14":
+                commits["0.1.14-first"] = self._rev(source, "HEAD")
+                (source / "0.1.14-second.txt").write_text("second sample\n")
+                subprocess.run(["git", "-C", str(source), "add", "0.1.14-second.txt"], check=True)
+                subprocess.run(["git", "-C", str(source), "commit", "-m", "second release sample"],
+                               check=True, capture_output=True, text=True)
+                commits["0.1.14-second"] = self._rev(source, "HEAD")
+            else:
+                commits[name] = self._rev(source, "HEAD")
+
+        subprocess.run(["git", "-C", str(source), "switch", "-c", "unpublished", base],
+                       check=True, capture_output=True, text=True)
+        (source / "unreachable.txt").write_text("not published\n")
+        subprocess.run(["git", "-C", str(source), "add", "unreachable.txt"], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-m", "unpublished"],
+                       check=True, capture_output=True, text=True)
+        commits["unreachable"] = self._rev(source, "HEAD")
+
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(source), "remote", "add", "origin", str(remote)],
+                       check=True)
+        subprocess.run(["git", "-C", str(source), "push", "origin", *branches], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "--git-dir", str(remote), "symbolic-ref", "HEAD",
+                        f"refs/heads/{default_branch}"], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(source), "remote", "set-url", "origin", origin],
+                       check=True)
+        return source, remote, commits
 
     def _rev(self, repo, ref):
         return subprocess.run(["git", "-C", str(repo), "rev-parse", ref], check=True,
