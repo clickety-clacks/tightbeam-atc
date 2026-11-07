@@ -177,8 +177,12 @@ focus, scope, pan and layers stay local through model changes and recovery.
 Payload processing is not gated by the connected Gateway build. ATC applies its
 audited per-resource field and version checks across builds; an unaudited or
 unknown build shows a warning while incomplete or conflicting payloads continue
-to use targeted reads. The source audit covers selected 0.1.9 build 2908
-upserts, and real-feed verification on other builds remains pending. See the
+to use targeted reads. Work-item summary fields are audited against Tightbeam
+0.1.15 source `b09a64a9`; the rest of the resource inventory remains based on
+the 0.1.9 audit. A 0.1.14 Gateway retains the legacy work-item and Git paths
+until the summary is available. Real-feed verification against 0.1.15 remains
+pending. Since the other resource audits still cover 0.1.9, a 0.1.15 Gateway
+continues to show the compatibility warning. See the
 [per-resource guarantee inventory](docs/payload-guarantees.md) for the exact
 field/version checks, exclusions and targeted-read gaps.
 Other notices trigger a background read of the affected row or scope. Sequence
@@ -193,11 +197,17 @@ not make unannounced changes newer than their last complete read. Per-fact
 observation ages remain authoritative. Active-scale throughput is not yet measured.
 Feed processing continues while background reads run. Partial reads remove nothing.
 
-**On merge detection.** No attest kind means "merged" — an item can hold a
-completion, a clean review *and* a verified verdict while its code is still off
-the branch. Each recorded `host:path` checkout is used only to read its `origin`;
-the service then resolves the commit through a service-owned cache for that
-canonical repository. Arbitrary remote branches are never landing proof. The
+**On merge detection.** A 0.1.15 work-item summary carries durable observed
+landing records associated with effective commit references. Each record names
+the repository, branch, merge commit, reviewed head, pull request and observation
+time. A matching record confirms an observed landing; an empty list leaves merge
+status unknown and does not prove that a branch lacks the commit. The item view
+keeps the record as provenance and never treats it as a branch-containment check.
+
+Gateways without this summary continue to use the legacy canonical Git resolver.
+Each recorded `host:path` checkout is used only to read its `origin`; the service
+then resolves the commit through a service-owned cache for that canonical
+repository. Arbitrary remote branches are never landing proof. The
 product-owned integration-ref registry is:
 
 - `clickety-clacks/tightbeam-atc`: `main`

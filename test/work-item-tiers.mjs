@@ -41,6 +41,22 @@ assert.equal(unknownHolders.tier, 'unknown');
 assert.equal(workPlacementText(unknownHolders, agents),
   'unknown · assignment state could not be established, so this item is not placed in a tier · holders unknown');
 
+const summaryOpenItem = (id, started, holders, extra = {}) => ({
+  ...openItem(id, {open: null, terminal: null, holders, complete: false}),
+  started, evidence: {assignments: {complete: false}, summary: {status: 'known', complete: true}},
+  ...extra,
+});
+assert.equal(classifyWorkItemPlacement(summaryOpenItem('summary-cloud', false, []), agents).tier,
+  'cloud', 'the complete item summary can place an unassigned item with stale assignment details');
+assert.equal(classifyWorkItemPlacement(summaryOpenItem('summary-started', true, []), agents).tier,
+  'perimeter', 'the complete item summary distinguishes a previously assigned item');
+assert.equal(classifyWorkItemPlacement(summaryOpenItem('summary-carded', true, [active.id]), agents).tier,
+  'carded', 'summary holders retain active-holder placement');
+assert.equal(classifyWorkItemPlacement(summaryOpenItem('summary-retired', true, [retired.id]), agents).tier,
+  'perimeter', 'summary holders preserve retired-card placement');
+assert.equal(classifyWorkItemPlacement(summaryOpenItem('summary-unknown', true, ['missing-agent']), agents).tier,
+  'unknown', 'an unresolved summary holder stays visibly unknown');
+
 const incompleteInventory = classifyWorkItemPlacement(openItem('incomplete', {
   open: null, terminal: null, holders: [retired.id], complete: false,
 }), agents);

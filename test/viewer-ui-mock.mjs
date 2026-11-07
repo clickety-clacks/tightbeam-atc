@@ -144,7 +144,7 @@ const closedItemHint = itemHintSummary({
   },
 });
 assert.equal(closedItemHint.summary,
-  'state: closed · stage: 5 · open assignments: 0 · merge status: merged',
+  'state: closed · stage: 5 · open assignments: 0 · merge status: merge confirmed',
   'non-open items have no unfinished-stage qualifier');
 
 /* The same model and DOM seam used by the HUD must expose global state, ages,
