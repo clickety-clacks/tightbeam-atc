@@ -229,6 +229,8 @@ is merged when any shipping-line ref proves ancestry or patch identity. A
 negative result requires a complete default-branch and release-line inventory
 and successful absence probes. A missing checkout, unknown repository, missing
 commit, or failed/incomplete lookup reports unknown rather than guessing.
+Git results are retained in the ATC-owned Git cache across process restarts and
+restored as stale evidence until a new lookup confirms them.
 
 ## Control API
 

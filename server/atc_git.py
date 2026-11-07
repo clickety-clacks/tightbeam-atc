@@ -140,15 +140,20 @@ class GitResolver:
         self.branches[key] = (time.monotonic(), value)
         return value
 
-    def _probe(self, remote, branch, commit, ancestry_only=False):
+    def _probe(self, remote, branch, commit, ancestry_only=False,
+               allow_commit_fetch=True):
         loaded = self._branch(remote, branch)
         if loaded is None:
             return None
         args, local_ref = loaded
         if self._run(args + ["cat-file", "-e", commit + "^{commit}"]).returncode:
-            if ancestry_only:
+            if ancestry_only or not allow_commit_fetch:
                 return None
-            if self._run(args + ["fetch", "--quiet", remote, commit]).returncode:
+            try:
+                fetched = self._run(args + ["fetch", "--quiet", remote, commit])
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+            if fetched.returncode:
                 return None
         ancestry = self._run(args + ["merge-base", "--is-ancestor", commit, local_ref])
         if ancestry.returncode == 0:
@@ -168,6 +173,7 @@ class GitResolver:
 
     def resolve(self, references):
         findings = []
+        attempted_commit_fetches = set()
         for reference in references:
             commit = reference.get("commit")
             if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
@@ -185,7 +191,18 @@ class GitResolver:
                     complete = False
                 elif remote:
                     target_refs, complete = self._target_refs(remote)
-                    probes = [self._probe(remote, branch, commit) for branch in target_refs]
+                    probes = []
+                    for branch in target_refs:
+                        key = (remote, commit)
+                        allow_fetch = key not in attempted_commit_fetches
+                        attempted_commit_fetches.add(key)
+                        try:
+                            probes.append(self._probe(
+                                remote, branch, commit, allow_commit_fetch=allow_fetch))
+                        except (OSError, subprocess.TimeoutExpired):
+                            # A failed branch probe is incomplete evidence for
+                            # that branch. Keep checking other shipping lines.
+                            probes.append(None)
                 else:
                     # A missing checkout cannot identify its repository. Keep
                     # the existing registered-repository recovery path: only
@@ -193,8 +210,13 @@ class GitResolver:
                     probes = []
                     for registered in self.refs:
                         target_refs, _ = self._target_refs(registered)
-                        probes.extend(self._probe(registered, branch, commit, ancestry_only=True)
-                                      for branch in target_refs)
+                        for branch in target_refs:
+                            try:
+                                probes.append(self._probe(
+                                    registered, branch, commit, ancestry_only=True,
+                                    allow_commit_fetch=False))
+                            except (OSError, subprocess.TimeoutExpired):
+                                probes.append(None)
                     complete = False
                 value = True if any(p is True for p in probes) else (
                     False if complete and probes and all(p is False for p in probes) else None)

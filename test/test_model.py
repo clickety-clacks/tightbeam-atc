@@ -172,6 +172,13 @@ class ModelTest(unittest.TestCase):
         self.assertEqual("git", resolved["evidence"]["merged"]["source"])
         self.assertEqual(1500, resolved["evidence"]["merged"]["observedAt"])
 
+        # Persisted evidence survives a process restart but remains visibly stale
+        # until the resolver confirms it again.
+        model.merges["work"]["freshness"] = "stale"
+        resumed = model.snapshot(2000)["items"][0]
+        self.assertTrue(resumed["merged"])
+        self.assertEqual("stale", resumed["evidence"]["merged"]["freshness"])
+
     def test_summary_does_not_guess_stage_when_attest_counts_exceed_retained_detail(self):
         model = EvidenceModel()
         model.accept("work-items", None, Read([{
