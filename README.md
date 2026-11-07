@@ -200,17 +200,18 @@ Feed processing continues while background reads run. Partial reads remove nothi
 **On merge detection.** A 0.1.15 work-item summary carries durable observed
 landing records associated with effective commit references. Each record names
 the repository, branch, merge commit, reviewed head, pull request and observation
-time. A matching record confirms an observed landing; an empty list leaves merge
-status unknown and does not prove that a branch lacks the commit. The item view
-keeps the record as provenance and never treats it as a branch-containment check.
+time. A non-empty list is authoritative evidence of an observed landing, and the
+item view keeps those records as provenance without treating them as a
+branch-containment check. An empty list means no landing was observed; the
+shipping-line Git resolver checks the effective refs, and absent Git proof leaves
+merge status unknown.
 
-Gateways without this summary continue to use the legacy canonical Git resolver.
 Each recorded `host:path` checkout is used only to read its `origin`; the service
-then resolves the commit through a service-owned cache for that repository. The
-product-owned shipping-line registry covers repositories in the `clickety-clacks`
-organization. For each named repository, the resolver reads the default branch
-from the remote's symbolic `HEAD`; the following known defaults are the fallback
-when that lookup is unavailable:
+then resolves the commit through a service-owned cache for that repository when
+there is no observed landing. The product-owned shipping-line registry covers
+repositories in the `clickety-clacks` organization. For each named repository,
+the resolver reads the default branch from the remote's symbolic `HEAD`; the
+following known defaults are the fallback when that lookup is unavailable:
 
 - `clickety-clacks/tightbeam-atc`: `main`
 - `clickety-clacks/tightbeam-specs`: `main`

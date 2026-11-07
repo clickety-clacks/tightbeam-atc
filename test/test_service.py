@@ -2,8 +2,10 @@
 
 from copy import deepcopy
 from pathlib import Path
-import sys
 import json
+import subprocess
+import sys
+import tempfile
 import time
 import threading
 import unittest
@@ -12,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from atc_service import LiveService, WORK_ITEM_FIELDS
 from atc_payloads import policies_for
+from atc_git import GitResolver
 from atc_upstream import Read
 
 
@@ -67,6 +70,17 @@ class PublishedReads:
         identity = "sessionKey" if resource == "sessions" else "id"
         rows = [r for r in self.rows.get((resource, scope), []) if r.get(identity) == key]
         return Read(deepcopy(rows), bool(rows), 11, "published-detail")
+
+
+class LocalCanonicalGitResolver(GitResolver):
+    """Use real Git against a local bare remote for resolver interaction tests."""
+    def __init__(self, cache, remotes):
+        super().__init__(cache)
+        self.remotes = remotes
+
+    def _run(self, args):
+        mapped = [str(self.remotes.get(arg, arg)) for arg in args]
+        return super()._run(mapped)
 
 
 class ServiceRecoveryTest(unittest.TestCase):
@@ -1083,6 +1097,69 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.service._resolve_merges()
         self.assertTrue(self.service.merge_jobs.empty())
         self.assertIsNone(self.service._next_merge_retry_at())
+
+    def test_empty_summary_landings_uses_shipping_line_git_result(self):
+        self.service.version = {"version": "0.1.15", "build": 3866, "sha": "b09a64a9"}
+        self.service.policies = policies_for(self.service.version)
+        remote_name = "git@github.com:clickety-clacks/tightbeam.git"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, remote = root / "source", root / "canonical.git"
+            subprocess.run(["git", "init", "-b", "main", str(source)], check=True,
+                           capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email",
+                            "test@example.com"], check=True)
+            (source / "content.txt").write_text("base\n")
+            subprocess.run(["git", "-C", str(source), "add", "content.txt"], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-m", "base"], check=True,
+                           capture_output=True, text=True)
+            base = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            subprocess.run(["git", "-C", str(source), "switch", "-c", "0.1.14", base], check=True,
+                           capture_output=True, text=True)
+            (source / "content.txt").write_text("release line\n")
+            subprocess.run(["git", "-C", str(source), "commit", "-am", "release line"], check=True,
+                           capture_output=True, text=True)
+            release_commit = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
+                                            check=True, capture_output=True,
+                                            text=True).stdout.strip()
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True,
+                           capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(source), "remote", "add", "origin", str(remote)],
+                           check=True)
+            subprocess.run(["git", "-C", str(source), "push", "origin", "main", "0.1.14"],
+                           check=True, capture_output=True, text=True)
+            subprocess.run(["git", "--git-dir", str(remote), "symbolic-ref", "HEAD",
+                            "refs/heads/main"], check=True, capture_output=True, text=True)
+
+            ref = {"repo": "retired:/tightbeam", "remote": remote_name,
+                   "ref": "refs/heads/0.1.14", "commit": release_commit}
+            payload = summarized_work("Historical item", 2, refs=[ref], landings=[])
+            self.assertTrue(self.service.change({
+                "resource": "work-items", "op": "upsert", "class": "work_item.updated",
+                "refs": {"workItemId": "work"}, "payload": payload,
+            }))
+
+            result = self.item()
+            self.assertEqual([], result["landings"])
+            self.assertIsNone(result["merged"])
+
+            # Empty summaries enqueue effective refs; resolve the release-only
+            # commit through real Git and consume the result as the worker does.
+            self.service.resolver = LocalCanonicalGitResolver(root / "cache", {remote_name: remote})
+            self.service.current = {"items": [result]}
+            self.service._resolve_merges()
+            job = self.service.merge_jobs.get_nowait()
+            self.assertEqual(("work", [ref]), job)
+            value = self.service.resolver.resolve(job[1])
+            self.assertIs(value, True)
+            self.assertTrue(self.service._handle("merged", (job[0], job[1], value, 30)))
+
+            resolved = self.item()
+            self.assertTrue(resolved["merged"])
+            self.assertEqual([], resolved["landings"])
+            self.assertEqual("git", resolved["evidence"]["merged"]["source"])
 
     def test_summary_bootstrap_skips_redundant_attest_reads(self):
         gateway = PublishedReads()

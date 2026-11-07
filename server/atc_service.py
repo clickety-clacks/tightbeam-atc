@@ -854,7 +854,7 @@ class LiveService:
         # The resolver owns its cache; the rendering path never starts Git.
         snapshot = self.current
         for item in snapshot["items"]:
-            if item.get("landings") is not None:
+            if item.get("landings"):
                 continue
             refs = item["commitRefs"]
             previous = self.model.merges.get(item["id"])
@@ -873,7 +873,7 @@ class LiveService:
             return None
         deadlines = []
         for item in self.current.get("items", []):
-            if item.get("landings") is not None:
+            if item.get("landings"):
                 continue
             if item.get("code") is not True or not item.get("commitRefs"):
                 continue
