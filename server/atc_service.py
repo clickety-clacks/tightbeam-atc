@@ -135,6 +135,7 @@ class LiveService:
         self.correlation_gaps = set()
         self.merge_jobs = queue.Queue()
         self.merge_pending = {}
+        self.merge_pending_complete = {}
         self.merge_workers_started = 0
         self.condition = threading.Condition()
         self.model_lock = threading.RLock()
@@ -328,6 +329,7 @@ class LiveService:
                     loaded[item_id] = {
                         "value": value, "observedAt": observed_at,
                         "lastAttemptAt": attempted_at, "lastAttemptRefs": attempted_refs,
+                        "lastAttemptComplete": record.get("lastAttemptComplete", True),
                         "refs": refs, "freshness": "stale",
                     }
         except FileNotFoundError:
@@ -347,6 +349,7 @@ class LiveService:
             return
         record = {"id": item_id, "refs": result["refs"],
                   "lastAttemptRefs": result.get("lastAttemptRefs", result["refs"]),
+                  "lastAttemptComplete": result.get("lastAttemptComplete", True),
                   "value": result["value"], "observedAt": result["observedAt"],
                   "lastAttemptAt": result.get("lastAttemptAt", result["observedAt"])}
         try:
@@ -376,6 +379,7 @@ class LiveService:
                     output.write(json.dumps({
                         "id": item_id, "refs": result["refs"],
                         "lastAttemptRefs": result.get("lastAttemptRefs", result["refs"]),
+                        "lastAttemptComplete": result.get("lastAttemptComplete", True),
                         "value": result["value"], "observedAt": result["observedAt"],
                         "lastAttemptAt": result.get("lastAttemptAt", result["observedAt"]),
                     }, separators=(",", ":"), sort_keys=True) + "\n")
@@ -994,11 +998,13 @@ class LiveService:
             last_attempt = (previous.get("lastAttemptAt", previous["observedAt"])
                             if previous else None)
             if (previous and previous.get("lastAttemptRefs", previous["refs"]) == refs
+                    and previous.get("lastAttemptComplete", True) == item.get("commitRefsComplete", True)
                     and now_ms() - last_attempt < self.rebuild_interval * 1000):
                 continue
             if self.merge_pending.get(item["id"]) == refs:
                 continue
             self.merge_pending[item["id"]] = deepcopy(refs)
+            self.merge_pending_complete[item["id"]] = item.get("commitRefsComplete", True)
             self.merge_jobs.put((item["id"], deepcopy(refs)))
 
     def _next_merge_retry_at(self):
@@ -1164,20 +1170,24 @@ class LiveService:
             if self.merge_pending.get(wid) != refs:
                 return False
             self.merge_pending.pop(wid)
+            refs_complete = self.merge_pending_complete.pop(wid, True)
             previous = self.model.merges.get(wid)
+            if (previous and previous.get("value") is True and not refs_complete):
+                merged = None
             if (merged is None and previous
-                    and isinstance(merge_value_for_refs(previous, refs), bool)):
+                    and isinstance(merge_value_for_refs(previous, refs, refs_complete), bool)):
                 # An unavailable recheck is not new merge evidence. Keep the
                 # last definite answer and its observation time, but remember
                 # the failed attempt separately so feed activity cannot cause
                 # an immediate retry loop. The retained answer is visibly stale.
                 stale = dict(previous, freshness="stale", lastAttemptAt=at,
-                             lastAttemptRefs=deepcopy(refs))
+                             lastAttemptRefs=deepcopy(refs), lastAttemptComplete=refs_complete)
                 self.model.merges[wid] = stale
                 self._persist_merge_result(wid, stale)
-                return previous.get("freshness") != "stale"
+                return (previous.get("freshness") != "stale"
+                        or previous.get("lastAttemptComplete", True) != refs_complete)
             result = {"value": merged, "observedAt": at, "lastAttemptAt": at,
-                      "refs": refs, "freshness": "live"}
+                      "refs": refs, "freshness": "live", "lastAttemptComplete": refs_complete}
             self.model.merges[wid] = result
             self._persist_merge_result(wid, result)
         return True

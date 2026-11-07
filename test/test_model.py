@@ -31,6 +31,25 @@ class ModelTest(unittest.TestCase):
     def read(self, kind, rows, scope=None, complete=True):
         self.model.accept(kind, scope, Read(rows, complete, 10, "test-read"))
 
+    def test_partial_attest_load_keeps_full_persisted_proof_visible(self):
+        proof = [{"repo": "example", "commit": f"{n:040x}"} for n in range(15)]
+        self.model.merges["work"] = {
+            "value": True, "refs": proof, "observedAt": 5, "freshness": "stale",
+        }
+        self.read("attests", [{"id": "done", "kind": "completion",
+                  "assignmentId": "assignment", "ts": 1,
+                  "commitRefs": proof[:1]}], "assignment", complete=False)
+        item = self.model.snapshot(20)["items"][0]
+        self.assertFalse(item["commitRefsComplete"])
+        self.assertTrue(item["merged"])
+        self.assertEqual("stale", item["evidence"]["merged"]["freshness"])
+        self.read("attests", [{"id": "done", "kind": "completion",
+                  "assignmentId": "assignment", "ts": 1,
+                  "commitRefs": proof}], "assignment")
+        item = self.model.snapshot(20)["items"][0]
+        self.assertTrue(item["commitRefsComplete"])
+        self.assertTrue(item["merged"])
+
     def test_grown_merge_proof_stays_visible_until_proving_refs_are_removed(self):
         proof = [{"repo": "example", "commit": "a" * 40},
                  {"repo": "example", "commit": "b" * 40}]

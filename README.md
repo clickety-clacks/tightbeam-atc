@@ -251,7 +251,9 @@ only a definite answer replaces it. The attempt time is tracked separately to
 keep retries bounded, including after restart. A positive proof also survives
 added references while every ref from that proof remains present, marked stale
 until a definite recheck replaces it. Removing any ref from the proof requires a
-fresh result. A negative result does not carry over to a changed ref set.
+fresh result once the reference inventory is complete. During an incomplete
+reference load, a previous positive proof remains stale and partial checks do
+not replace it. A negative result does not carry over to a changed ref set.
 Git results are retained in the ATC-owned Git cache across process restarts and
 restored as stale evidence until a new lookup confirms them.
 

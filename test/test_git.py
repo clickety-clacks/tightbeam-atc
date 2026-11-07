@@ -36,6 +36,20 @@ class LocalGitResolver(GitResolver):
 
 
 class CanonicalGitTest(unittest.TestCase):
+    def test_fresh_registered_proof_without_stored_item_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, remote, landed, _, _ = self._make_remote(root / "atc")
+            for size in (15, 19):
+                # Deleted checkout paths with no candidate still take the
+                # pre-existing bounded ancestry route, without retained proof.
+                refs = [{"repo": f"retired:/removed/task-{n}", "commit": landed}
+                        for n in range(size)]
+                resolver = LocalGitResolver(root / f"cache-{size}", {ATC_REMOTE: remote})
+                self.assertIs(True, resolver.resolve(refs))
+                resolver = LocalGitResolver(root / f"cache-{size}", {ATC_REMOTE: remote})
+                self.assertIs(True, resolver.resolve(refs))
+
     def test_canonical_ancestry_patch_identity_and_absence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
