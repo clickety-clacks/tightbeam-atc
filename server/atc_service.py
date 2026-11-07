@@ -14,7 +14,7 @@ import uuid
 
 from atc_git import GitResolver
 from atc_model import EvidenceModel
-from atc_evidence import combined_evidence
+from atc_evidence import combined_evidence, merge_value_for_refs
 from atc_reads import ReadQueue
 from atc_reconciliation import ActiveBackstop, RETRY_MS
 from atc_upstream import ATTEST_FIELDS, Read, attest_row, now_ms
@@ -315,16 +315,19 @@ class LiveService:
                     item_id, refs = record.get("id"), record.get("refs")
                     value, observed_at = record.get("value"), record.get("observedAt")
                     attempted_at = record.get("lastAttemptAt", observed_at)
+                    attempted_refs = record.get("lastAttemptRefs", refs)
                     if (not isinstance(item_id, str) or not item_id
                             or not isinstance(refs, list)
                             or not all(isinstance(ref, dict) for ref in refs)
+                            or not isinstance(attempted_refs, list)
+                            or not all(isinstance(ref, dict) for ref in attempted_refs)
                             or (value is not None and not isinstance(value, bool))
                             or not isinstance(observed_at, (int, float))
                             or not isinstance(attempted_at, (int, float))):
                         continue
                     loaded[item_id] = {
                         "value": value, "observedAt": observed_at,
-                        "lastAttemptAt": attempted_at,
+                        "lastAttemptAt": attempted_at, "lastAttemptRefs": attempted_refs,
                         "refs": refs, "freshness": "stale",
                     }
         except FileNotFoundError:
@@ -343,6 +346,7 @@ class LiveService:
         if path is None:
             return
         record = {"id": item_id, "refs": result["refs"],
+                  "lastAttemptRefs": result.get("lastAttemptRefs", result["refs"]),
                   "value": result["value"], "observedAt": result["observedAt"],
                   "lastAttemptAt": result.get("lastAttemptAt", result["observedAt"])}
         try:
@@ -371,6 +375,7 @@ class LiveService:
                 for item_id, result in entries:
                     output.write(json.dumps({
                         "id": item_id, "refs": result["refs"],
+                        "lastAttemptRefs": result.get("lastAttemptRefs", result["refs"]),
                         "value": result["value"], "observedAt": result["observedAt"],
                         "lastAttemptAt": result.get("lastAttemptAt", result["observedAt"]),
                     }, separators=(",", ":"), sort_keys=True) + "\n")
@@ -988,7 +993,7 @@ class LiveService:
                 continue
             last_attempt = (previous.get("lastAttemptAt", previous["observedAt"])
                             if previous else None)
-            if (previous and previous["refs"] == refs
+            if (previous and previous.get("lastAttemptRefs", previous["refs"]) == refs
                     and now_ms() - last_attempt < self.rebuild_interval * 1000):
                 continue
             if self.merge_pending.get(item["id"]) == refs:
@@ -1160,13 +1165,14 @@ class LiveService:
                 return False
             self.merge_pending.pop(wid)
             previous = self.model.merges.get(wid)
-            if (merged is None and previous and previous.get("refs") == refs
-                    and isinstance(previous.get("value"), bool)):
+            if (merged is None and previous
+                    and isinstance(merge_value_for_refs(previous, refs), bool)):
                 # An unavailable recheck is not new merge evidence. Keep the
                 # last definite answer and its observation time, but remember
                 # the failed attempt separately so feed activity cannot cause
                 # an immediate retry loop. The retained answer is visibly stale.
-                stale = dict(previous, freshness="stale", lastAttemptAt=at)
+                stale = dict(previous, freshness="stale", lastAttemptAt=at,
+                             lastAttemptRefs=deepcopy(refs))
                 self.model.merges[wid] = stale
                 self._persist_merge_result(wid, stale)
                 return previous.get("freshness") != "stale"

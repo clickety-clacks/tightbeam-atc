@@ -91,6 +91,67 @@ class MergeRecheckTest(unittest.TestCase):
         self.assertIsNone(self.service.model.merges["work"]["value"])
         self.assertEqual(changed, self.service.model.merges["work"]["refs"])
 
+    def test_grown_refs_retain_proof_through_failure_compaction_and_restart(self):
+        class FailingResolver:
+            def resolve(self, refs):
+                raise TimeoutError("Git unavailable")
+
+        added = {"repo": "example", "commit": "b" * 40}
+        grown = [added, *self.refs]
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            service = LiveService(object(), resolver=GitResolver(cache))
+            self.addCleanup(service.stop)
+            service.current = {"items": [{"id": "work", "code": True, "commitRefs": grown}]}
+            service.model.merges["work"] = {
+                "value": True, "observedAt": 100_000, "refs": self.refs,
+                "freshness": "live",
+            }
+            with patch("atc_service.now_ms", return_value=400_000):
+                service._resolve_merges()
+                service.merge_jobs.put(None)
+                service._git_worker(FailingResolver())
+            kind, event = service.events.get_nowait()
+            self.assertTrue(service._handle(kind, event))
+            retained = service.model.merges["work"]
+            self.assertIs(True, retained["value"])
+            self.assertEqual(self.refs, retained["refs"], "keep the original proof")
+            self.assertEqual(grown, retained["lastAttemptRefs"])
+            self.assertEqual(100_000, retained["observedAt"])
+            self.assertEqual("stale", retained["freshness"])
+            service._compact_merge_cache(service.merge_cache_path)
+            restarted = LiveService(object(), resolver=GitResolver(cache))
+            self.addCleanup(restarted.stop)
+            restarted.current = service.current
+            self.assertEqual(retained, restarted.model.merges["work"])
+            with patch("atc_service.now_ms", return_value=699_999):
+                restarted._resolve_merges()
+            self.assertTrue(restarted.merge_jobs.empty())
+            with patch("atc_service.now_ms", return_value=700_000):
+                restarted._resolve_merges()
+            self.assertEqual(("work", grown), restarted.merge_jobs.get_nowait())
+            # Replacing any original proof ref invalidates it, even after a
+            # retained result has been persisted for a larger attempted set.
+            removed = [added]
+            restarted.merge_pending["work"] = removed
+            restarted._handle("merged", ("work", removed, None, 700_001))
+            self.assertIsNone(restarted.model.merges["work"]["value"])
+
+    def test_grown_refs_definite_answer_replaces_proof_and_negative_does_not_carry(self):
+        grown = [*self.refs, {"repo": "example", "commit": "b" * 40}]
+        for old, answer in ((True, False), (True, True), (False, None)):
+            with self.subTest(old=old, answer=answer):
+                self.service.model.merges["work"] = {
+                    "value": old, "observedAt": 100_000, "refs": self.refs,
+                    "freshness": "stale",
+                }
+                self.service.merge_pending["work"] = grown
+                self.service._handle("merged", ("work", grown, answer, 400_000))
+                result = self.service.model.merges["work"]
+                self.assertIs(answer, result["value"])
+                self.assertEqual(grown, result["refs"])
+                self.assertEqual(400_000, result["observedAt"])
+
     def test_inconclusive_recheck_preserves_definite_result_and_attempt_time(self):
         for confirmed in (True, False):
             with self.subTest(confirmed=confirmed), tempfile.TemporaryDirectory() as tmp:

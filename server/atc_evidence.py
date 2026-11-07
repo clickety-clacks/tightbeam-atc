@@ -210,3 +210,16 @@ def turn_state(turns, *, complete):
     if any(t.get("startedAt") is None and t.get("endedAt") is None for t in turns):
         return "wait"
     return "idle" if complete else None
+
+
+def merge_value_for_refs(observation, refs):
+    """A positive proof survives additions only while all its refs remain."""
+    proof_refs = observation.get("refs")
+    if proof_refs == refs:
+        return observation.get("value")
+    # The aggregate resolver does not identify which ref proved the merge, so
+    # retain its full original ref set rather than guessing a proving subset.
+    if (observation.get("value") is True and proof_refs
+            and all(ref in refs for ref in proof_refs)):
+        return True
+    return None

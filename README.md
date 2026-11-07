@@ -248,8 +248,10 @@ failed/incomplete lookup without prior definite evidence reports unknown rather
 than guessing. An inconclusive recheck of unchanged references
 preserves the last definite result and its observation time as stale evidence;
 only a definite answer replaces it. The attempt time is tracked separately to
-keep retries bounded, including after restart. Changed references do not inherit
-the old result.
+keep retries bounded, including after restart. A positive proof also survives
+added references while every ref from that proof remains present, marked stale
+until a definite recheck replaces it. Removing any ref from the proof requires a
+fresh result. A negative result does not carry over to a changed ref set.
 Git results are retained in the ATC-owned Git cache across process restarts and
 restored as stale evidence until a new lookup confirms them.
 
