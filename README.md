@@ -206,9 +206,11 @@ branch-containment check. An empty list means no landing was observed; the
 shipping-line Git resolver checks the effective refs, and absent Git proof leaves
 merge status unknown.
 
-Each recorded `host:path` checkout is used only to read its `origin`; the service
-then resolves the commit through a service-owned cache for that repository when
-there is no observed landing. The product-owned shipping-line registry covers
+Each recorded `host:path` checkout is used to read its `origin` when available.
+If the checkout is gone, its path basename can nominate a repository candidate
+for Git verification. The service then resolves the commit through a
+service-owned cache when there is no observed landing. The product-owned
+shipping-line registry covers
 repositories in the `clickety-clacks` organization. For each named repository,
 the resolver reads the default branch from the remote's symbolic `HEAD`; the
 following known defaults are the fallback when that lookup is unavailable:
@@ -224,13 +226,13 @@ repository to check. This accepts `clickety-clacks/<repository>`,
 `github:<owner>/<repository>`, GitHub-domain paths, and GitHub HTTPS or SSH
 repository URLs, including the corresponding `.git` suffix. The resolver
 checks only that named repository; it does not search unrelated organization
-repositories. For a host-qualified checkout path, the resolver matches the
-final directory against known public organization repository slugs. An exact
-slug or a slug followed by `-` identifies that repository; the longest matching
-slug wins. This covers retired checkouts whose directory adds a task suffix
-after the repository name. Paths with no matching slug retain the legacy
-registered-repository fallback, which can establish only a positive ancestry
-proof.
+repositories. For a host-qualified checkout path, the resolver uses the
+longest matching known public organization repository slug as a candidate. A
+path name alone does not prove repository identity: Git must establish commit
+containment and the shipping-line result. If the candidate lookup is
+inconclusive, the legacy registered-repository fallback can establish only a
+positive ancestry proof; otherwise the result stays unknown. The resolver does
+not search unrelated organization repositories.
 
 In addition to the default branch, a branch is a shipping line when its entire
 name is a version number with three numeric components, such as `0.1.8`,

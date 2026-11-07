@@ -13,6 +13,7 @@ ATC_REMOTE = "git@github.com:clickety-clacks/tightbeam-atc.git"
 TIGHTBEAM_REMOTE = "git@github.com:clickety-clacks/tightbeam.git"
 SPECS_REMOTE = "git@github.com:clickety-clacks/tightbeam-specs.git"
 CLAWLINE_REMOTE = "git@github.com:clickety-clacks/clawline.git"
+HARKLIGHT_AGENT_REMOTE = "git@github.com:clickety-clacks/harklight-agent.git"
 LOCAL_HOST = socket.gethostname().split(".", 1)[0]
 
 
@@ -131,7 +132,8 @@ class CanonicalGitTest(unittest.TestCase):
                     self.assertIs(expected, resolver.resolve([{
                         **path_only, "commit": commits[commit_name],
                     }]))
-            self.assertEqual({CLAWLINE_REMOTE}, set(resolver.target_repositories))
+            self.assertEqual(
+                {CLAWLINE_REMOTE, *CANONICAL_REFS}, set(resolver.target_repositories))
 
             self.assertIs(False, resolver.resolve([{
                 "repo": "clickety-clacks/clawline",
@@ -145,13 +147,14 @@ class CanonicalGitTest(unittest.TestCase):
                 "repo": "https://github.com/example/clawline.git",
                 "commit": commits["default"],
             }]))
-            self.assertEqual({CLAWLINE_REMOTE}, set(resolver.target_repositories))
+            self.assertEqual(
+                {CLAWLINE_REMOTE, *CANONICAL_REFS}, set(resolver.target_repositories))
             self.assertIsNone(resolver.resolve([{
                 "repo": "retired:/workspace/unknown-checkout",
                 "commit": commits["0.2.0"],
             }]))
 
-    def test_observed_checkout_names_match_longest_public_org_repository(self):
+    def test_observed_checkout_names_provide_longest_repository_candidates(self):
         observed = {
             "clawline-incomingmessages-spec-recon": "clawline",
             "clawline-source": "clawline",
@@ -184,6 +187,40 @@ class CanonicalGitTest(unittest.TestCase):
             self.assertIs(True, resolver.resolve([{
                 "repo": repo, "commit": commits["default"],
             }]))
+
+    def test_checkout_slug_is_only_a_candidate_until_git_proves_membership(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, candidate_remote, _, _, _ = self._make_remote(
+                root / "candidate", origin=HARKLIGHT_AGENT_REMOTE)
+            _, specs_remote, commits = self._make_shipping_line_remote(
+                root / "specs", origin=SPECS_REMOTE)
+
+            class TrackingResolver(LocalGitResolver):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.probe_results = []
+
+                def _probe(self, remote, branch, commit, ancestry_only=False,
+                           allow_commit_fetch=True):
+                    result = super()._probe(
+                        remote, branch, commit, ancestry_only,
+                        allow_commit_fetch=allow_commit_fetch)
+                    self.probe_results.append((remote, result))
+                    return result
+
+            resolver = TrackingResolver(root / "cache", {
+                HARKLIGHT_AGENT_REMOTE: candidate_remote,
+                SPECS_REMOTE: specs_remote,
+            })
+            # The path suggests harklight-agent, but this commit is only
+            # proven in tightbeam-specs. The path name alone cannot resolve it.
+            self.assertIs(True, resolver.resolve([{
+                "repo": "retired:/workspace/harklight-agent-sender-source",
+                "commit": commits["default"],
+            }]))
+            self.assertIn((HARKLIGHT_AGENT_REMOTE, None), resolver.probe_results)
+            self.assertIn((SPECS_REMOTE, True), resolver.probe_results)
 
     def test_quarantine_only_reference_stays_yellow(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -80,7 +80,7 @@ def repository_remote(identity):
 
 
 def repository_remote_from_checkout(repo):
-    """Match a checkout basename to its longest known public org repo slug."""
+    """Return the longest public org slug candidate in a checkout basename."""
     if not isinstance(repo, str) or ":" not in repo:
         return None
     _, path = repo.split(":", 1)
@@ -233,6 +233,20 @@ class GitResolver:
             return None
         return lines[0].startswith("-")
 
+    def _registered_ancestry(self, commit):
+        """Use known repositories only for positive ancestry recovery."""
+        probes = []
+        for registered in self.refs:
+            target_refs, _ = self._target_refs(registered)
+            for branch in target_refs:
+                try:
+                    probes.append(self._probe(
+                        registered, branch, commit, ancestry_only=True,
+                        allow_commit_fetch=False))
+                except (OSError, subprocess.TimeoutExpired):
+                    probes.append(None)
+        return True if any(probe is True for probe in probes) else None
+
     def resolve(self, references):
         findings = []
         attempted_commit_fetches = set()
@@ -247,10 +261,13 @@ class GitResolver:
                 findings.append(cached[1])
                 continue
             try:
+                repo_identity = reference.get("repo")
+                path_candidate = None
+                if not reference.get("remote") and repository_remote(repo_identity) is None:
+                    path_candidate = repository_remote_from_checkout(repo_identity)
                 remote = self._origin(reference)
                 if remote is False:
-                    probes = []
-                    complete = False
+                    value = None
                 elif remote:
                     target_refs, complete = self._target_refs(remote)
                     probes = []
@@ -265,23 +282,18 @@ class GitResolver:
                             # A failed branch probe is incomplete evidence for
                             # that branch. Keep checking other shipping lines.
                             probes.append(None)
+                    value = True if any(p is True for p in probes) else (
+                        False if complete and probes and all(p is False for p in probes) else None)
+                    # A checkout basename only nominates a candidate repo. If
+                    # Git cannot establish an answer there, retain the legacy
+                    # bounded positive-only proof across registered repos.
+                    if path_candidate == remote and value is None:
+                        value = self._registered_ancestry(commit)
                 else:
                     # A missing checkout cannot identify its repository. Keep
                     # the existing registered-repository recovery path: only
                     # a positive ancestry proof may recover that identity.
-                    probes = []
-                    for registered in self.refs:
-                        target_refs, _ = self._target_refs(registered)
-                        for branch in target_refs:
-                            try:
-                                probes.append(self._probe(
-                                    registered, branch, commit, ancestry_only=True,
-                                    allow_commit_fetch=False))
-                            except (OSError, subprocess.TimeoutExpired):
-                                probes.append(None)
-                    complete = False
-                value = True if any(p is True for p in probes) else (
-                    False if complete and probes and all(p is False for p in probes) else None)
+                    value = self._registered_ancestry(commit)
             except (OSError, subprocess.TimeoutExpired):
                 value = None
             self.results[key] = (time.monotonic(), value)
