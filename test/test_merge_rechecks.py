@@ -121,12 +121,21 @@ class MergeRecheckTest(unittest.TestCase):
             self.assertEqual(("work", proof), restarted.merge_jobs.get_nowait())
             restarted._handle("merged", ("work", proof, None, 400_001))
             self.assertIs(True, restarted.model.merges["work"]["value"])
-            for answer in (False, True):
+            # A later successful full-list check is fresh proof, not merely
+            # the retained True from before the partial startup load.
+            for answer, at in ((True, 700_000), (False, 1_000_000)):
                 restarted.merge_pending["work"] = proof
                 restarted.merge_pending_complete["work"] = True
-                restarted._handle("merged", ("work", proof, answer, 700_000))
-                self.assertIs(answer, restarted.model.merges["work"]["value"])
-                self.assertEqual(700_000, restarted.model.merges["work"]["observedAt"])
+                restarted._handle("merged", ("work", proof, answer, at))
+                refreshed = restarted.model.merges["work"]
+                self.assertIs(answer, refreshed["value"])
+                self.assertEqual(at, refreshed["observedAt"])
+                self.assertEqual(at, refreshed["lastAttemptAt"])
+                self.assertEqual("live", refreshed["freshness"])
+                saved = json.loads((cache / "merge-results.jsonl").read_text().splitlines()[-1])
+                self.assertIs(answer, saved["value"])
+                self.assertEqual(at, saved["observedAt"])
+                self.assertEqual(proof, saved["refs"])
 
     def test_grown_refs_retain_proof_through_failure_compaction_and_restart(self):
         class FailingResolver:
