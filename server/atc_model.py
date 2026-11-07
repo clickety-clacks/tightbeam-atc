@@ -275,6 +275,11 @@ class EvidenceModel:
             code = code_state(owned, producer_refs,
                               complete=assignments.complete if item_summary is not None else complete)
             if item_summary is not None:
+                # Effective refs aggregate every assignment, including review
+                # assignments. Without producer attribution, they prevent a
+                # durable non-code conclusion but do not prove code ownership.
+                if refs and code is False:
+                    code = None
                 landings = list(item_summary["landings"])
                 merged = True if landings else None
                 newest_landing = max(landings, key=lambda landing: landing["observedAt"], default=None)

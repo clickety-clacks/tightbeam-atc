@@ -217,6 +217,31 @@ class ModelTest(unittest.TestCase):
         self.assertEqual("unknown", result["evidence"]["stage"]["status"])
         self.assertEqual("unconfirmed", result["evidence"]["stage"]["freshness"])
 
+    def test_summary_refs_do_not_invent_non_code_without_producer_attribution(self):
+        model = EvidenceModel()
+        ref = {"repo": "example/repo", "commit": "a" * 40}
+        model.accept("work-items", None, Read([{
+            "id": "work", "title": "Work", "state": "open", "rowVersion": 1,
+            "holders": [], "started": True,
+            "attestCounts": {"completion": 1, "verdict": 1},
+            "verdictCounts": {"reviewed-clean": 1},
+            "effectiveCommitRefs": [ref], "landings": [],
+        }], True, 100, "work-items"))
+        model.accept("assignments", None, Read([{
+            "id": "review", "workItemId": "work", "holderKey": "agent s_reviewer",
+            "state": "closed", "closedAt": 10, "effectKind": "review",
+            "reviewsAssignmentId": "producer",
+        }], True, 100, "assignments"))
+        model.accept("sessions", None, Read([], True, 100, "sessions"))
+        model.accept("roles", None, Read([], True, 100, "roles"))
+
+        result = model.snapshot(100)["items"][0]
+        self.assertEqual([ref], result["commitRefs"])
+        self.assertEqual(5, result["stage"])
+        self.assertIsNone(result["code"])
+        self.assertIsNone(result["ring"])
+        self.assertEqual("unknown", result["evidence"]["ring"]["status"])
+
 
 if __name__ == "__main__":
     unittest.main()
