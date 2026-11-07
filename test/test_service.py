@@ -1161,6 +1161,64 @@ class ServiceRecoveryTest(unittest.TestCase):
             self.assertEqual([], resolved["landings"])
             self.assertEqual("git", resolved["evidence"]["merged"]["source"])
 
+    def test_git_merge_result_survives_service_restart_as_stale_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "git-cache"
+            ref = {"repo": "retired:/tightbeam", "remote":
+                   "git@github.com:clickety-clacks/tightbeam.git",
+                   "ref": "refs/heads/0.1.14", "commit": "a" * 40}
+            first = LiveService(PublishedReads(), GitResolver(cache))
+            first.merge_pending["work"] = [ref]
+            self.assertTrue(first._handle("merged", ("work", [ref], True, 100)))
+
+            restarted = LiveService(PublishedReads(), GitResolver(cache))
+            try:
+                result = restarted.model.merges["work"]
+                self.assertTrue(result["value"])
+                self.assertEqual([ref], result["refs"])
+                self.assertEqual(100, result["observedAt"])
+                self.assertEqual("stale", result["freshness"])
+                self.assertTrue((cache / "merge-results.jsonl").is_file())
+            finally:
+                first.stop()
+                restarted.stop()
+
+    def test_unavailable_merge_lookup_does_not_block_an_independent_job(self):
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+        fast_finished = threading.Event()
+
+        class BlockingResolver:
+            def resolve(self, refs):
+                if refs[0]["commit"] == "slow":
+                    slow_started.set()
+                    release_slow.wait(2)
+                else:
+                    fast_finished.set()
+                return True
+
+        service = LiveService(PublishedReads())
+        service.resolver = BlockingResolver()
+        workers = service._merge_resolvers()
+        threads = [threading.Thread(target=service._git_worker, args=(resolver,), daemon=True)
+                   for resolver in workers]
+        for thread in threads:
+            thread.start()
+        try:
+            service.merge_jobs.put(("slow-item", [{"commit": "slow"}]))
+            self.assertTrue(slow_started.wait(1))
+            service.merge_jobs.put(("fast-item", [{"commit": "fast"}]))
+            self.assertTrue(fast_finished.wait(1),
+                            "a blocked lookup must not hold up another queued item")
+        finally:
+            release_slow.set()
+            service.stop_event.set()
+            for _ in threads:
+                service.merge_jobs.put(None)
+            for thread in threads:
+                thread.join(timeout=2)
+            service.stop()
+
     def test_summary_bootstrap_skips_redundant_attest_reads(self):
         gateway = PublishedReads()
         gateway.rows[("work-items", None)] = [summarized_work()]

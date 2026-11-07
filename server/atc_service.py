@@ -1,14 +1,18 @@
 """One upstream feed, recoverable read model, and snapshot/delta subscriptions."""
 
 from collections import Counter, deque
-from copy import deepcopy
+from copy import copy, deepcopy
 import json
 import logging
+import os
+from pathlib import Path
 import queue
+import tempfile
 import threading
 import time
 import uuid
 
+from atc_git import GitResolver
 from atc_model import EvidenceModel
 from atc_evidence import combined_evidence
 from atc_reads import ReadQueue
@@ -31,6 +35,10 @@ PUBLICATION_INTERVAL = 0.25
 EVENT_BATCH_LIMIT = 128
 MAX_DELTA_HISTORY_COUNT = 64
 MAX_DELTA_HISTORY_BYTES = 16 * 1024 * 1024
+MERGE_WORKER_COUNT = 4
+MERGE_CACHE_COMPACT_AFTER = 8192
+MAX_MERGE_CACHE_ENTRIES = 20000
+MERGE_CACHE_NAME = "merge-results.jsonl"
 
 COLLECTIONS = ("agents", "items", "links", "wakes", "messages")
 LOG = logging.getLogger("atc.recovery")
@@ -97,6 +105,10 @@ class LiveService:
             raise ValueError("read intervals, workers and scope budget must be positive")
         self.gateway, self.resolver = gateway, resolver
         self.model = EvidenceModel()
+        self.merge_cache_path = self._cache_path(resolver)
+        self.merge_cache_records = 0
+        self.merge_cache_lock = threading.Lock()
+        self.model.merges.update(self._load_merge_cache())
         self.generation, self.revision = uuid.uuid4().hex, 0
         self.rebuild_interval, self.workers = rebuild_interval, workers
         self.events = queue.Queue()
@@ -123,6 +135,7 @@ class LiveService:
         self.correlation_gaps = set()
         self.merge_jobs = queue.Queue()
         self.merge_pending = {}
+        self.merge_workers_started = 0
         self.condition = threading.Condition()
         self.model_lock = threading.RLock()
         self._dirty = False
@@ -257,19 +270,127 @@ class LiveService:
                 "Live feed is unavailable because the optional websockets library "
                 "is missing; ATC will use periodic gateway snapshots.")
             self.rebuild()
-            targets = (self._worker, self._git_worker)
+            targets = (self._worker,)
         else:
-            targets = (self._worker, self._feed, self._git_worker)
+            targets = (self._worker, self._feed)
         for target in targets:
             threading.Thread(target=target, daemon=True).start()
+        if self.resolver is not None:
+            resolvers = self._merge_resolvers()
+            self.merge_workers_started = len(resolvers)
+            for index, resolver in enumerate(resolvers):
+                threading.Thread(
+                    target=self._git_worker, args=(resolver,), daemon=True,
+                    name=f"atc-git-{index}").start()
 
     def stop(self):
         self.stop_event.set()
         self.events.put(("stop", None))
-        self.merge_jobs.put(None)
+        for _ in range(self.merge_workers_started):
+            self.merge_jobs.put(None)
         self.reads.close()
         with self.condition:
             self.condition.notify_all()
+
+    @staticmethod
+    def _cache_path(resolver):
+        cache = getattr(resolver, "cache", None)
+        return Path(cache) / MERGE_CACHE_NAME if cache is not None else None
+
+    def _load_merge_cache(self):
+        path = self.merge_cache_path
+        if path is None:
+            return {}
+        loaded = {}
+        try:
+            with path.open(encoding="utf-8") as source:
+                for line in source:
+                    self.merge_cache_records += 1
+                    try:
+                        record = json.loads(line)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    item_id, refs = record.get("id"), record.get("refs")
+                    value, observed_at = record.get("value"), record.get("observedAt")
+                    if (not isinstance(item_id, str) or not item_id
+                            or not isinstance(refs, list)
+                            or not all(isinstance(ref, dict) for ref in refs)
+                            or (value is not None and not isinstance(value, bool))
+                            or not isinstance(observed_at, (int, float))):
+                        continue
+                    loaded[item_id] = {
+                        "value": value, "observedAt": observed_at,
+                        "refs": refs, "freshness": "stale",
+                    }
+        except FileNotFoundError:
+            return {}
+        except OSError as error:
+            LOG.warning("could not read persisted merge evidence: %s", error)
+            return {}
+        if len(loaded) > MAX_MERGE_CACHE_ENTRIES:
+            loaded = dict(sorted(
+                loaded.items(), key=lambda entry: entry[1]["observedAt"]
+            )[-MAX_MERGE_CACHE_ENTRIES:])
+        return loaded
+
+    def _persist_merge_result(self, item_id, result):
+        path = self.merge_cache_path
+        if path is None:
+            return
+        record = {"id": item_id, "refs": result["refs"],
+                  "value": result["value"], "observedAt": result["observedAt"]}
+        try:
+            with self.merge_cache_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as output:
+                    output.write(json.dumps(record, separators=(",", ":"),
+                                            sort_keys=True) + "\n")
+                self.merge_cache_records += 1
+                if self.merge_cache_records >= MERGE_CACHE_COMPACT_AFTER:
+                    self._compact_merge_cache(path)
+        except OSError as error:
+            LOG.warning("could not persist merge evidence: %s", error)
+
+    def _compact_merge_cache(self, path):
+        entries = sorted(
+            self.model.merges.items(), key=lambda entry: entry[1]["observedAt"],
+            reverse=True,
+        )[:MAX_MERGE_CACHE_ENTRIES]
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    "w", encoding="utf-8", dir=path.parent,
+                    prefix=path.name + ".", suffix=".tmp", delete=False) as output:
+                temporary = output.name
+                for item_id, result in entries:
+                    output.write(json.dumps({
+                        "id": item_id, "refs": result["refs"],
+                        "value": result["value"], "observedAt": result["observedAt"],
+                    }, separators=(",", ":"), sort_keys=True) + "\n")
+            os.replace(temporary, path)
+            self.merge_cache_records = len(entries)
+        except OSError as error:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+            LOG.warning("could not compact persisted merge evidence: %s", error)
+
+    def _merge_resolvers(self):
+        resolver = self.resolver
+        if not isinstance(resolver, GitResolver):
+            return [resolver] * MERGE_WORKER_COUNT
+        workers = [resolver]
+        for index in range(1, MERGE_WORKER_COUNT):
+            worker = copy(resolver)
+            worker.cache = Path(resolver.cache) / "workers" / f"worker-{index}"
+            worker.results, worker.origins = {}, {}
+            worker.branches, worker.targets = {}, {}
+            workers.append(worker)
+        return workers
 
     def _state(self, state, reason=None):
         if (state in {"live", "rebuilding"} and self.connected and
@@ -887,14 +1008,15 @@ class LiveService:
                 deadlines.append(previous["observedAt"] + self.rebuild_interval * 1000)
         return min(deadlines, default=None)
 
-    def _git_worker(self):
+    def _git_worker(self, resolver=None):
+        resolver = resolver or self.resolver
         while not self.stop_event.is_set():
             job = self.merge_jobs.get()
             if job is None:
                 return
             wid, refs = job
             try:
-                value = self.resolver.resolve(refs)
+                value = resolver.resolve(refs)
             except Exception:
                 value = None
             self.events.put(("merged", (wid, refs, value, now_ms())))
@@ -1029,7 +1151,10 @@ class LiveService:
             if self.merge_pending.get(wid) != refs:
                 return False
             self.merge_pending.pop(wid)
-            self.model.merges[wid] = {"value": merged, "observedAt": at, "refs": refs}
+            result = {"value": merged, "observedAt": at, "refs": refs,
+                      "freshness": "live"}
+            self.model.merges[wid] = result
+            self._persist_merge_result(wid, result)
         return True
 
     def _worker(self):

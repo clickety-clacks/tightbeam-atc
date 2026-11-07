@@ -150,6 +150,56 @@ class CanonicalGitTest(unittest.TestCase):
                 resolver = LocalGitResolver(root / failure, {ATC_REMOTE: remote}, failure)
                 self.assertIsNone(resolver.resolve([{"repo": f"{LOCAL_HOST}:{source}", "commit": landed}]))
 
+    def test_timed_out_default_branch_probe_does_not_hide_release_line_landing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, remote, commits = self._make_shipping_line_remote(root / "repo")
+
+            class DefaultBranchTimeoutResolver(LocalGitResolver):
+                def _probe(self, remote_name, branch, commit, ancestry_only=False,
+                           allow_commit_fetch=True):
+                    if branch == "refs/heads/main":
+                        raise subprocess.TimeoutExpired(["git", "fetch"], 4)
+                    return super()._probe(
+                        remote_name, branch, commit, ancestry_only,
+                        allow_commit_fetch=allow_commit_fetch)
+
+            resolver = DefaultBranchTimeoutResolver(root / "cache", {TIGHTBEAM_REMOTE: remote})
+            result = resolver.resolve([{
+                "repo": f"{LOCAL_HOST}:{source}", "commit": commits["0.1.14-first"],
+            }])
+            self.assertIs(True, result)
+
+    def test_duplicate_unavailable_reference_reuses_result_and_fetches_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, remote, commits = self._make_shipping_line_remote(root / "repo")
+
+            class CountingResolver(LocalGitResolver):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.unavailable_commit = None
+                    self.commit_fetches = 0
+                    self.origin_lookups = 0
+
+                def _origin(self, reference):
+                    self.origin_lookups += 1
+                    return super()._origin(reference)
+
+                def _run(self, args):
+                    if args and args[-1] == self.unavailable_commit:
+                        self.commit_fetches += 1
+                    return super()._run(args)
+
+            resolver = CountingResolver(root / "cache", {TIGHTBEAM_REMOTE: remote})
+            resolver.unavailable_commit = commits["unreachable"]
+            ref = {"repo": f"{LOCAL_HOST}:{source}", "remote": TIGHTBEAM_REMOTE,
+                   "commit": commits["unreachable"]}
+            result = resolver.resolve([ref, dict(ref)])
+            self.assertIsNone(result)
+            self.assertEqual(1, resolver.origin_lookups)
+            self.assertEqual(1, resolver.commit_fetches)
+
     def test_correction_can_name_canonical_remote_after_checkout_retirement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

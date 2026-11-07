@@ -298,7 +298,8 @@ class EvidenceModel:
                     merged = merge["value"] if merge.get("refs") == refs else None
                     merge_facts = {
                         "status": "known" if merged is not None else "unknown",
-                        "freshness": "live" if merged is not None and not assignments.stale else "stale",
+                        "freshness": ("live" if merged is not None and not assignments.stale
+                                      and merge.get("freshness") != "stale" else "stale"),
                         "observedAt": merge["observedAt"], "source": "git",
                         "complete": merged is not None, "landings": landings,
                     }
@@ -308,7 +309,8 @@ class EvidenceModel:
                 merged = merge["value"] if merge.get("refs") == refs else None
                 merge_facts = {
                     "status": "known" if merged is not None else "unknown",
-                    "freshness": "live" if merged is not None and not assignments.stale else "stale",
+                    "freshness": ("live" if merged is not None and not assignments.stale
+                                  and merge.get("freshness") != "stale" else "stale"),
                     "observedAt": merge["observedAt"], "source": "git",
                     "complete": merged is not None,
                 }
