@@ -8,6 +8,7 @@ from atc_evidence import (
     Inventory, agent_id, code_state, combined_evidence, evidence_stage, merge_ring,
     turn_state,
 )
+from atc_payloads import has_work_item_summary
 
 
 KEYS = {"sessions": "sessionKey", "roles": "name", "turns": "seq",
@@ -71,6 +72,9 @@ class EvidenceModel:
     def active_sessions(self):
         holders = {a.get("holderKey") for a in self.inventory("assignments").rows.values()
                    if a.get("state") == "open"}
+        for item in self.inventory("work-items").rows.values():
+            if has_work_item_summary(item):
+                holders.update(item["holders"])
         return [s for s in self.inventory("sessions").rows.values()
                 if s.get("state") == "active" or s["sessionKey"] in holders]
 
@@ -190,22 +194,74 @@ class EvidenceModel:
         items = []
         for wid, item in work.rows.items():
             owned = by_item[wid]
-            summary = {"count": 0, "kinds": Counter(), "verdicts": Counter(), "latest": {}}
+            detail_summary = {"count": 0, "kinds": Counter(), "verdicts": Counter(), "latest": {}}
             for assignment in owned:
                 part = self.summary("attests", assignment["id"])
-                summary["count"] += part["count"]
-                summary["kinds"].update(part["kinds"])
-                summary["verdicts"].update(part["verdicts"])
+                detail_summary["count"] += part["count"]
+                detail_summary["kinds"].update(part["kinds"])
+                detail_summary["verdicts"].update(part["verdicts"])
                 for verdict, timestamp in part["latest"].items():
-                    summary["latest"][verdict] = max(summary["latest"].get(verdict, 0), timestamp)
+                    detail_summary["latest"][verdict] = max(
+                        detail_summary["latest"].get(verdict, 0), timestamp)
             inventory_facts = [self.inventory("attests", a["id"]).evidence() for a in owned]
-            attest_facts = combined_evidence(assignments.evidence(), *inventory_facts)
             identity = work.evidence_for(wid)
-            stage_facts = combined_evidence(identity, assignments.evidence(), attest_facts)
-            complete = stage_facts["complete"]
-            stage = evidence_stage(item, owned, (), complete=complete, summary=summary)
-            kinds = sorted(k for k in summary["kinds"] if k is not None)
-            verdicts = sorted(summary["verdicts"])
+            item_summary = item if has_work_item_summary(item) else None
+            if item_summary is not None:
+                attest_counts = item_summary["attestCounts"]
+                verdict_counts = item_summary["verdictCounts"]
+                summary = {
+                    "count": sum(attest_counts.values()),
+                    "kinds": Counter(attest_counts),
+                    "verdicts": Counter(verdict_counts),
+                    "latest": detail_summary["latest"],
+                }
+                attest_facts = identity
+                detail_counts_match = (
+                    assignments.complete
+                    and all(fact["complete"] and fact["freshness"] == "live"
+                            for fact in inventory_facts)
+                    and {k: v for k, v in detail_summary["kinds"].items() if k is not None}
+                    == attest_counts
+                    and dict(detail_summary["verdicts"]) == verdict_counts
+                )
+                review_details_fresh = assignments.evidence()["freshness"] == "live"
+                stage_facts = identity
+                review_timing_needed = (
+                    item["state"] != "closed" and not item_summary["holders"]
+                    and "completion" in attest_counts
+                    and "reviewed-clean" in verdict_counts
+                    and "tests-passed" in verdict_counts
+                )
+                review_timing_known = (
+                    not review_timing_needed
+                    or (review_details_fresh and detail_counts_match)
+                )
+                if not review_timing_known:
+                    detail_facts = [assignments.evidence(), *inventory_facts]
+                    freshness = identity["freshness"]
+                    if any(fact["freshness"] == "stale" for fact in detail_facts):
+                        freshness = "stale"
+                    elif any(fact["freshness"] == "unconfirmed" for fact in detail_facts):
+                        freshness = "unconfirmed"
+                    stage_facts = dict(identity, status="unknown", complete=False,
+                                       freshness=freshness,
+                                       source=sorted(set(
+                                           identity["source"] if isinstance(identity["source"], list)
+                                           else [identity["source"]]) | {"attests"}))
+                stage = evidence_stage(
+                    item, owned, (), complete=identity["complete"], summary=summary,
+                    has_open=bool(item_summary["holders"]),
+                    review_timing_complete=review_timing_known)
+                kinds = sorted(k for k in attest_counts if k is not None)
+                verdicts = sorted(verdict_counts)
+            else:
+                attest_facts = combined_evidence(assignments.evidence(), *inventory_facts)
+                stage_facts = combined_evidence(identity, assignments.evidence(), attest_facts)
+                complete = stage_facts["complete"]
+                summary = detail_summary
+                stage = evidence_stage(item, owned, (), complete=complete, summary=summary)
+                kinds = sorted(k for k in summary["kinds"] if k is not None)
+                verdicts = sorted(summary["verdicts"])
             refs, producer_refs = [], []
             for assignment in owned:
                 corrections = assignment.get("commitRefCorrections") or []
@@ -214,16 +270,36 @@ class EvidenceModel:
                 refs.extend(found)
                 if not assignment.get("reviewsAssignmentId"):
                     producer_refs.extend(found)
-            code = code_state(owned, producer_refs, complete=complete)
-            merge = self.merges.get(wid, {"value": None, "observedAt": None, "refs": refs})
-            merged = merge["value"] if merge.get("refs") == refs else None
-            merge_facts = {
-                "status": "known" if merged is not None else "unknown",
-                "freshness": "live" if merged is not None and not assignments.stale else "stale",
-                "observedAt": merge["observedAt"], "source": "git",
-                "complete": merged is not None,
-            }
-            ready = "ready-to-merge" in verdicts if complete else None
+            if item_summary is not None:
+                refs = list(item_summary["effectiveCommitRefs"])
+            code = code_state(owned, producer_refs,
+                              complete=assignments.complete if item_summary is not None else complete)
+            if item_summary is not None:
+                landings = list(item_summary["landings"])
+                merged = True if landings else None
+                newest_landing = max(landings, key=lambda landing: landing["observedAt"], default=None)
+                merge_facts = {
+                    "status": "known" if merged is True else "unknown",
+                    "freshness": identity["freshness"],
+                    "observedAt": (newest_landing["observedAt"] if newest_landing
+                                   else identity["observedAt"]),
+                    "source": ["work-items"], "complete": merged is True,
+                    "landings": landings,
+                }
+            else:
+                landings = None
+                merge = self.merges.get(wid, {"value": None, "observedAt": None, "refs": refs})
+                merged = merge["value"] if merge.get("refs") == refs else None
+                merge_facts = {
+                    "status": "known" if merged is not None else "unknown",
+                    "freshness": "live" if merged is not None and not assignments.stale else "stale",
+                    "observedAt": merge["observedAt"], "source": "git",
+                    "complete": merged is not None,
+                }
+            ready = "ready-to-merge" in verdicts if (
+                item_summary is not None and identity["complete"] or
+                item_summary is None and attest_facts["complete"]
+            ) else None
             ring = merge_ring(stage, merged, ready, code)
             ring_facts = combined_evidence(stage_facts, merge_facts)
             # A known higher-precedence ring does not require answers to the
@@ -233,14 +309,23 @@ class EvidenceModel:
             elif ready is True or code is False:
                 # A missing merge answer can still supersede green/gray later.
                 ring_facts = dict(stage_facts)
-            holders = list(dict.fromkeys(ids[a["holderKey"]] for a in owned
-                                        if a["state"] == "open" and a["holderKey"] in ids))
+            if item_summary is not None:
+                holders = list(dict.fromkeys(agent_id(key) for key in item_summary["holders"]))
+                started = item_summary["started"]
+                summary_facts = identity
+            else:
+                holders = list(dict.fromkeys(ids[a["holderKey"]] for a in owned
+                                            if a["state"] == "open" and a["holderKey"] in ids))
+                started = (bool(owned) if assignments.complete else None)
+                summary_facts = dict(assignments.evidence(), status="unknown", complete=False)
             closed = [a["closedAt"] for a in owned if isinstance(a.get("closedAt"), (int, float))]
             items.append({
                 "id": wid, "short": wid[:11], "title": item["title"], "state": item["state"],
                 "stage": stage, "ring": ring, "merged": merged, "code": code,
                 "readyToMerge": ready, "closedAt": max(closed) if closed else None,
-                "holders": holders if assignments.complete else (holders or None),
+                "holders": (holders if item_summary is not None else
+                            holders if assignments.complete else (holders or None)),
+                "started": started, "landings": landings,
                 "turns": (item_turns.get(wid, {}) if item_turn_facts["complete"]
                           else (item_turns.get(wid) or None)),
                 "flow": {holder: "in" for holder in item_turns.get(wid, {})},
@@ -260,6 +345,7 @@ class EvidenceModel:
                     for a in owned for c in a.get("commitRefCorrections", [])],
                 "evidence": {"identity": identity, "stage": stage_facts,
                              "ring": ring_facts, "assignments": assignments.evidence(),
+                             "summary": summary_facts,
                              "attests": attest_facts, "turns": item_turn_facts,
                              "merged": merge_facts, "code": stage_facts},
             })

@@ -144,11 +144,13 @@ def combined_evidence(*facts):
     }
 
 
-def evidence_stage(item, assignments, attests, *, complete, summary=None):
+def evidence_stage(item, assignments, attests, *, complete, summary=None, has_open=None,
+                   review_timing_complete=True):
     """The canonical stages inventory actual evidence, without filling steps."""
     if not complete:
         return None
-    has_open = any(a["state"] == "open" for a in assignments)
+    if has_open is None:
+        has_open = any(a["state"] == "open" for a in assignments)
     if item["state"] == "closed" and not has_open:
         return 6
     if summary is None:
@@ -167,8 +169,11 @@ def evidence_stage(item, assignments, attests, *, complete, summary=None):
     clean = summary["latest"].get("reviewed-clean")
     tested = summary["latest"].get("tests-passed")
     review_stale = clean is not None and tested is not None and tested > clean + 300_000
-    if "completion" in kinds and "reviewed-clean" in verdicts and not has_open and not review_stale:
-        stage = 5
+    if "completion" in kinds and "reviewed-clean" in verdicts and not has_open:
+        if "tests-passed" in verdicts and not review_timing_complete:
+            return None
+        if not review_stale:
+            stage = 5
     return stage
 
 

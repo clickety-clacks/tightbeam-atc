@@ -1,6 +1,47 @@
 # Payload guarantees for the published gateway
 
-This inventory audits **0.1.9 build 2908**, source
+## Work-item summary and observed landing audit (0.1.15)
+
+The work-item summary addition is audited against Tightbeam source
+[`b09a64a939ca00a86033fd5294b6a8dc6968df5d`](https://github.com/clickety-clacks/tightbeam/tree/b09a64a939ca00a86033fd5294b6a8dc6968df5d),
+PR #555, which identifies as `0.1.15` build `3866` with source stamp `b09a64a9`.
+The audit covers the summary fields on work-item collection/detail reads and
+full `work_item.updated` payloads. No 0.1.15 real-feed acceptance test has run.
+
+The exact source defines these fields:
+
+| Field | Source meaning |
+|---|---|
+| `holders` | Unique session keys with open assignments on the item. |
+| `started` | At least one assignment exists; this remains true after assignments close. |
+| `attestCounts` | Counts of all attest kinds associated with the item. |
+| `verdictCounts` | Counts of verdict kinds, including future vocabulary. |
+| `effectiveCommitRefs` | Deduplicated refs, preferring each assignment's correction over its attest refs. |
+| `landings` | Durable observed merge records whose merge commit or reviewed head matches an effective commit ref. Each has repository, branch, merge commit, reviewed head, pull request and the condition-fact observation time. |
+
+The work-item row version is advanced when these summary values change.
+Assignment, attest, correction and observed-landing mutations publish a complete
+updated work-item row when the corresponding feed path requests it. Read paths
+attach the summary to visible work items. The source association checks commit
+identity; it does not claim current branch containment, and the summary does not
+expose the condition fact's `origin` field. An empty `landings` list means no
+matching observed record is available; it is not a negative merge result.
+
+ATC consumes the summary when the complete field set is present. It keeps raw
+attest reads where the existing stage rule needs timestamp order, refreshes a
+scope if the summary counts do not match the retained detail, and no longer
+rotates every terminal attest scope on the 56-hour history backstop. A 0.1.14
+Gateway has no summary fields, so it retains the legacy reconstruction and Git
+resolver paths, including their existing targeted reads and warnings, until a
+compatible Gateway is separately released and installed. Other resource
+payloads remain covered by the older 0.1.9 audit, so the global compatibility
+warning remains on 0.1.15 even though its work-item summary fields are consumed.
+
+The remaining resource field/version inventory below is the earlier source
+audit for Tightbeam 0.1.9 build 2908; it does not extend the 0.1.15 audit to
+other resources.
+
+This older inventory audits **0.1.9 build 2908**, source
 [`8433d22fdf86027d62a34e9923501775225813ad`](https://github.com/clickety-clacks/tightbeam/tree/8433d22fdf86027d62a34e9923501775225813ad).
 It is a source audit. **No real-feed acceptance test has run.** Its field and
 ordering policies apply across Gateway builds; `/version` identity

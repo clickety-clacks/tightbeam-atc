@@ -467,7 +467,7 @@ export function knownStage(stage) {
 
 export function ringMeaning(ring, evidenceStatus, complete = true) {
   /* Yellow is the service's explicit code-but-not-confirmed-merged verdict;
-     the underlying merge lookup may itself be unknown or incomplete. */
+     the underlying landing or legacy lookup may itself be unknown. */
   if (ring === 'yellow') return 'yellow';
   if (evidenceStatus !== 'known' || complete === false) return 'unknown';
   if (RING_VALUES.has(ring)) return ring;

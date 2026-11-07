@@ -20,6 +20,26 @@ export function classifyWorkItemPlacement(item, agentsById) {
   if (activeHolders.length)
     return {tier: 'carded', reason: null, activeHolders, retiredOpenCard: false};
 
+  /* A complete per-item summary supplies the two placement facts that matter
+     here: whether any assignment ever existed and who currently holds an open
+     assignment. The detailed assignment collection may still be incomplete. */
+  const summaryKnown = typeof item.started === 'boolean'
+    && item.evidence?.summary?.status === 'known'
+    && item.evidence.summary.complete === true;
+  if (summaryKnown) {
+    if (!Array.isArray(holders))
+      return {tier: 'unknown', reason: 'holders unknown', activeHolders: [], retiredOpenCard: false};
+    if (!item.started && holders.length)
+      return {tier: 'unknown', reason: 'work-item summary is inconsistent', activeHolders: [], retiredOpenCard: false};
+    if (holders.some(id => !agentFor(agentsById, id)))
+      return {tier: 'unknown', reason: ACTIVE_REASON, activeHolders: [], retiredOpenCard: false};
+    if (holders.length)
+      return {tier: 'perimeter', reason: null, activeHolders: [], retiredOpenCard: true};
+    return item.started
+      ? {tier: 'perimeter', reason: null, activeHolders: [], retiredOpenCard: false}
+      : {tier: 'cloud', reason: null, activeHolders: [], retiredOpenCard: false};
+  }
+
   const open = item.assignments?.open;
   const terminal = item.assignments?.terminal;
   const countsKnown = item.evidence?.assignments?.complete === true

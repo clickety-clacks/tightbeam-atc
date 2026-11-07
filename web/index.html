@@ -1509,7 +1509,7 @@ function renderLegend(){
     `<br><span style="color:${hx(T.liveHot)}">● blue agent = acted just now</span>` +
     `<span style="margin-left:8px;color:${hx(T.liveCold)}">● grey = idle an hour or more</span>` +
     `<span style="margin-left:10px">discs hang below the grid · ${OPEN_WORK_LEGEND} · floor solids = landed (never open work)</span>` +
-    `<span style="margin-left:10px"><span class="sw" style="background:${hx(T.discBlack)};border:1px solid currentColor"></span>black ring = canonical branch contains the code</span>` +
+    `<span style="margin-left:10px"><span class="sw" style="background:${hx(T.discBlack)};border:1px solid currentColor"></span>black ring = merge confirmed</span>` +
     `<span style="margin-left:10px;color:${hx(T.discG)}">green ring = explicit ready-to-merge verdict</span>` +
     `<span style="margin-left:10px;color:${hx(T.discN)}">grey ring = durable non-code item</span>` +
     `<span style="margin-left:10px;color:${hx(T.discY)}">yellow ring = code is not confirmed merged</span>` +
@@ -2906,7 +2906,7 @@ function nodeContent(u, compact){
     const stage = factText(w, 'stage', w.stage,
       value=>value!==null && knownStage(value) ? String(value) : 'unknown');
     const ring = ringMeaning(w.ring, w.evidence?.ring?.status, w.evidence?.ring?.complete);
-    const ringLabels = {black:'black · canonical branch contains code',
+    const ringLabels = {black:'black · merge confirmed',
       green:'green · explicit ready-to-merge verdict',
       'light-gray':'light gray · durable non-code item',
       yellow:'yellow · code is not confirmed merged', none:'none',
@@ -2928,7 +2928,11 @@ function nodeContent(u, compact){
     const mergeKnown = mergeEvidence?.status==='known' && mergeEvidence.complete!==false
       && typeof w.merged==='boolean';
     const mergeUnconfirmed = u.landed && !mergeKnown;
-    const merged = mergeKnown ? (w.merged ? 'in the branch' : 'not in the branch')
+    const landingObserved = Array.isArray(mergeEvidence?.source)
+      && mergeEvidence.source.includes('work-items');
+    const merged = mergeKnown ? (w.merged
+      ? (landingObserved ? 'observed landing' : 'confirmed in a registered branch')
+      : 'not in the registered branches')
       : (mergeUnconfirmed ? 'merge status is not confirmed' : 'unknown');
     const code = w.code===true ? 'code' : w.code===false ? 'non-code' : 'unknown';
     const holders = Array.isArray(w.holders) ? w.holders : null;
@@ -2937,6 +2941,14 @@ function nodeContent(u, compact){
     const verdict = w.readyToMerge===true ? ' · ready-to-merge verdict filed' : '';
     const placementLine = u.unfinished ? workPlacementText(u.placement, byId) : '';
     const stageQualifier = u.unfinished ? ' · ' + OPEN_WORK_STAGE_QUALIFIER : '';
+    const landingRecords = Array.isArray(w.landings) && w.landings.length
+      ? w.landings.map(landing => `${landing.repository}#${landing.pullRequest} · ${landing.branch}`
+        + ` · observed ${Number.isFinite(landing.observedAt)
+          ? new Date(landing.observedAt).toISOString() : 'time unknown'}`
+        + ` · merge ${String(landing.commit || '').slice(0, 12)}`
+        + ` · head ${String(landing.headCommit || '').slice(0, 12)}`).join(' · ')
+      : (landingObserved && Array.isArray(w.landings)
+        ? 'No observed landing record; merge status remains unknown.' : null);
     return '<span class="t">' + esc(w.short || w.id) + '</span>'
       + '<div>' + esc(w.title || 'title unknown') + '</div>'
       + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · stage ' + stage + stageQualifier
@@ -2949,6 +2961,8 @@ function nodeContent(u, compact){
       + '<span class="k">assignments</span><span class="seg">' + esc(assignmentOpen) + ' open · '
         + esc(assignmentTerminal) + ' terminal</span>'
       + '<span class="k">evidence age and source</span>' + evidenceMarkup(w)
+      + (landingRecords ? '<span class="k">observed landing</span><span class="seg">'
+        + esc(landingRecords) + '</span>' : '')
       + '<span class="k">turns</span><span class="seg">' + acts + '</span>'
       /* the pane has room, and this is the id the CLI will accept */
       + evidenceNotesMarkup(w.id)

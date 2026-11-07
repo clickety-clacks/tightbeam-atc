@@ -30,7 +30,7 @@ function hintFactText(fact, additionalQualifier = null) {
 
 const TURN_LABELS = {run: 'running', wait: 'queued', idle: 'idle'};
 const RING_LABELS = {
-  black: 'merged',
+  black: 'merge confirmed',
   green: 'ready to merge',
   'light-gray': 'non-code',
   yellow: 'not confirmed',

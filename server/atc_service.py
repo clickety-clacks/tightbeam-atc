@@ -13,14 +13,15 @@ from atc_model import EvidenceModel
 from atc_evidence import combined_evidence
 from atc_reads import ReadQueue
 from atc_reconciliation import ActiveBackstop, RETRY_MS
-from atc_upstream import ATTEST_FIELDS, attest_row, now_ms
+from atc_upstream import ATTEST_FIELDS, Read, attest_row, now_ms
 
 
 # Per-resource field and ordering policies come from the audited published build.
 # Runtime applies them across Gateway builds, with an explicit warning when the
 # connected identity differs; this is not runtime/feed acceptance evidence.
 from atc_payloads import (
-    WORK_ITEM_FIELDS, CLASSES, required_fields, policies_for, payload_policy_warning,
+    WORK_ITEM_FIELDS, WORK_ITEM_SUMMARY_FIELDS, CLASSES, has_work_item_summary,
+    required_fields, policies_for, payload_policy_warning, supports_work_item_summary,
 )
 
 BASE_SCOPES = (("work-items", None), ("sessions", None), ("assignments", None),
@@ -388,8 +389,16 @@ class LiveService:
                 data[name].append(retained)
 
     def _history_scopes(self):
-        scopes = [("attests", a["id"])
-                for a in self.model.inventory("assignments").rows.values()] + [
+        summary_active = self._summary_contract_active()
+        work_items = self.model.inventory("work-items").rows
+        attest_scopes = []
+        for assignment in self.model.inventory("assignments").rows.values():
+            item = work_items.get(assignment.get("workItemId"))
+            if (summary_active and has_work_item_summary(item)
+                    and not self._summary_needs_review_timing(item)):
+                continue
+            attest_scopes.append(("attests", assignment["id"]))
+        scopes = attest_scopes + [
                     (resource, session["sessionKey"])
                     for session in self.model.active_sessions()
                     for resource in ("turns", "wakes", "messages")]
@@ -424,7 +433,10 @@ class LiveService:
     def _reconciliation(self):
         cycle = self.cycle
         histories = len(self._history_scopes())
-        terminal = len(self.backstop.history)
+        repeated_history = self._repeated_history_scopes()
+        terminal = len(repeated_history)
+        backstop = self.backstop.metadata(self.model, self.connected)
+        backstop["history"] = self.backstop.group(self.model, repeated_history)
         return {"mode": cycle["mode"] if cycle else None,
                 "pendingScopes": len(cycle["pending"]) if cycle else 0,
                 "pendingByResource": _resource_counts(cycle["pending"]) if cycle else {},
@@ -435,7 +447,89 @@ class LiveService:
                                      * self.rebuild_interval * 1000),
                 "lastSweepAt": self.last_sweep,
                 "readDiagnostics": self._read_diagnostics(),
-                **self.backstop.metadata(self.model, self.connected)}
+                **backstop}
+
+    def _summary_contract_active(self):
+        if supports_work_item_summary(self.version):
+            return True
+        if isinstance(self.version, dict) and self.version.get("version") is not None:
+            return False
+        rows = self.model.inventory("work-items").rows.values()
+        rows = list(rows)
+        return bool(rows) and all(has_work_item_summary(row) for row in rows)
+
+    def _repeated_history_scopes(self):
+        scopes = set(self.backstop.history)
+        if self._summary_contract_active():
+            # Summary-backed attest detail stays in the backstop only for
+            # stage timestamp ordering or unresolved summary rows.
+            required = set(self._history_scopes())
+            scopes = {scope for scope in scopes
+                      if scope[0] != "attests" or scope in required}
+        return scopes
+
+    @staticmethod
+    def _summary_needs_review_timing(item):
+        """Whether retained attest timestamps can change the canonical stage."""
+        if not has_work_item_summary(item) or item["state"] == "closed" or item["holders"]:
+            return False
+        return (item["attestCounts"].get("completion", 0) > 0
+                and item["verdictCounts"].get("reviewed-clean", 0) > 0
+                and item["verdictCounts"].get("tests-passed", 0) > 0)
+
+    def _item_attest_counts_match(self, item, *, require_fresh=False):
+        assignments = self.model.inventory("assignments")
+        if (not assignments.complete or not has_work_item_summary(item)
+                or (require_fresh and assignments.evidence()["freshness"] != "live")):
+            return False
+        owned = [row for row in assignments.rows.values()
+                 if row.get("workItemId") == item["id"]]
+        inventories = [self.model.inventory("attests", row["id"]) for row in owned]
+        if any(not inventory.complete or (require_fresh
+               and inventory.evidence()["freshness"] != "live") for inventory in inventories):
+            return False
+        kinds, verdicts = Counter(), Counter()
+        for row in owned:
+            summary = self.model.summary("attests", row["id"])
+            kinds.update({kind: count for kind, count in summary["kinds"].items() if kind is not None})
+            verdicts.update(summary["verdicts"])
+        return dict(kinds) == item["attestCounts"] and dict(verdicts) == item["verdictCounts"]
+
+    def _reconcile_item_attests(self, item):
+        if not self._summary_contract_active() or not has_work_item_summary(item):
+            return
+        assignments = self.model.inventory("assignments")
+        timing_needed = self._summary_needs_review_timing(item)
+        if (not assignments.complete
+                or (timing_needed and assignments.evidence()["freshness"] != "live")):
+            if timing_needed and self.connected:
+                job = ("assignments", None, None)
+                pending = job[:2] in {key[:2] for key in self.reads.pending}
+                active = any(key[:2] == job[:2] for key, _epoch in self.reads.active.values())
+                if not pending and not active:
+                    self._refresh("assignments")
+            return
+        owned = [row for row in assignments.rows.values()
+                 if row.get("workItemId") == item["id"]]
+        details_complete = all(
+            self.model.inventory("attests", row["id"]).complete for row in owned)
+        details_match = self._item_attest_counts_match(item, require_fresh=timing_needed)
+        if (not timing_needed and not details_complete) or details_match:
+            return
+        for row in assignments.rows.values():
+            if row.get("workItemId") != item["id"]:
+                continue
+            job = ("attests", row["id"], None)
+            pending = job[:2] in {key[:2] for key in self.reads.pending}
+            active = any(key[:2] == job[:2] for key, _epoch in self.reads.active.values())
+            if not pending and not active:
+                self._refresh(*job)
+
+    def _reconcile_work_item_attests(self):
+        if not self._summary_contract_active():
+            return
+        for item in self.model.inventory("work-items").rows.values():
+            self._reconcile_item_attests(item)
 
     def _read_diagnostics(self):
         with self.feed_lock:
@@ -579,7 +673,7 @@ class LiveService:
             return
         needed = set(scopes)
         self.backstop.classify(self.model, scopes, now_ms())
-        terminal = self.backstop.history
+        terminal = self._repeated_history_scopes()
         self.rotation = deque(s for s in self.rotation if s in terminal)
         scheduled = set(self.rotation)
         self.rotation.extend(s for s in scopes if s in terminal and s not in scheduled)
@@ -652,6 +746,12 @@ class LiveService:
                     "result": "epoch-discarded", "at": now_ms(),
                 }
             return False
+        if resource == "work-items" and supports_work_item_summary(self.version):
+            invalid = [row for row in result.rows if not has_work_item_summary(row)]
+            if invalid:
+                result = Read(
+                    [row for row in result.rows if has_work_item_summary(row)], False,
+                    result.at, result.source, "work-item-summary-incomplete", result.page)
         if retry:
             self.retry_in_flight.discard(job)
             self.retry_counters["completed" if result.complete else "incomplete"] += 1
@@ -677,6 +777,14 @@ class LiveService:
             self.model.accept(resource, scope, result)
         else:
             self.model.detail(resource, scope, result)
+        if resource == "work-items" and result.complete:
+            if key is None:
+                for row in result.rows:
+                    self._reconcile_item_attests(row)
+            else:
+                row = next((row for row in result.rows if row.get("id") == key), None)
+                if row:
+                    self._reconcile_item_attests(row)
         if not self.connected:
             self.model.inventory(resource, scope).invalidate()
         if result.complete:
@@ -711,6 +819,8 @@ class LiveService:
                         self._cycle_add([(nested, holder)])
                     else:
                         self._refresh(nested, holder)
+        if resource == "assignments" and result.complete:
+            self._reconcile_work_item_attests()
         if self.cycle and key is None:
             if result.complete or self.cycle["mode"] == "interval":
                 self.cycle["pending"].discard(job[:2])
@@ -744,6 +854,8 @@ class LiveService:
         # The resolver owns its cache; the rendering path never starts Git.
         snapshot = self.current
         for item in snapshot["items"]:
+            if item.get("landings") is not None:
+                continue
             refs = item["commitRefs"]
             previous = self.model.merges.get(item["id"])
             if item["code"] is not True or not refs:
@@ -761,6 +873,8 @@ class LiveService:
             return None
         deadlines = []
         for item in self.current.get("items", []):
+            if item.get("landings") is not None:
+                continue
             if item.get("code") is not True or not item.get("commitRefs"):
                 continue
             item_id, refs = item["id"], item["commitRefs"]
@@ -815,7 +929,12 @@ class LiveService:
             return True
         self.reads.touch(normalized, scope)
         inventory = self.model.inventory(normalized, scope)
-        required = required_fields(resource, payload, ATTEST_FIELDS)
+        required = required_fields(resource, payload, ATTEST_FIELDS, self.version)
+        if (resource == "work-items"
+                and (supports_work_item_summary(self.version)
+                     or any(field in payload for field in WORK_ITEM_SUMMARY_FIELDS))
+                and not has_work_item_summary(payload)):
+            required = None
         applied = False
         if (policy and notice.get("op") == "upsert" and required is not None
                 and required <= payload.keys() and notice.get("class") in CLASSES.get(resource, ())
@@ -828,9 +947,19 @@ class LiveService:
                 self.metrics["payloads"] += 1
                 if resource in {"work-items", "attests"} and previous != inventory.rows.get(str(row[inventory.key])):
                     self.model.details_revision += 1
+                if resource == "work-items":
+                    self._reconcile_item_attests(inventory.rows[str(row[inventory.key])])
         if not applied:
-            if resource in {"roles", "attests"}:
+            if resource == "roles":
                 self._refresh(normalized, scope)
+            elif resource == "attests":
+                assignment = self.model.inventory("assignments").rows.get(str(scope))
+                item = (self.model.inventory("work-items").rows.get(assignment.get("workItemId"))
+                        if assignment else None)
+                if (not self._summary_contract_active()
+                        or not has_work_item_summary(item or {})
+                        or self._summary_needs_review_timing(item)):
+                    self._refresh(normalized, scope)
             elif key is not None:
                 self._refresh(normalized, scope, key)
             else:

@@ -21,6 +21,18 @@ def work(title="First", version=1):
     }
 
 
+def summarized_work(title="First", version=1, *, attest_counts=None, verdict_counts=None,
+                   holders=None, started=True, refs=None, landings=None):
+    return work(title, version) | {
+        "holders": ["agent s_author"] if holders is None else holders,
+        "started": started,
+        "attestCounts": {"progress": 1} if attest_counts is None else attest_counts,
+        "verdictCounts": {} if verdict_counts is None else verdict_counts,
+        "effectiveCommitRefs": [] if refs is None else refs,
+        "landings": [] if landings is None else landings,
+    }
+
+
 class PublishedReads:
     def __init__(self):
         self.read_count = 0
@@ -1014,15 +1026,17 @@ class ServiceRecoveryTest(unittest.TestCase):
         versions = [audited, audited | {"version": "0.1.11"}, audited | {"build": 2909},
                     audited | {"sha": "different"}, None]
         for index, version in enumerate(versions, start=2):
+            self.gateway.rows[("work-items", None)] = [work(version=1)]
             self.assertEqual(PAYLOAD_POLICIES, policies_for(version))
             self.service._handle("ready", version)
             self.drain()
             self.assertEqual(PAYLOAD_POLICIES, self.service.policies)
             before = self.gateway.read_count
             title = f"Version {index}"
+            payload = work(title, index)
             self.service.change({"resource": "work-items", "op": "upsert",
                                  "class": "work_item.updated", "refs": {"workItemId": "work"},
-                                 "payload": work(title, index)})
+                                 "payload": payload})
             self.assertEqual(title, self.item()["title"])
             self.assertEqual(before, self.gateway.read_count)
             self.assertFalse(self.service.reads.pending)
@@ -1038,6 +1052,107 @@ class ServiceRecoveryTest(unittest.TestCase):
                              "refs": {"workItemId": "work"}, "payload": work("Invalid class", 99)})
         self.assertIn(("work-items", None, "work"), self.service.reads.pending)
         self.assertEqual("Version 6", self.item()["title"])
+
+    def test_summary_payload_supplies_item_facts_and_skips_git_resolution(self):
+        from atc_payloads import BUILD_ID
+        self.service.version = dict(zip(("version", "build", "sha"), BUILD_ID))
+        ref = {"repo": "example/repo", "commit": "a" * 40}
+        landing = {"repository": "example/repo", "branch": "main", "commit": "a" * 40,
+                   "headCommit": "b" * 40, "pullRequest": 14, "observedAt": 90}
+        payload = summarized_work("Summary", 2, attest_counts={"progress": 1},
+                                  refs=[ref], landings=[landing])
+        applied = self.service.change({
+            "resource": "work-items", "op": "upsert", "class": "work_item.updated",
+            "refs": {"workItemId": "work"}, "payload": payload,
+        })
+        self.assertTrue(applied)
+        result = self.item()
+        self.assertEqual(["s_author"], result["holders"])
+        self.assertTrue(result["started"])
+        self.assertEqual({"total": 1, "byKind": {"progress": 1}, "byVerdict": {}},
+                         result["evidenceCounts"])
+        self.assertEqual([ref], result["commitRefs"])
+        self.assertEqual([landing], result["landings"])
+        self.assertTrue(result["merged"])
+        self.assertEqual(["work-items"], result["evidence"]["merged"]["source"])
+
+        resolver = type("Resolver", (), {"resolve": lambda _self, _refs: self.fail("Git lookup used")})()
+        self.service.resolver = resolver
+        self.service.current = {"items": [result]}
+        self.service._resolve_merges()
+        self.assertTrue(self.service.merge_jobs.empty())
+        self.assertIsNone(self.service._next_merge_retry_at())
+
+    def test_summary_bootstrap_skips_redundant_attest_reads(self):
+        gateway = PublishedReads()
+        gateway.rows[("work-items", None)] = [summarized_work()]
+        service = LiveService(gateway)
+        service.version = {"version": "0.1.15", "build": 3866, "sha": "b09a64a9"}
+        service.connected = True
+        self.addCleanup(service.stop)
+        service.rebuild()
+        self.drain(service)
+
+        self.assertNotIn(("read", "attests", "assignment"), gateway.calls)
+        self.assertIsNone(service.model.inventory("attests", "assignment").observed_at)
+        self.assertTrue(service.metrics["bootstrapComplete"])
+        self.assertEqual(1, service.model.snapshot(20)["items"][0]["evidenceCounts"]["total"])
+
+    def test_summary_reads_attest_detail_when_review_order_controls_stage(self):
+        gateway = PublishedReads()
+        gateway.rows[("work-items", None)] = [summarized_work(
+            attest_counts={"completion": 1, "verdict": 2},
+            verdict_counts={"reviewed-clean": 1, "tests-passed": 1},
+            holders=[])]
+        gateway.rows[("assignments", None)] = [{
+            "id": "assignment", "holderKey": "agent s_author", "workItemId": "work",
+            "state": "closed", "effectKind": "code",
+        }]
+        gateway.rows[("attests", "assignment")] = [
+            {"id": "done", "assignmentId": "assignment", "kind": "completion",
+             "ts": 10, "bySession": "agent s_author", "commitRefs": []},
+            {"id": "tested", "assignmentId": "assignment", "kind": "verdict",
+             "verdictKind": "tests-passed", "ts": 100, "bySession": "agent s_author",
+             "commitRefs": []},
+            {"id": "reviewed", "assignmentId": "assignment", "kind": "verdict",
+             "verdictKind": "reviewed-clean", "ts": 200, "bySession": "agent s_author",
+             "commitRefs": []},
+        ]
+        service = LiveService(gateway)
+        service.version = {"version": "0.1.15", "build": 3866, "sha": "b09a64a9"}
+        service.connected = True
+        self.addCleanup(service.stop)
+        service.rebuild()
+        self.drain(service)
+
+        self.assertIn(("read", "attests", "assignment"), gateway.calls)
+        self.assertEqual(5, service.model.snapshot(20)["items"][0]["stage"])
+
+    def test_summary_count_gap_requests_only_the_matching_attest_scopes(self):
+        self.service.version = {"version": "0.1.15", "build": 3866, "sha": "b09a64a9"}
+        payload = summarized_work("Count changed", 2, attest_counts={"progress": 2})
+        self.assertTrue(self.service.change({
+            "resource": "work-items", "op": "upsert", "class": "work_item.updated",
+            "refs": {"workItemId": "work"}, "payload": payload,
+        }))
+        self.assertIn(("attests", "assignment", None), self.service.reads.pending)
+
+    def test_0_1_15_stops_terminal_attest_rotation_but_legacy_keeps_it(self):
+        self.service.backstop.history = {("attests", "assignment"), ("messages", "session")}
+        self.service.version = {"version": "0.1.15"}
+        item = summarized_work("No review-order dependency", 2)
+        self.service.model.accept("work-items", None, Read([item], True, 30, "work-items"))
+        self.assertEqual({("messages", "session")}, self.service._repeated_history_scopes())
+
+        item = summarized_work("Review pending", 3, attest_counts={"completion": 1, "verdict": 2},
+                               verdict_counts={"reviewed-clean": 1, "tests-passed": 1}, holders=[])
+        self.service.model.accept("work-items", None, Read([item], True, 30, "work-items"))
+        self.assertEqual({("attests", "assignment"), ("messages", "session")},
+                         self.service._repeated_history_scopes())
+
+        self.service.version = {"version": "0.1.14"}
+        self.assertEqual({("attests", "assignment"), ("messages", "session")},
+                         self.service._repeated_history_scopes())
 
     def test_active_budget_expiry_publishes_stale_without_clock_only_deltas(self):
         from atc_reconciliation import ACTIVE_BUDGET_MS

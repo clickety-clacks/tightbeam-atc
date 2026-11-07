@@ -114,6 +114,109 @@ class ModelTest(unittest.TestCase):
         row["displayName"] = "Product Owner By Name Only"
         self.assertEqual("coder", self.model.snapshot(20)["agents"][0]["kind"])
 
+    def test_work_item_summary_drives_counts_effective_refs_and_observed_landing(self):
+        model = EvidenceModel()
+        ref = {"repo": "example/repo", "commit": "a" * 40}
+        landing = {"repository": "example/repo", "branch": "main",
+                   "commit": "a" * 40, "headCommit": "b" * 40,
+                   "pullRequest": 12, "observedAt": 100}
+        item = {"id": "work", "title": "Work", "state": "closed", "rowVersion": 4,
+                "holders": [], "started": True,
+                "attestCounts": {"completion": 1, "verdict": 1},
+                "verdictCounts": {"reviewed-clean": 1},
+                "effectiveCommitRefs": [ref], "landings": [landing]}
+        assignment = {"id": "assignment", "workItemId": "work", "holderKey": "agent s_author",
+                      "state": "closed", "closedAt": 20, "effectKind": "code",
+                      "reviewsAssignmentId": None,
+                      "commitRefCorrections": [{"commitRefs": [ref], "actorRef": "person"}]}
+        model.accept("work-items", None, Read([item], True, 1000, "work-items"))
+        model.accept("assignments", None, Read([assignment], True, 1000, "assignments"))
+        model.accept("attests", "assignment", Read([
+            {"id": "done", "assignmentId": "assignment", "kind": "completion",
+             "ts": 10, "bySession": "agent s_author", "commitRefs": [{"repo": "old/repo", "commit": "c" * 40}]},
+            {"id": "review", "assignmentId": "assignment", "kind": "verdict",
+             "verdictKind": "reviewed-clean", "ts": 20, "commitRefs": []},
+        ], True, 1000, "attests"))
+        model.accept("sessions", None, Read([], True, 1000, "sessions"))
+        model.accept("roles", None, Read([], True, 1000, "roles"))
+
+        result = model.snapshot(1000)["items"][0]
+        self.assertTrue(result["started"])
+        self.assertEqual([], result["holders"])
+        self.assertEqual({"total": 2, "byKind": {"completion": 1, "verdict": 1},
+                          "byVerdict": {"reviewed-clean": 1}}, result["evidenceCounts"])
+        self.assertEqual([ref], result["commitRefs"], "effective refs must retain corrections")
+        self.assertEqual([landing], result["landings"])
+        self.assertTrue(result["merged"])
+        self.assertEqual("known", result["evidence"]["merged"]["status"])
+        self.assertEqual(100, result["evidence"]["merged"]["observedAt"])
+        self.assertEqual(["work-items"], result["evidence"]["merged"]["source"])
+
+        item["landings"] = []
+        item["rowVersion"] = 5
+        model.accept("work-items", None, Read([item], True, 2000, "work-items"))
+        absent = model.snapshot(2000)["items"][0]
+        self.assertIsNone(absent["merged"], "no observed landing is not a negative merge result")
+        self.assertEqual("unknown", absent["evidence"]["merged"]["status"])
+        self.assertFalse(absent["evidence"]["merged"]["complete"])
+
+    def test_summary_does_not_guess_stage_when_attest_counts_exceed_retained_detail(self):
+        model = EvidenceModel()
+        model.accept("work-items", None, Read([{
+            "id": "work", "title": "Work", "state": "open", "rowVersion": 1,
+            "holders": [], "started": True,
+            "attestCounts": {"completion": 1, "verdict": 2},
+            "verdictCounts": {"reviewed-clean": 1, "tests-passed": 1},
+            "effectiveCommitRefs": [], "landings": [],
+        }], True, 100, "work-items"))
+        model.accept("assignments", None, Read([{
+            "id": "assignment", "workItemId": "work", "holderKey": "agent s_author",
+            "state": "closed", "closedAt": 10, "effectKind": "code",
+        }], True, 100, "assignments"))
+        model.accept("attests", "assignment", Read([{
+            "id": "done", "assignmentId": "assignment", "kind": "completion",
+            "ts": 10, "bySession": "agent s_author", "commitRefs": [],
+        }], True, 100, "attests"))
+        model.accept("sessions", None, Read([], True, 100, "sessions"))
+        model.accept("roles", None, Read([], True, 100, "roles"))
+
+        result = model.snapshot(100)["items"][0]
+        self.assertIsNone(result["stage"])
+        self.assertEqual("unknown", result["evidence"]["stage"]["status"])
+        self.assertEqual(3, result["evidenceCounts"]["total"], "summary counts remain available")
+
+    def test_summary_stage_timestamp_order_does_not_outlive_stale_detail(self):
+        model = EvidenceModel()
+        model.accept("work-items", None, Read([{
+            "id": "work", "title": "Work", "state": "open", "rowVersion": 1,
+            "holders": [], "started": True,
+            "attestCounts": {"completion": 1, "verdict": 2},
+            "verdictCounts": {"reviewed-clean": 1, "tests-passed": 1},
+            "effectiveCommitRefs": [], "landings": [],
+        }], True, 100, "work-items"))
+        model.accept("assignments", None, Read([{
+            "id": "assignment", "workItemId": "work", "holderKey": "agent s_author",
+            "state": "closed", "closedAt": 10, "effectKind": "code",
+        }], True, 100, "assignments"))
+        model.accept("attests", "assignment", Read([
+            {"id": "done", "assignmentId": "assignment", "kind": "completion",
+             "ts": 10, "bySession": "agent s_author", "commitRefs": []},
+            {"id": "tested", "assignmentId": "assignment", "kind": "verdict",
+             "verdictKind": "tests-passed", "ts": 20, "bySession": "agent s_author",
+             "commitRefs": []},
+            {"id": "reviewed", "assignmentId": "assignment", "kind": "verdict",
+             "verdictKind": "reviewed-clean", "ts": 30, "bySession": "agent s_author",
+             "commitRefs": []},
+        ], True, 100, "attests"))
+        model.inventory("attests", "assignment").mark_unconfirmed(101)
+        model.accept("sessions", None, Read([], True, 100, "sessions"))
+        model.accept("roles", None, Read([], True, 100, "roles"))
+
+        result = model.snapshot(102)["items"][0]
+        self.assertIsNone(result["stage"])
+        self.assertEqual("unknown", result["evidence"]["stage"]["status"])
+        self.assertEqual("unconfirmed", result["evidence"]["stage"]["freshness"])
+
 
 if __name__ == "__main__":
     unittest.main()
