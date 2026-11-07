@@ -1039,15 +1039,24 @@ class LiveService:
             try:
                 value = resolver.resolve(refs)
             except Exception as error:
-                error_class = type(error).__name__
+                error_class = type(error).__name__[:80]
                 value = None
             if value is None:
-                LOG.warning("merge check inconclusive %s", json.dumps({
-                    "item": wid, "worker": threading.current_thread().name,
-                    "elapsedMs": round((time.monotonic() - started) * 1000, 3),
-                    "error": error_class,
-                    "refs": resolver.diagnostics if isinstance(resolver, GitResolver) else [],
-                }, separators=(",", ":")))
+                summary = resolver.diagnostic_summary() if isinstance(resolver, GitResolver) else {
+                    "refs": [], "omittedRefs": len(refs)}
+                data = {"item": str(wid)[:120], "worker": threading.current_thread().name[:80],
+                        "elapsedMs": round((time.monotonic() - started) * 1000, 3),
+                        "error": error_class, **summary}
+                line = json.dumps(data, separators=(",", ":"))
+                # Include a count when details are omitted. Keep the entire
+                # warning well below the service journal's stream line limit.
+                while len(line.encode("utf-8")) > 4000 and data["refs"]:
+                    data["refs"].pop()
+                    data["omittedRefs"] += 1
+                    line = json.dumps(data, separators=(",", ":"))
+                LOG.warning("merge check inconclusive %s", line)
+            if isinstance(resolver, GitResolver):
+                resolver.clear_diagnostics()
             self.events.put(("merged", (wid, refs, value, now_ms())))
 
     def _refresh(self, resource, scope=None, key=None):

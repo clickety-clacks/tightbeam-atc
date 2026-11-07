@@ -102,29 +102,65 @@ class GitResolver:
         self.host_routes = host_routes or {}
         self.ttl, self.timeout = ttl, timeout
         self.results, self.origins, self.branches, self.targets = {}, {}, {}, {}
-        # Diagnostics share existing cache lifetimes; they never affect lookup
-        # values, retry timing or persistent merge evidence.
-        self.diagnostics = []
-        self._diagnostic_ref = None
+        self.clear_diagnostics()
         self.local_hosts = {socket.gethostname(), socket.gethostname().split(".", 1)[0]}
 
     def _run(self, args):
         return subprocess.run(args, capture_output=True, text=True, timeout=self.timeout)
 
-    def _note(self, step, **fields):
-        if self._diagnostic_ref is not None:
-            # Never include argv, checkout paths, stdout/stderr or exception
-            # messages: these can contain credentials supplied to Git/SSH.
-            remote = fields.get("remote")
-            if remote is not None:
-                fields["remote"] = remote if is_org_remote(remote) else "<other>"
-            branch = fields.get("branch")
-            if branch is not None and not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", branch):
-                fields["branch"] = "<other>"
-            self._diagnostic_ref["steps"].append({"step": step, **fields})
+    def clear_diagnostics(self):
+        # Keep at most four deciding ref summaries for this check only. Never
+        # retain diagnostics in the lookup caches or persisted merge evidence.
+        self.diagnostics = []
+        self.diagnostic_ref_count = 0
+        self._diagnostic_ref = None
 
-    def _steps(self):
-        return self._diagnostic_ref["steps"] if self._diagnostic_ref is not None else []
+    def _note(self, step, **fields):
+        ref = self._diagnostic_ref
+        if ref is None:
+            return
+        # Never capture argv, paths, command output or exception messages.
+        remote = fields.get("remote")
+        if remote is not None:
+            fields["remote"] = remote[:180] if is_org_remote(remote) else "<other>"
+        branch = fields.get("branch")
+        if branch is not None:
+            fields["branch"] = (branch[:180] if re.fullmatch(
+                r"refs/heads/[A-Za-z0-9._/-]+", branch) else "<other>")
+        if step in {"origin-selected", "probe"}:
+            ref.update({k: fields[k] for k in ("remote", "branch", "rawFetchAllowance")
+                        if k in fields})
+        elif step == "raw-fetch":
+            ref["rawFetchAttempts"] += 1
+        elif step == "raw-fetch-skipped":
+            ref["rawFetchSkipped"] = fields["reason"]
+        elif step == "fallback":
+            ref["fallback"] = fields["route"]
+        elif step.endswith("-cache"):
+            ref["cache"] = step
+        if step == "commit-object" and fields.get("exitCode"):
+            ref["objectMissing"] = True
+        # A missing object or non-ancestor is a deciding fact, not a failed
+        # command. Prefer a canonical probe failure to a missing checkout.
+        failed = "error" in fields or (
+            fields.get("exitCode", 0) != 0 and step != "commit-object"
+            and not (step == "ancestry" and fields["exitCode"] == 1))
+        previous = ref.get("failure")
+        if failed and (previous is None or (previous["step"] == "origin"
+                                           and fields.get("remote") is not None)):
+            ref["failure"] = {"step": step, **fields}
+
+    def _finish_diagnostic(self, value):
+        if value is None:
+            self.diagnostic_ref_count += 1
+            if len(self.diagnostics) < 4:
+            self._diagnostic_ref = None
+
+    def diagnostic_summary(self):
+        # An unexpected worker exception can interrupt the current reference.
+        refs = self.diagnostics + ([self._diagnostic_ref] if self._diagnostic_ref else [])
+        count = self.diagnostic_ref_count + bool(self._diagnostic_ref)
+        return {"refs": refs[:4], "omittedRefs": max(0, count - 4)}
 
     def _command(self, step, args, **context):
         started = time.monotonic()
@@ -134,7 +170,7 @@ class GitResolver:
         except Exception as error:
             self._note(step, command=command, **context,
                        elapsedMs=round((time.monotonic() - started) * 1000, 3),
-                       error=type(error).__name__,
+                       error=type(error).__name__[:80],
                        timeout=isinstance(error, subprocess.TimeoutExpired))
             raise
         if result.returncode or step == "raw-fetch":
@@ -154,9 +190,8 @@ class GitResolver:
         repo = reference.get("repo")
         cached = self.origins.get(repo)
         if cached and time.monotonic() - cached[0] < self.ttl:
-            self._note("origin-cache", remote=cached[1], priorSteps=cached[2])
+            self._note("origin-cache", remote=cached[1])
             return cached[1]
-        step_start = len(self._steps())
         origin = repository_remote(repo)
         if isinstance(repo, str) and ":" in repo:
             host, path = repo.split(":", 1)
@@ -174,16 +209,15 @@ class GitResolver:
                     origin = found if found in self.refs or is_org_remote(found) else False
             if origin is None:
                 origin = repository_remote_from_checkout(repo)
-        self.origins[repo] = (time.monotonic(), origin, self._steps()[step_start:])
+        self.origins[repo] = (time.monotonic(), origin)
         return origin
 
     def _target_refs(self, remote):
         cached = self.targets.get(remote)
         if cached and time.monotonic() - cached[0] < self.ttl:
-            self._note("targets-cache", remote=remote, complete=cached[1][1], priorSteps=cached[2])
+            self._note("targets-cache", remote=remote, complete=cached[1][1])
             return cached[1]
 
-        step_start = len(self._steps())
         default_ref = None
         heads = set()
         heads_complete = False
@@ -220,16 +254,15 @@ class GitResolver:
         complete = heads_complete and default_ref is not None and default_ref in heads
         result = (refs, complete)
         self._note("targets", remote=remote, complete=complete, count=len(refs))
-        self.targets[remote] = (time.monotonic(), result, self._steps()[step_start:])
+        self.targets[remote] = (time.monotonic(), result)
         return result
 
     def _branch(self, remote, branch):
         key = (remote, branch)
         cached = self.branches.get(key)
         if cached and time.monotonic() - cached[0] < self.ttl:
-            self._note("branch-cache", remote=remote, branch=branch, available=cached[1] is not None, priorSteps=cached[2])
+            self._note("branch-cache", remote=remote, branch=branch, available=cached[1] is not None)
             return cached[1]
-        step_start = len(self._steps())
         directory = self.cache / (hashlib.sha256(remote.encode()).hexdigest()[:20] + ".git")
         directory.parent.mkdir(parents=True, exist_ok=True)
         if not directory.exists():
@@ -242,7 +275,7 @@ class GitResolver:
             value = (args, local_ref) if fetched.returncode == 0 else None
         except (OSError, subprocess.TimeoutExpired):
             value = None
-        self.branches[key] = (time.monotonic(), value, self._steps()[step_start:])
+        self.branches[key] = (time.monotonic(), value)
         return value
 
     def _probe(self, remote, branch, commit, ancestry_only=False,
@@ -299,25 +332,27 @@ class GitResolver:
         return True if any(probe is True for probe in probes) else None
 
     def resolve(self, references):
-        self.diagnostics = []
-        self._diagnostic_ref = None
+        self.clear_diagnostics()
         findings = []
         attempted_commit_fetches = set()
         for index, reference in enumerate(references):
             commit = reference.get("commit")
             self._diagnostic_ref = {"index": index, "commit": commit if isinstance(commit, str)
                                     and re.fullmatch(r"[0-9a-f]{7,64}", commit) else "<invalid>",
-                                    "steps": []}
-            self.diagnostics.append(self._diagnostic_ref)
+                                    "failure": None, "rawFetchAttempts": 0,
+                                    "rawFetchAllowance": "not-reached", "fallback": None,
+                                    "cache": None}
             if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
-                self._note("invalid-commit")
+                self._note("invalid-commit", error="InvalidCommit")
+                self._finish_diagnostic(None)
                 findings.append(None)
                 continue
             key = (reference.get("repo"), reference.get("remote"), commit)
             cached = self.results.get(key)
             if cached and time.monotonic() - cached[0] < self.ttl:
-                self._note("result-cache", value=cached[1], priorSteps=cached[2],
+                self._note("result-cache", value=cached[1],
                            ageMs=round((time.monotonic() - cached[0]) * 1000, 3))
+                self._finish_diagnostic(cached[1])
                 findings.append(cached[1])
                 continue
             try:
@@ -358,10 +393,10 @@ class GitResolver:
                     # a positive ancestry proof may recover that identity.
                     value = self._registered_ancestry(commit)
             except (OSError, subprocess.TimeoutExpired) as error:
-                self._note("reference-error", error=type(error).__name__)
+                self._note("reference-error", error=type(error).__name__[:80])
                 value = None
-            self.results[key] = (time.monotonic(), value, list(self._steps()))
-            self._note("result", value=value)
+            self.results[key] = (time.monotonic(), value)
+            self._finish_diagnostic(value)
             findings.append(value)
         return True if any(v is True for v in findings) else (
             False if findings and all(v is False for v in findings) else None)

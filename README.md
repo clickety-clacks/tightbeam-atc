@@ -261,8 +261,11 @@ When a natural merge check is inconclusive, the service writes one structured
 `merge check inconclusive` line to its existing log. It identifies the item,
 commit-reference index and hash, worker, selected repository/branch, failed
 command kind and exit/timeout/error class, fetch allowance, fallback and elapsed
-time. Cache hits label earlier diagnostic steps as `priorSteps`; they are not
-new command attempts. Command arguments, checkout paths, output and exception
+time. The line is bounded to 4 KiB, summarizes at most four inconclusive refs,
+and counts omitted refs. It keeps a deciding failure rather than a command
+history. Cache hits are labelled as such; their earlier failure details are not
+retained or reported as new attempts. Diagnostic summaries are discarded after
+each check and never stored in lookup caches. Command arguments, checkout paths, output and exception
 messages are omitted to avoid logging credentials. Logging does not add probes
 or change resolution, retry timing or retained merge evidence.
 

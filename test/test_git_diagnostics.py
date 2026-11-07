@@ -60,41 +60,75 @@ class GitDiagnosticsTest(unittest.TestCase):
         self.assertGreaterEqual(data["elapsedMs"], 0)
         return data, calls
 
-    def test_raw_fetch_allowance_and_cached_cause_with_one_line_per_check(self):
+    def test_raw_fetch_allowance_and_cached_result_do_not_retain_diagnostics(self):
         refs = [{"remote": REMOTE, "commit": COMMIT}]
         data, calls = self.capture(refs, self.command)
         self.assertGreater(calls, 0)
-        self.assertEqual(COMMIT, data["refs"][0]["commit"])
-        steps = data["refs"][0]["steps"]
-        fetches = [s for s in steps if s["step"] == "raw-fetch"]
-        self.assertEqual(1, len(fetches))
-        self.assertEqual(128, fetches[0]["exitCode"])
-        self.assertEqual("git", fetches[0]["command"])
-        self.assertEqual(REMOTE, fetches[0]["remote"])
-        self.assertEqual("refs/heads/main", fetches[0]["branch"])
-        self.assertTrue(any(s.get("reason") == "allowance-exhausted" for s in steps))
+        ref = data["refs"][0]
+        self.assertEqual(COMMIT, ref["commit"])
+        self.assertEqual(1, ref["rawFetchAttempts"])
+        failed = ref["failure"]
+        self.assertEqual("raw-fetch", failed["step"])
+        self.assertEqual(128, failed["exitCode"])
+        self.assertEqual("git", failed["command"])
+        self.assertEqual(REMOTE, failed["remote"])
+        self.assertEqual("refs/heads/main", failed["branch"])
+        self.assertEqual("allowance-exhausted", ref["rawFetchSkipped"])
+        self.assertEqual([], self.resolver.diagnostics)
+        self.assertIsNone(self.resolver._diagnostic_ref)
         cached, calls = self.capture(refs, self.command)
         self.assertEqual(0, calls)  # Capture must not bypass the result cache.
-        prior = cached["refs"][0]["steps"][0]
-        self.assertEqual("result-cache", prior["step"])
-        self.assertIn(fetches[0], prior["priorSteps"])
+        ref = cached["refs"][0]
+        self.assertEqual("result-cache", ref["cache"])
+        self.assertEqual(0, ref["rawFetchAttempts"])
+        self.assertIsNone(ref["failure"])  # Do not invent a current command cause.
+        self.assert_lookup_caches_unchanged()
 
-    def test_branch_timeout_keeps_fallback_and_cached_failure_details(self):
+    def assert_lookup_caches_unchanged(self):
+        for cache in (self.resolver.results, self.resolver.origins,
+                      self.resolver.targets, self.resolver.branches):
+            for entry in cache.values():
+                self.assertEqual(2, len(entry))  # Only original time/value payload.
+
+    def test_branch_timeout_keeps_fallback_without_storing_failure_history(self):
         def run(args):
             if "fetch" in args:
                 raise subprocess.TimeoutExpired(args + [SECRET], 4, stderr=SECRET)
             return self.command(args)
 
         data, _ = self.capture([{"repo": "retired:/private/tightbeam-atc-task", "commit": COMMIT}], run)
-        steps = data["refs"][0]["steps"]
-        failed = next(s for s in steps if s["step"] == "branch-fetch")
+        ref = data["refs"][0]
+        failed = ref["failure"]
+        self.assertEqual("branch-fetch", failed["step"])
         self.assertTrue(failed["timeout"])
         self.assertEqual("TimeoutExpired", failed["error"])
-        self.assertTrue(any(s.get("route") == "registered-ancestry" for s in steps))
-        cache = next(s for s in steps if s["step"] == "branch-cache")
-        self.assertFalse(cache["available"])
-        self.assertIn(failed, cache["priorSteps"])
+        self.assertEqual("registered-ancestry", ref["fallback"])
+        self.assertEqual("branch-cache", ref["cache"])
         self.assertNotIn("/private/", json.dumps(data))
+        self.assert_lookup_caches_unchanged()
+
+    def test_many_refs_and_shipping_lines_have_bounded_line_and_scratch(self):
+        refs = [{"repo": f"retired:/removed/tightbeam-atc-task-{n}",
+                 "commit": f"{n:040x}"} for n in range(100)]
+
+        def run(args):
+            if "--heads" in args:
+                heads = ["main"] + [f"0.1.{n}" for n in range(30)]
+                out = "".join(f"{COMMIT}\trefs/heads/{branch}\n" for branch in heads)
+                return subprocess.CompletedProcess(args, 0, out, "")
+            if "fetch" in args and len(args[-1]) == 40:
+                return subprocess.CompletedProcess(args, 128, "", SECRET)
+            return self.command(args)
+
+        data, _ = self.capture(refs, run)
+        self.assertLessEqual(len(json.dumps(data, separators=(",", ":")).encode())
+                             + len("merge check inconclusive "), 4096)
+        self.assertLessEqual(len(data["refs"]), 4)
+        self.assertEqual(100, len(data["refs"]) + data["omittedRefs"])
+        self.assertNotIn("priorSteps", json.dumps(data))
+        self.assertEqual([], self.resolver.diagnostics)
+        self.assertIsNone(self.resolver._diagnostic_ref)
+        self.assert_lookup_caches_unchanged()
 
     def test_routed_ssh_failure_has_no_command_or_error_text(self):
         self.resolver.host_routes = {"remote-host": "ssh-target-" + SECRET}
@@ -105,7 +139,7 @@ class GitDiagnosticsTest(unittest.TestCase):
 
         data, calls = self.capture([{"repo": "remote-host:/" + SECRET, "commit": COMMIT}], run)
         self.assertEqual(1, calls)
-        step = data["refs"][0]["steps"][0]
+        step = data["refs"][0]["failure"]
         self.assertEqual("origin", step["step"])
         self.assertEqual("routed-ssh/git", step["command"])
         self.assertEqual("OSError", step["error"])
@@ -128,6 +162,9 @@ class GitDiagnosticsTest(unittest.TestCase):
             with self.assertNoLogs("atc.recovery", level="WARNING"):
                 value, _ = self.run_worker(refs, run)
             self.assertIs(answer, value)
+            self.assertEqual([], self.resolver.diagnostics)
+            self.assertIsNone(self.resolver._diagnostic_ref)
+            self.assert_lookup_caches_unchanged()
 
     def test_worker_exception_records_class_without_message(self):
         class BrokenResolver:
