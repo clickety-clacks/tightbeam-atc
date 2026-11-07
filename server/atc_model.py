@@ -272,6 +272,8 @@ class EvidenceModel:
                     producer_refs.extend(found)
             if item_summary is not None:
                 refs = list(item_summary["effectiveCommitRefs"])
+            refs_complete = (identity["complete"] if item_summary is not None else
+                             assignments.complete and all(f["complete"] for f in inventory_facts))
             code = code_state(owned, producer_refs,
                               complete=assignments.complete if item_summary is not None else complete)
             if item_summary is not None:
@@ -295,24 +297,24 @@ class EvidenceModel:
                     # use the same shipping-line result as older gateways.
                     merge = self.merges.get(
                         wid, {"value": None, "observedAt": None, "refs": refs})
-                    merged = merge_value_for_refs(merge, refs)
+                    merged = merge_value_for_refs(merge, refs, refs_complete)
                     merge_facts = {
                         "status": "known" if merged is not None else "unknown",
                         "freshness": ("live" if merged is not None and not assignments.stale
                                       and merge.get("freshness") != "stale"
-                                      and merge.get("refs") == refs else "stale"),
+                                      and refs_complete and merge.get("refs") == refs else "stale"),
                         "observedAt": merge["observedAt"], "source": "git",
                         "complete": merged is not None, "landings": landings,
                     }
             else:
                 landings = None
                 merge = self.merges.get(wid, {"value": None, "observedAt": None, "refs": refs})
-                merged = merge_value_for_refs(merge, refs)
+                merged = merge_value_for_refs(merge, refs, refs_complete)
                 merge_facts = {
                     "status": "known" if merged is not None else "unknown",
                     "freshness": ("live" if merged is not None and not assignments.stale
                                   and merge.get("freshness") != "stale"
-                                  and merge.get("refs") == refs else "stale"),
+                                  and refs_complete and merge.get("refs") == refs else "stale"),
                     "observedAt": merge["observedAt"], "source": "git",
                     "complete": merged is not None,
                 }
@@ -359,7 +361,7 @@ class EvidenceModel:
                     "byKind": dict(summary["kinds"]) if attest_facts["complete"] else None,
                     "byVerdict": dict(summary["verdicts"]) if attest_facts["complete"] else None,
                 },
-                "commitRefs": refs,
+                "commitRefs": refs, "commitRefsComplete": refs_complete,
                 "commitRefCorrections": [
                     {k: v for k, v in c.items() if k not in {"reason", "note"}}
                     for a in owned for c in a.get("commitRefCorrections", [])],

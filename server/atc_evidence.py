@@ -212,8 +212,10 @@ def turn_state(turns, *, complete):
     return "idle" if complete else None
 
 
-def merge_value_for_refs(observation, refs):
+def merge_value_for_refs(observation, refs, refs_complete=True):
     """A positive proof survives additions only while all its refs remain."""
+    if observation.get("value") is True and not refs_complete:
+        return True
     proof_refs = observation.get("refs")
     if proof_refs == refs:
         return observation.get("value")
