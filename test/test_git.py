@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from atc_evidence import merge_ring
-from atc_git import CANONICAL_REFS, GitResolver
+from atc_git import CANONICAL_REFS, GitResolver, repository_remote_from_checkout
 
 ATC_REMOTE = "git@github.com:clickety-clacks/tightbeam-atc.git"
 TIGHTBEAM_REMOTE = "git@github.com:clickety-clacks/tightbeam.git"
@@ -122,10 +122,14 @@ class CanonicalGitTest(unittest.TestCase):
             # Stored commit refs can retain only the host-qualified checkout
             # path. The standard source-checkout basename identifies exactly
             # one organization repository after the checkout is deleted.
-            self.assertIs(True, resolver.resolve([{
-                "repo": "retired:/workspace/other-project-source",
-                "commit": commits["0.2.0"],
-            }]))
+            path_only = {"repo": "retired:/workspace/other-project-source"}
+            for commit_name, expected in (
+                    ("default", True), ("0.2.0", True),
+                    ("feature/change", False), ("unreachable", None)):
+                with self.subTest(path_only_commit=commit_name):
+                    self.assertIs(expected, resolver.resolve([{
+                        **path_only, "commit": commits[commit_name],
+                    }]))
             self.assertEqual({OTHER_ORG_REMOTE}, set(resolver.target_repositories))
 
             self.assertIs(False, resolver.resolve([{
@@ -145,6 +149,18 @@ class CanonicalGitTest(unittest.TestCase):
                 "repo": "retired:/workspace/unknown-checkout",
                 "commit": commits["0.2.0"],
             }]))
+
+    def test_observed_org_source_checkout_names_identify_one_repository(self):
+        observed = (
+            "harklight-app", "tightbeam-chat", "surf-ace", "scottland",
+            "harklight-server", "gooarchy", "clawline",
+        )
+        for repository in observed:
+            with self.subTest(repository=repository):
+                self.assertEqual(
+                    f"git@github.com:clickety-clacks/{repository}.git",
+                    repository_remote_from_checkout(
+                        f"retired:/workspace/{repository}-source"))
 
     def test_quarantine_only_reference_stays_yellow(self):
         with tempfile.TemporaryDirectory() as tmp:
