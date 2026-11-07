@@ -170,16 +170,21 @@ class CanonicalGitTest(unittest.TestCase):
             }])
             self.assertIs(True, result)
 
-    def test_unavailable_commit_fetch_is_attempted_once_per_resolution(self):
+    def test_duplicate_unavailable_reference_reuses_result_and_fetches_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _, remote, commits = self._make_shipping_line_remote(root / "repo")
+            source, remote, commits = self._make_shipping_line_remote(root / "repo")
 
             class CountingResolver(LocalGitResolver):
                 def __init__(self, *args, **kwargs):
                     super().__init__(*args, **kwargs)
                     self.unavailable_commit = None
                     self.commit_fetches = 0
+                    self.origin_lookups = 0
+
+                def _origin(self, reference):
+                    self.origin_lookups += 1
+                    return super()._origin(reference)
 
                 def _run(self, args):
                     if args and args[-1] == self.unavailable_commit:
@@ -188,10 +193,11 @@ class CanonicalGitTest(unittest.TestCase):
 
             resolver = CountingResolver(root / "cache", {TIGHTBEAM_REMOTE: remote})
             resolver.unavailable_commit = commits["unreachable"]
-            result = resolver.resolve([{
-                "remote": TIGHTBEAM_REMOTE, "commit": commits["unreachable"],
-            }])
+            ref = {"repo": f"{LOCAL_HOST}:{source}", "remote": TIGHTBEAM_REMOTE,
+                   "commit": commits["unreachable"]}
+            result = resolver.resolve([ref, dict(ref)])
             self.assertIsNone(result)
+            self.assertEqual(1, resolver.origin_lookups)
             self.assertEqual(1, resolver.commit_fetches)
 
     def test_correction_can_name_canonical_remote_after_checkout_retirement(self):

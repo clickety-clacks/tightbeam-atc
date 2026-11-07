@@ -193,9 +193,9 @@ class GitResolver:
                     target_refs, complete = self._target_refs(remote)
                     probes = []
                     for branch in target_refs:
-                        key = (remote, commit)
-                        allow_fetch = key not in attempted_commit_fetches
-                        attempted_commit_fetches.add(key)
+                        fetch_key = (remote, commit)
+                        allow_fetch = fetch_key not in attempted_commit_fetches
+                        attempted_commit_fetches.add(fetch_key)
                         try:
                             probes.append(self._probe(
                                 remote, branch, commit, allow_commit_fetch=allow_fetch))
