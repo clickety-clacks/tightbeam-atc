@@ -155,7 +155,7 @@ class GitResolver:
             self.diagnostic_ref_count += 1
             if len(self.diagnostics) < 4:
                 self.diagnostics.append(self._diagnostic_ref)
-            self._diagnostic_ref = None
+        self._diagnostic_ref = None
 
     def diagnostic_summary(self):
         # An unexpected worker exception can interrupt the current reference.
