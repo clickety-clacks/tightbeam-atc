@@ -6,7 +6,7 @@ from atc_summary import summarize, recent_marks
 
 from atc_evidence import (
     Inventory, agent_id, code_state, combined_evidence, evidence_stage, merge_ring,
-    turn_state,
+    turn_state, merge_value_for_refs,
 )
 from atc_payloads import has_work_item_summary
 
@@ -295,22 +295,24 @@ class EvidenceModel:
                     # use the same shipping-line result as older gateways.
                     merge = self.merges.get(
                         wid, {"value": None, "observedAt": None, "refs": refs})
-                    merged = merge["value"] if merge.get("refs") == refs else None
+                    merged = merge_value_for_refs(merge, refs)
                     merge_facts = {
                         "status": "known" if merged is not None else "unknown",
                         "freshness": ("live" if merged is not None and not assignments.stale
-                                      and merge.get("freshness") != "stale" else "stale"),
+                                      and merge.get("freshness") != "stale"
+                                      and merge.get("refs") == refs else "stale"),
                         "observedAt": merge["observedAt"], "source": "git",
                         "complete": merged is not None, "landings": landings,
                     }
             else:
                 landings = None
                 merge = self.merges.get(wid, {"value": None, "observedAt": None, "refs": refs})
-                merged = merge["value"] if merge.get("refs") == refs else None
+                merged = merge_value_for_refs(merge, refs)
                 merge_facts = {
                     "status": "known" if merged is not None else "unknown",
                     "freshness": ("live" if merged is not None and not assignments.stale
-                                  and merge.get("freshness") != "stale" else "stale"),
+                                  and merge.get("freshness") != "stale"
+                                  and merge.get("refs") == refs else "stale"),
                     "observedAt": merge["observedAt"], "source": "git",
                     "complete": merged is not None,
                 }

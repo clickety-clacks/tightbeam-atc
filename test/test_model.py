@@ -31,6 +31,33 @@ class ModelTest(unittest.TestCase):
     def read(self, kind, rows, scope=None, complete=True):
         self.model.accept(kind, scope, Read(rows, complete, 10, "test-read"))
 
+    def test_grown_merge_proof_stays_visible_until_proving_refs_are_removed(self):
+        proof = [{"repo": "example", "commit": "a" * 40},
+                 {"repo": "example", "commit": "b" * 40}]
+        added = {"repo": "example", "commit": "c" * 40}
+        for summary in (False, True):
+            with self.subTest(summary=summary):
+                self.model.merges["work"] = {
+                    "value": True, "observedAt": 5, "refs": proof,
+                    "freshness": "live",
+                }
+                for refs, expected in (([added, *proof], True),
+                                       ([proof[0], added], None),
+                                       ([], None), (list(reversed(proof)), True)):
+                    row = {"id": "work", "title": "Work", "state": "closed"}
+                    if summary:
+                        row.update(holders=[], started=True, attestCounts={},
+                                   verdictCounts={}, effectiveCommitRefs=refs, landings=[])
+                    self.read("work-items", [row])
+                    self.read("attests", [{"id": "done", "kind": "completion",
+                              "assignmentId": "assignment", "ts": 1,
+                              "commitRefs": refs}], "assignment")
+                    item = self.model.snapshot(20)["items"][0]
+                    self.assertIs(expected, item["merged"])
+                    self.assertEqual("stale", item["evidence"]["merged"]["freshness"])
+                    if expected:
+                        self.assertEqual(5, item["evidence"]["merged"]["observedAt"])
+
     def test_unknown_parent_is_not_invented(self):
         agent = self.model.snapshot(20)["agents"][0]
         self.assertIsNone(agent["parent"])
