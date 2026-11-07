@@ -116,7 +116,7 @@ class ModelTest(unittest.TestCase):
 
     def test_work_item_summary_drives_counts_effective_refs_and_observed_landing(self):
         model = EvidenceModel()
-        ref = {"repo": "example/repo", "commit": "a" * 40}
+        ref = {"repo": "example/repo", "ref": "refs/heads/0.1.14", "commit": "a" * 40}
         landing = {"repository": "example/repo", "branch": "main",
                    "commit": "a" * 40, "headCommit": "b" * 40,
                    "pullRequest": 12, "observedAt": 100}
@@ -140,6 +140,8 @@ class ModelTest(unittest.TestCase):
         model.accept("sessions", None, Read([], True, 1000, "sessions"))
         model.accept("roles", None, Read([], True, 1000, "roles"))
 
+        # An observed landing takes precedence over a cached negative Git result.
+        model.merges["work"] = {"value": False, "observedAt": 90, "refs": [ref]}
         result = model.snapshot(1000)["items"][0]
         self.assertTrue(result["started"])
         self.assertEqual([], result["holders"])
@@ -155,10 +157,20 @@ class ModelTest(unittest.TestCase):
         item["landings"] = []
         item["rowVersion"] = 5
         model.accept("work-items", None, Read([item], True, 2000, "work-items"))
+        model.merges.clear()
         absent = model.snapshot(2000)["items"][0]
         self.assertIsNone(absent["merged"], "no observed landing is not a negative merge result")
         self.assertEqual("unknown", absent["evidence"]["merged"]["status"])
         self.assertFalse(absent["evidence"]["merged"]["complete"])
+
+        # With no observed landing, a matching resolver result for a release-line
+        # commit supplies the merged state.
+        model.merges["work"] = {"value": True, "observedAt": 1500, "refs": [ref]}
+        resolved = model.snapshot(2000)["items"][0]
+        self.assertEqual([], resolved["landings"])
+        self.assertTrue(resolved["merged"])
+        self.assertEqual("git", resolved["evidence"]["merged"]["source"])
+        self.assertEqual(1500, resolved["evidence"]["merged"]["observedAt"])
 
     def test_summary_does_not_guess_stage_when_attest_counts_exceed_retained_detail(self):
         model = EvidenceModel()

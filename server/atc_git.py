@@ -9,12 +9,19 @@ import subprocess
 import time
 
 
+# Known default branches are fallbacks for repositories whose symbolic HEAD
+# cannot be read. Release-line branches are discovered from advertised refs.
 CANONICAL_REFS = {
     "git@github.com:clickety-clacks/tightbeam-atc.git": ("refs/heads/main",),
     "git@github.com:clickety-clacks/tightbeam-specs.git": ("refs/heads/main",),
     "git@github.com:clickety-clacks/lachesis.git": ("refs/heads/main",),
-    "git@github.com:clickety-clacks/tightbeam.git": ("refs/heads/main", "refs/heads/0.1.8"),
+    "git@github.com:clickety-clacks/tightbeam.git": ("refs/heads/main",),
 }
+
+ORG_REMOTE = re.compile(r"git@github\.com:clickety-clacks/[A-Za-z0-9_.-]+\.git\Z", re.IGNORECASE)
+RELEASE_LINE = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
+)
 
 
 def normalize_remote(remote):
@@ -28,13 +35,17 @@ def normalize_remote(remote):
     return remote
 
 
+def is_org_remote(remote):
+    return isinstance(remote, str) and ORG_REMOTE.fullmatch(remote) is not None
+
+
 class GitResolver:
     def __init__(self, cache, refs=None, host_routes=None, ttl=300, timeout=4):
         self.cache = Path(cache)
         self.refs = CANONICAL_REFS if refs is None else refs
         self.host_routes = host_routes or {}
         self.ttl, self.timeout = ttl, timeout
-        self.results, self.origins, self.branches = {}, {}, {}
+        self.results, self.origins, self.branches, self.targets = {}, {}, {}, {}
         self.local_hosts = {socket.gethostname(), socket.gethostname().split(".", 1)[0]}
 
     def _run(self, args):
@@ -43,7 +54,7 @@ class GitResolver:
     def _origin(self, reference):
         explicit = normalize_remote(reference.get("remote"))
         if explicit:
-            return explicit if explicit in self.refs else False
+            return explicit if explicit in self.refs or is_org_remote(explicit) else False
         repo = reference.get("repo")
         cached = self.origins.get(repo)
         if cached and time.monotonic() - cached[0] < self.ttl:
@@ -62,9 +73,52 @@ class GitResolver:
                     result = None
                 if result is not None and result.returncode == 0:
                     found = normalize_remote(result.stdout.strip())
-                    origin = found if found in self.refs else False
+                    origin = found if found in self.refs or is_org_remote(found) else False
         self.origins[repo] = (time.monotonic(), origin)
         return origin
+
+    def _target_refs(self, remote):
+        cached = self.targets.get(remote)
+        if cached and time.monotonic() - cached[0] < self.ttl:
+            return cached[1]
+
+        default_ref = None
+        heads = set()
+        heads_complete = False
+        try:
+            default = self._run(["git", "ls-remote", "--symref", remote, "HEAD"])
+            if default.returncode == 0:
+                for line in default.stdout.splitlines():
+                    if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+                        default_ref = line.split("\t", 1)[0][5:]
+                        break
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        if not default_ref:
+            known_defaults = self.refs.get(remote, ())
+            default_ref = known_defaults[0] if known_defaults else None
+
+        try:
+            advertised = self._run(["git", "ls-remote", "--heads", remote])
+            if advertised.returncode == 0:
+                heads_complete = True
+                for line in advertised.stdout.splitlines():
+                    _, separator, branch = line.partition("\t")
+                    if separator and branch.startswith("refs/heads/"):
+                        heads.add(branch)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        version_refs = sorted(
+            branch for branch in heads
+            if RELEASE_LINE.fullmatch(branch.removeprefix("refs/heads/"))
+        )
+        refs = tuple(dict.fromkeys(([default_ref] if default_ref else []) + version_refs))
+        complete = heads_complete and default_ref is not None and default_ref in heads
+        result = (refs, complete)
+        self.targets[remote] = (time.monotonic(), result)
+        return result
 
     def _branch(self, remote, branch):
         key = (remote, branch)
@@ -128,16 +182,22 @@ class GitResolver:
                 remote = self._origin(reference)
                 if remote is False:
                     probes = []
+                    complete = False
                 elif remote:
-                    probes = [self._probe(remote, branch, commit) for branch in self.refs[remote]]
+                    target_refs, complete = self._target_refs(remote)
+                    probes = [self._probe(remote, branch, commit) for branch in target_refs]
                 else:
-                    # Preserve the existing canonical-registry recovery path:
-                    # prove ancestry in an explicitly registered repository.
-                    # Do not infer repository identity, or absence, from a miss.
-                    probes = [self._probe(r, branch, commit, ancestry_only=True)
-                              for r, branches in self.refs.items() for branch in branches]
+                    # A missing checkout cannot identify its repository. Keep
+                    # the existing registered-repository recovery path: only
+                    # a positive ancestry proof may recover that identity.
+                    probes = []
+                    for registered in self.refs:
+                        target_refs, _ = self._target_refs(registered)
+                        probes.extend(self._probe(registered, branch, commit, ancestry_only=True)
+                                      for branch in target_refs)
+                    complete = False
                 value = True if any(p is True for p in probes) else (
-                    False if probes and all(p is False for p in probes) else None)
+                    False if complete and probes and all(p is False for p in probes) else None)
             except (OSError, subprocess.TimeoutExpired):
                 value = None
             self.results[key] = (time.monotonic(), value)

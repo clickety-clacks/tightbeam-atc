@@ -200,26 +200,35 @@ Feed processing continues while background reads run. Partial reads remove nothi
 **On merge detection.** A 0.1.15 work-item summary carries durable observed
 landing records associated with effective commit references. Each record names
 the repository, branch, merge commit, reviewed head, pull request and observation
-time. A matching record confirms an observed landing; an empty list leaves merge
-status unknown and does not prove that a branch lacks the commit. The item view
-keeps the record as provenance and never treats it as a branch-containment check.
+time. A non-empty list is authoritative evidence of an observed landing, and the
+item view keeps those records as provenance without treating them as a
+branch-containment check. An empty list means no landing was observed; the
+shipping-line Git resolver checks the effective refs, and absent Git proof leaves
+merge status unknown.
 
-Gateways without this summary continue to use the legacy canonical Git resolver.
 Each recorded `host:path` checkout is used only to read its `origin`; the service
-then resolves the commit through a service-owned cache for that canonical
-repository. Arbitrary remote branches are never landing proof. The
-product-owned integration-ref registry is:
+then resolves the commit through a service-owned cache for that repository when
+there is no observed landing. The product-owned shipping-line registry covers
+repositories in the `clickety-clacks` organization. For each named repository,
+the resolver reads the default branch from the remote's symbolic `HEAD`; the
+following known defaults are the fallback when that lookup is unavailable:
 
 - `clickety-clacks/tightbeam-atc`: `main`
 - `clickety-clacks/tightbeam-specs`: `main`
 - `clickety-clacks/lachesis`: `main`
-- `clickety-clacks/tightbeam`: `main` and `0.1.8`
+- `clickety-clacks/tightbeam`: `main`
 
-SSH and HTTPS GitHub origins normalize to the same registered identity. A commit
-is merged when any registered ref proves ancestry or patch identity. It is not
-merged only when every registered ref was fetched and every probe proves
-absence. A missing checkout, unregistered origin, missing commit, or failed
-lookup reports unknown rather than guessing.
+In addition to the default branch, a branch is a shipping line when its entire
+name is a version number with three numeric components, such as `0.1.8`,
+`0.1.14` or `0.2.0`. This rule includes future release-line branches. Feature,
+candidate, backport, archive, attic, agent, quarantine-lane and all other branch
+names are not shipping lines.
+
+SSH and HTTPS GitHub origins normalize to the same repository identity. A commit
+is merged when any shipping-line ref proves ancestry or patch identity. A
+negative result requires a complete default-branch and release-line inventory
+and successful absence probes. A missing checkout, unknown repository, missing
+commit, or failed/incomplete lookup reports unknown rather than guessing.
 
 ## Control API
 

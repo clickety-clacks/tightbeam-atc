@@ -281,16 +281,27 @@ class EvidenceModel:
                 if refs and code is False:
                     code = None
                 landings = list(item_summary["landings"])
-                merged = True if landings else None
                 newest_landing = max(landings, key=lambda landing: landing["observedAt"], default=None)
-                merge_facts = {
-                    "status": "known" if merged is True else "unknown",
-                    "freshness": identity["freshness"],
-                    "observedAt": (newest_landing["observedAt"] if newest_landing
-                                   else identity["observedAt"]),
-                    "source": ["work-items"], "complete": merged is True,
-                    "landings": landings,
-                }
+                if landings:
+                    merged = True
+                    merge_facts = {
+                        "status": "known", "freshness": identity["freshness"],
+                        "observedAt": newest_landing["observedAt"],
+                        "source": ["work-items"], "complete": True,
+                        "landings": landings,
+                    }
+                else:
+                    # Empty summary landings mean no observed landing exists;
+                    # use the same shipping-line result as older gateways.
+                    merge = self.merges.get(
+                        wid, {"value": None, "observedAt": None, "refs": refs})
+                    merged = merge["value"] if merge.get("refs") == refs else None
+                    merge_facts = {
+                        "status": "known" if merged is not None else "unknown",
+                        "freshness": "live" if merged is not None and not assignments.stale else "stale",
+                        "observedAt": merge["observedAt"], "source": "git",
+                        "complete": merged is not None, "landings": landings,
+                    }
             else:
                 landings = None
                 merge = self.merges.get(wid, {"value": None, "observedAt": None, "refs": refs})
