@@ -257,6 +257,53 @@ class CanonicalGitTest(unittest.TestCase):
                     self.assertFalse(any("-C" in command for command in commands))
                     self.assertFalse(any(CLAWLINE_REMOTE in command for command in commands))
 
+    def test_origin_label_does_not_exclude_a_named_organization_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, remote, commits = self._make_shipping_line_remote(root / "repo", origin=CLAWLINE_REMOTE)
+            resolver = LocalGitResolver(root / "cache", {CLAWLINE_REMOTE: remote})
+            for line, expected in (("default", True), ("0.4", True),
+                                   ("quarantine/held-work", False), ("unreachable", None)):
+                with self.subTest(line=line), patch.object(resolver, "_target_refs", wraps=resolver._target_refs) as targets:
+                    self.assertIs(expected, resolver.resolve([{
+                        "repo": "https://github.com/clickety-clacks/clawline.git",
+                        "remote": "origin", "ref": "refs/heads/feature/work",
+                        "commit": commits[line],
+                    }]))
+                    self.assertEqual([CLAWLINE_REMOTE], [call.args[0] for call in targets.call_args_list])
+            self.assertIsNone(resolver.resolve([{
+                "repo": "https://github.com/example/clawline.git", "remote": "origin",
+                "commit": commits["default"],
+            }]))
+            self.assertEqual({"excluded-repository": 1}, resolver.diagnostic_summary()["reasonCounts"])
+            # An actual explicit repository still takes precedence over repo.
+            self.assertIsNone(resolver.resolve([{
+                "repo": "https://github.com/clickety-clacks/clawline.git",
+                "remote": "https://github.com/example/clawline.git", "commit": commits["default"],
+            }]))
+
+    def test_origin_label_on_a_path_uses_only_registered_or_same_item_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, remote, commits = self._make_shipping_line_remote(root / "repo", origin=CLAWLINE_REMOTE)
+            resolver = LocalGitResolver(root / "cache", {CLAWLINE_REMOTE: remote})
+            resolver.refs = {}
+            path = {"repo": "retired:/workspace/clawline", "remote": "origin", "commit": commits["0.4"]}
+            with patch.object(resolver, "_run", wraps=resolver._run) as run:
+                self.assertIsNone(resolver.resolve([path]))
+                run.assert_not_called()  # No folder or checkout-origin inference.
+            named = {"repo": "clickety-clacks/clawline", "remote": "origin", "commit": path["commit"]}
+            for refs in ([path, named], [named, path]):
+                with patch.object(resolver, "_registered_ancestry", wraps=resolver._registered_ancestry) as fallback:
+                    self.assertIs(True, resolver.resolve(refs))
+                    fallback.assert_not_called()
+            self.assertIsNone(resolver.resolve([path]))  # No cross-item proof.
+            resolver = LocalGitResolver(root / "registered", {CLAWLINE_REMOTE: remote})
+            resolver.refs = {CLAWLINE_REMOTE: ("refs/heads/main",)}
+            self.assertIs(True, resolver.resolve([path]))
+            self.assertIsNone(resolver.resolve([{**path, "commit": commits["unreachable"]}]))
+            self.assertEqual({"identity-missing": 1}, resolver.diagnostic_summary()["reasonCounts"])
+
     def test_same_item_named_proof_covers_exact_sha_without_cross_item_cache_leak(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

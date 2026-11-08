@@ -206,7 +206,6 @@ branch-containment check. An empty list means no landing was observed; the
 shipping-line Git resolver checks the effective refs, and absent Git proof leaves
 merge status unknown.
 
-Each recorded `host:path` checkout is used to read its `origin` when available.
 The service resolves commits through a service-owned cache when there is no
 observed landing. Named repository references identify repositories in the
 `clickety-clacks` organization. For each named repository, the resolver reads
@@ -224,6 +223,9 @@ deleted. Accepted forms include `clickety-clacks/<repository>`,
 `github:<owner>/<repository>`, GitHub-domain paths, and GitHub HTTPS or SSH
 repository URLs with an optional `.git` suffix. Repository names do not imply
 aliases, renamed repositories or archives.
+A `remote` value of `origin` is a checkout-local label, not a repository
+identity: the named `repo` still selects the repository. If `repo` is only a
+checkout path, the reference follows the same path-only rules below.
 
 A path-only reference can use an exact full-SHA positive proof from a named
 reference on the same item, independent of input order. That dependent proof is

@@ -32,7 +32,7 @@ RELEASE_LINE = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
 
 
 def is_path_reference(reference):
-    return not reference.get("remote") and repository_remote(reference.get("repo")) is None
+    return reference.get("remote") in (None, "", "origin") and repository_remote(reference.get("repo")) is None
 
 
 def reference_digest(references):
@@ -222,6 +222,11 @@ class GitResolver:
 
     def _origin(self, reference):
         explicit_value = reference.get("remote")
+        # Published references can carry the checkout's remote label alongside
+        # a repository URL. "origin" names no repository by itself and must not
+        # hide that URL or turn a path-only reference into an excluded remote.
+        if explicit_value == "origin":
+            explicit_value = None
         explicit = normalize_remote(explicit_value)
         if explicit:
             self._note("identity", route="explicit-remote")
