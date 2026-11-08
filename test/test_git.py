@@ -37,6 +37,50 @@ class LocalGitResolver(GitResolver):
 
 
 class CanonicalGitTest(unittest.TestCase):
+    def test_path_sha_finds_application_and_tooling_shipping_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remotes = {}
+            commits = {}
+            for name in ("harklight-app", "surf-ace", "tightbeam-tuner"):
+                remote_name = f"git@github.com:clickety-clacks/{name}.git"
+                _, remote, commits[name] = self._make_shipping_line_remote(
+                    root / name, origin=remote_name)
+                remotes[remote_name] = remote
+            resolver = LocalGitResolver(root / "cache", remotes)
+            # Keep the shipped registry: no path-derived or test-added identity.
+            for name, key in (("harklight-app", "default"), ("surf-ace", "0.4"),
+                              ("tightbeam-tuner", "0.1.14-first")):
+                with self.subTest(repository=name):
+                    self.assertIs(True, resolver.resolve([{
+                        "repo": "retired:/unrelated/deleted-checkout",
+                        "commit": commits[name][key],
+                    }]))
+            for key in ("quarantine/held-work", "unreachable"):
+                with self.subTest(unmerged=key):
+                    self.assertIsNone(resolver.resolve([{
+                        "repo": "retired:/unrelated/deleted-checkout",
+                        "commit": commits["surf-ace"][key],
+                    }]))
+            # An explicit out-of-organization identity cannot use that lookup.
+            self.assertIsNone(resolver.resolve([{
+                "repo": "github:other/surf-ace", "commit": commits["surf-ace"]["0.4"],
+            }]))
+
+    def test_path_lookup_requires_full_sha_even_when_abbreviation_is_unique(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, remote, landed, _, _ = self._make_remote(root / "repo", origin=SPECS_REMOTE)
+            resolver = LocalGitResolver(root / "cache", {SPECS_REMOTE: remote})
+            resolver.refs = {SPECS_REMOTE: ("refs/heads/main",)}
+            path = {"repo": "retired:/deleted-checkout", "commit": landed}
+            self.assertIs(True, resolver.resolve([path]))
+            with patch.object(resolver, "_run", wraps=resolver._run) as run:
+                self.assertIsNone(resolver.resolve([{**path, "commit": landed[:12]}]))
+                run.assert_not_called()
+            self.assertEqual({"path-requires-full-sha": 1},
+                             resolver.diagnostic_summary()["reasonCounts"])
+
     def test_failed_branch_load_is_retried_on_next_check_not_each_reference(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -282,6 +326,7 @@ class CanonicalGitTest(unittest.TestCase):
             root = Path(tmp)
             source, remote, commits = self._make_shipping_line_remote(root / "repo", origin=CLAWLINE_REMOTE)
             resolver = LocalGitResolver(root / "cache", {CLAWLINE_REMOTE: remote})
+            resolver.refs = {SPECS_REMOTE: ("refs/heads/main",)}
             # Even an existing checkout with a readable origin is only a path.
             for path in (f"{LOCAL_HOST}:{source}", "retired:/workspace/clawline-source"):
                 with self.subTest(path=path), patch.object(resolver, "_run", wraps=resolver._run) as run:
@@ -342,6 +387,7 @@ class CanonicalGitTest(unittest.TestCase):
             root = Path(tmp)
             _, remote, commits = self._make_shipping_line_remote(root / "repo", origin=CLAWLINE_REMOTE)
             resolver = LocalGitResolver(root / "cache", {CLAWLINE_REMOTE: remote})
+            resolver.refs = {}  # Isolate dependent proof from registry ancestry.
             path = {"repo": "retired:/generic/source", "commit": commits["0.4"]}
             named = {"repo": "github:clickety-clacks/clawline", "commit": commits["0.4"]}
             self.assertIsNone(resolver.resolve([path]))  # Cache a miss first.

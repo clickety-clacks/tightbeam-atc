@@ -10,11 +10,65 @@ import time
 
 # Known default branches are fallbacks for repositories whose symbolic HEAD
 # cannot be read. Release-line branches are discovered from advertised refs.
+# This explicit inventory covers the organization's non-archived repositories.
+# Paths never nominate an entry; only full object ancestry can prove a match.
 CANONICAL_REFS = {
     "git@github.com:clickety-clacks/tightbeam-atc.git": ("refs/heads/main",),
     "git@github.com:clickety-clacks/tightbeam-specs.git": ("refs/heads/main",),
     "git@github.com:clickety-clacks/lachesis.git": ("refs/heads/main",),
     "git@github.com:clickety-clacks/tightbeam.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/agent-window-resolver.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/agentd.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/agentd-hub.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/argus.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/Citadel.git": ("refs/heads/add-visionos-support",),
+    "git@github.com:clickety-clacks/clawdbot.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/clawline.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/clipmesh.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/drift.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/engram.git": ("refs/heads/master",),
+    "git@github.com:clickety-clacks/engram-site.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/evercraft.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/Floatty.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/ghostty.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/gooarchy.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/gooarchy-flavorings.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/harklight-agent.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/harklight-app.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/harklight-hosted.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/harklight-server.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/Helm.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/homebrew-tap.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/lachesis-omarchy.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/life-vision-os.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/local-business-lead-finder.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/looplens-website.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/omarchy-ask.git": ("refs/heads/stable",),
+    "git@github.com:clickety-clacks/omarchy-key-visualizer.git": ("refs/heads/feat/appearance-and-fade",),
+    "git@github.com:clickety-clacks/omarchy-nasa2043-theme.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/omarchy-subspace.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/omarchy-window-panel.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/Pantheon.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/pimcamp.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/scottland.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/Seldon.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/subspace.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/subspace-daemon.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/subspace-openclaw-extension.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/surf-ace.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/swift-nio.git": ("refs/heads/add-visionos-support",),
+    "git@github.com:clickety-clacks/swift-nio-ssh.git": ("refs/heads/add-visionos-support",),
+    "git@github.com:clickety-clacks/SwiftTerm.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam-activity-lanes.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam-chat.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam-decisions-omarchy.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam-design.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam-ops.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam-tuner.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/tightbeam-workitem-pies.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/vimarchy.git": ("refs/heads/main",),
+    "git@github.com:clickety-clacks/xdg-desktop-portal-wlr.git": ("refs/heads/gooarchy",),
+    "git@github.com:clickety-clacks/yoohoo.git": ("refs/heads/main",),
 }
 
 ORG_REMOTE = re.compile(r"git@github\.com:clickety-clacks/[A-Za-z0-9_.-]+\.git\Z", re.IGNORECASE)
@@ -374,6 +428,9 @@ class GitResolver:
     def _registered_ancestry(self, commit):
         """Use known repositories only for positive ancestry recovery."""
         self._note("fallback", route="registered-ancestry")
+        if not re.fullmatch(r"[0-9a-f]{40}", commit):
+            self._note("resolution", reason="path-requires-full-sha")
+            return None
         probes = []
         complete = True
         for registered in self.refs:
