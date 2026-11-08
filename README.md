@@ -209,13 +209,13 @@ merge status unknown.
 The service resolves commits through a service-owned cache when there is no
 observed landing. Named repository references identify repositories in the
 `clickety-clacks` organization. For each named repository, the resolver reads
-the default branch from the remote's symbolic `HEAD`; the following registered
-repositories also supply known default-branch fallbacks:
-
-- `clickety-clacks/tightbeam-atc`: `main`
-- `clickety-clacks/tightbeam-specs`: `main`
-- `clickety-clacks/lachesis`: `main`
-- `clickety-clacks/tightbeam`: `main`
+the default branch from the remote's symbolic `HEAD`. The explicit integration
+registry in `server/atc_git.py` includes the organization's 56 non-archived
+repositories and their known default-branch fallbacks. It includes application,
+service and tooling repositories, rather than limiting path-only lookups to the
+four original repositories. The registry is updated with source releases;
+there is no runtime organization-wide repository search. Archived repositories
+are not fallback identities for path-only references.
 
 An explicit organization repository identity in a commit reference's `repo` or
 `remote` field identifies the repository to check, even after a checkout is
@@ -230,11 +230,27 @@ checkout path, the reference follows the same path-only rules below.
 A path-only reference can use an exact full-SHA positive proof from a named
 reference on the same item, independent of input order. That dependent proof is
 not cached under the path or reused for another item. Without that proof, only
-the registered repositories above are searched for positive ancestry. Checkout
+a full 40-character SHA is checked across the integration registry for positive
+ancestry on each repository's default or release branches. Checkout
 origins and folder names do not nominate repositories. If complete registered
 shipping-line checks find no containment, the result stays unknown with an
 `identity-missing` diagnostic; failed or incomplete checks instead retain an
 inconclusive-lookup label. Neither path implies a wider repository search.
+
+Path-only lookup fetches complete commit ancestry without tree/blob payloads into
+a separate cache. Named-reference patch comparisons keep their full-object cache.
+The raw-commit fetch allowance is unchanged. Item-level unknowns are still
+rechecked, and other repositories can supply a proof during failed-load backoff.
+The shared repository acquisition queue runs separately from proof workers, with
+one acquisition in flight per repository. Initial commits-only acquisition has a
+120-second total deadline; ordinary Git proof and refresh commands retain their
+four-second cap. A failed acquisition is retried no sooner than 300 seconds after
+completion. Pending or failed acquisition is unknown, never negative evidence.
+Loaded repositories remain available while other repositories acquire. Refresh
+checks compare freshly advertised shipping-line SHAs with the fetched heads;
+unchanged history needs no download, while changed heads are fetched before proof.
+An interrupted fetch terminates its helper processes and removes only unfinished
+pack files created by that invocation; successful packs and prior files remain.
 
 In addition to the default branch, a branch is a shipping line when its entire
 name has exactly two or three dot-separated numeric components, such as `0.4`,
