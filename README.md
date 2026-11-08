@@ -240,6 +240,9 @@ inconclusive-lookup label. Neither path implies a wider repository search.
 Path-only lookup fetches complete commit ancestry without tree/blob payloads into
 a separate cache. Named-reference patch comparisons keep their full-object cache.
 The existing command timeout and raw-commit fetch allowance apply unchanged.
+A failed registry ancestry download is retried after the existing five-minute
+branch-cache interval, rather than for every unrelated item. Item-level unknowns
+are still rechecked, and other repositories can supply a proof during that interval.
 An interrupted fetch terminates its helper processes and removes only unfinished
 pack files created by that invocation; successful packs and prior files remain.
 

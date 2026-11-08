@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import time
+from unittest.mock import patch
 
 import test_git
 
@@ -39,6 +41,42 @@ class GitFetchTest(unittest.TestCase):
             self.assertIs(False, resolver.resolve([{"remote": test_git.ATC_REMOTE,
                                                     "commit": absent}]))
             self.assertEqual(2, len(list((root / "cache").glob("*.git"))))
+
+    def test_failed_registry_load_is_bounded_across_items_and_recovers_after_ttl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = test_git.CanonicalGitTest()
+            _, remote, landed, _, _ = helper._make_remote(root / "repo")
+            subprocess.run(["git", "--git-dir", str(remote), "config",
+                            "uploadpack.allowFilter", "true"], check=True)
+
+            class RetryResolver(test_git.LocalGitResolver):
+                fetches = 0
+                fail = True
+
+                def _run(self, args):
+                    if "fetch" in args:
+                        self.fetches += 1
+                        if self.fail:
+                            raise subprocess.TimeoutExpired(args, self.timeout)
+                    return super()._run(args)
+
+            resolver = RetryResolver(root / "cache", {test_git.ATC_REMOTE: remote.as_uri()})
+            resolver.refs = {test_git.ATC_REMOTE: ("refs/heads/main",)}
+            start = time.monotonic()
+            with patch("atc_git.time.monotonic", return_value=start):
+                for i in range(5):
+                    self.assertIsNone(resolver.resolve([{
+                        "repo": f"retired:/item-{i}", "commit": landed,
+                    }]))
+                self.assertEqual(1, resolver.fetches)
+            resolver.fail = False
+            with patch("atc_git.time.monotonic", return_value=start + resolver.ttl + 1):
+                self.assertIs(True, resolver.resolve([{
+                    "repo": "retired:/later-item", "commit": landed,
+                }]))
+            self.assertEqual(2, resolver.fetches)
+            self.assertEqual([], list((root / "cache").rglob("tmp_pack_*")))
 
     @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
     def test_repeated_interrupted_fetch_reaps_helpers_and_partial_packs(self):

@@ -482,12 +482,13 @@ class GitResolver:
     def resolve(self, references):
         self.clear_diagnostics()
         self._failed_targets.clear()
-        # An inconclusive answer is reusable for duplicate refs in this check,
-        # not evidence that a later check should skip the same branch. Keep
-        # definite results and successfully loaded branches on their usual TTL.
+        # Item-level unknowns never suppress a later check. Named-reference
+        # failed loads retry too. Registry ancestry loads use their branch TTL
+        # even on failure: many unrelated path-only items share that download,
+        # and retrying it for every item can repeatedly exhaust the command cap.
         for cache in (self.results, self.branches):
             for key, (_, value) in list(cache.items()):
-                if value is None:
+                if value is None and (cache is self.results or len(key) == 2):
                     del cache[key]
         findings = []
         attempted_commit_fetches = set()
