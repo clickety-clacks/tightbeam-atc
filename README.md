@@ -237,6 +237,12 @@ shipping-line checks find no containment, the result stays unknown with an
 `identity-missing` diagnostic; failed or incomplete checks instead retain an
 inconclusive-lookup label. Neither path implies a wider repository search.
 
+Path-only lookup fetches complete commit ancestry without tree/blob payloads into
+a separate cache. Named-reference patch comparisons keep their full-object cache.
+The existing command timeout and raw-commit fetch allowance apply unchanged.
+An interrupted fetch terminates its helper processes and removes only unfinished
+pack files created by that invocation; successful packs and prior files remain.
+
 In addition to the default branch, a branch is a shipping line when its entire
 name has exactly two or three dot-separated numeric components, such as `0.4`,
 `0.1.14` or `0.2.0`. This includes future version branches. Prefixes, suffixes,

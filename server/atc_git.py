@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import signal
 from pathlib import Path
 import re
 import subprocess
@@ -175,7 +177,31 @@ class GitResolver:
         self.clear_diagnostics()
 
     def _run(self, args):
-        return subprocess.run(args, capture_output=True, text=True, timeout=self.timeout)
+        # Fetch helpers can outlive the parent Git process after a timeout.
+        # Reap the whole invocation before removing only its unfinished packs.
+        pack_dir = None
+        if "fetch" in args and "--git-dir" in args:
+            pack_dir = Path(args[args.index("--git-dir") + 1]) / "objects" / "pack"
+        prior_packs = set(pack_dir.glob("tmp_pack_*")) if pack_dir else set()
+        failed = True
+        with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, start_new_session=(os.name == "posix"),
+                              env={**os.environ, "GIT_NO_LAZY_FETCH": "1"}) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=self.timeout)
+                failed = process.returncode != 0
+                return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+                process.communicate()
+                raise
+            finally:
+                if failed and pack_dir:
+                    for pack in set(pack_dir.glob("tmp_pack_*")) - prior_packs:
+                        pack.unlink(missing_ok=True)
 
     def clear_diagnostics(self):
         # Keep at most four deciding ref summaries for this check only. Never
@@ -357,14 +383,15 @@ class GitResolver:
             self._failed_targets[remote] = result
         return result
 
-    def _branch(self, remote, branch):
-        key = (remote, branch)
+    def _branch(self, remote, branch, ancestry_only=False):
+        key = (remote, branch, "ancestry") if ancestry_only else (remote, branch)
         cached = self.branches.get(key)
         if cached and time.monotonic() - cached[0] < self.ttl:
             self._note("branch-cache", remote=remote, branch=branch, available=cached[1] is not None,
                        ageMs=round((time.monotonic() - cached[0]) * 1000, 3))
             return cached[1]
-        directory = self.cache / (hashlib.sha256(remote.encode()).hexdigest()[:20] + ".git")
+        suffix = ".ancestry.git" if ancestry_only else ".git"
+        directory = self.cache / (hashlib.sha256(remote.encode()).hexdigest()[:20] + suffix)
         directory.parent.mkdir(parents=True, exist_ok=True)
         if not directory.exists():
             if self._command("cache-init", ["git", "init", "--bare", "--quiet", str(directory)], remote=remote, branch=branch).returncode:
@@ -372,7 +399,12 @@ class GitResolver:
         local_ref = "refs/atc/" + hashlib.sha256(branch.encode()).hexdigest()[:20]
         args = ["git", "--git-dir", str(directory)]
         try:
-            fetched = self._command("branch-fetch", args + ["fetch", "--quiet", "--force", remote, branch + ":" + local_ref], remote=remote, branch=branch)
+            # Path lookup needs complete commit ancestry, not trees or blobs.
+            # Keep this cache separate from named-reference patch comparison.
+            options = ["--filter=tree:0"] if ancestry_only else []
+            fetched = self._command("branch-fetch", args + ["fetch", "--quiet", "--force"] +
+                                    options + [remote, branch + ":" + local_ref],
+                                    remote=remote, branch=branch)
             value = (args, local_ref) if fetched.returncode == 0 else None
         except (OSError, subprocess.TimeoutExpired):
             value = None
@@ -384,7 +416,7 @@ class GitResolver:
         self._note("probe", remote=remote, branch=branch, ancestryOnly=ancestry_only,
                    rawFetchAllowance=("disabled-ancestry-only" if ancestry_only else
                                       "available" if allow_commit_fetch else "exhausted"))
-        loaded = self._branch(remote, branch)
+        loaded = self._branch(remote, branch, ancestry_only=ancestry_only)
         if loaded is None:
             return None
         args, local_ref = loaded
