@@ -1,10 +1,9 @@
 """Canonical Git evidence, cached in ATC's own directory."""
 
 import hashlib
-from pathlib import Path, PurePosixPath
+import json
+from pathlib import Path
 import re
-import shlex
-import socket
 import subprocess
 import time
 
@@ -29,23 +28,55 @@ ORG_REPOSITORY = re.compile(
     r"clickety-clacks/(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?\Z",
     re.IGNORECASE,
 )
-# Bounded vocabulary for matching checkout directory names to public
-# organization repositories. Explicit repo/remote fields remain unrestricted.
-PUBLIC_ORG_REPOSITORIES = frozenset({
-    "agent-window-resolver", "agentd", "agentd-hub", "argus", "clawdbot",
-    "clawline", "clipmesh", "engram", "ghostty", "gooarchy",
-    "gooarchy-flavorings", "harklight-agent", "harklight-app",
-    "harklight-server", "homebrew-tap", "lachesis", "lachesis-omarchy",
-    "omarchy-ask", "omarchy-key-visualizer", "omarchy-nasa2043-theme",
-    "omarchy-subspace", "omarchy-window-panel", "pimcamp", "scottland",
-    "seldon", "subspace", "subspace-daemon", "surf-ace", "swiftterm",
-    "tightbeam", "tightbeam-atc", "tightbeam-chat", "tightbeam-decisions-omarchy",
-    "tightbeam-design", "tightbeam-specs", "tightbeam-tuner",
-    "tightbeam-workitem-pies", "vimarchy", "xdg-desktop-portal-wlr", "yoohoo",
-})
-RELEASE_LINE = re.compile(
-    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
-)
+RELEASE_LINE = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
+
+
+def is_path_reference(reference):
+    return not reference.get("remote") and repository_remote(reference.get("repo")) is None
+
+
+def reference_digest(references):
+    """Correlate inputs without recording checkout paths or remote credentials."""
+    digest = hashlib.sha256()
+    for reference in references:
+        digest.update(json.dumps([reference.get(k) for k in ("repo", "remote", "commit")],
+                                 separators=(",", ":")).encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def stderr_category(text, step):
+    """Return vocabulary only, never command output (which may contain secrets)."""
+    text = (text or "").lower()
+    if step == "origin" and "no such remote" in text:
+        return "missing-origin"
+    if step == "origin" and ("no such file or directory" in text or "not a git repository" in text):
+        return "missing-checkout"
+    if "not our ref" in text or "unadvertised object" in text:
+        return "object-not-served"
+    if step == "commit-object" and "not a valid object name" in text:
+        return "missing-object"
+    if any(s in text for s in ("authentication failed", "permission denied", "could not read username")):
+        return "authentication-or-authorization"
+    if any(s in text for s in ("could not resolve", "connection refused", "network is unreachable",
+                               "connection timed out", "connection reset")):
+        return "transport"
+    return "other" if text else "empty"
+
+
+def reference_identity(reference):
+    # Only an exact repository spelling is safe to include. Other inputs get a
+    # digest so a retained reference record can be joined without logging it.
+    for key in ("remote", "repo"):
+        raw = reference.get(key)
+        if isinstance(raw, str):
+            match = GITHUB_REPOSITORY.fullmatch(raw.strip())
+            if match:
+                return (match["owner"] + "/" + match["repository"])[:180]
+            match = ORG_REPOSITORY.fullmatch(raw.strip())
+            if match:
+                return ("clickety-clacks/" + match["repository"])[:180]
+    return None
 
 
 def normalize_remote(remote):
@@ -79,22 +110,6 @@ def repository_remote(identity):
     return f"git@github.com:clickety-clacks/{match['repository']}.git"
 
 
-def repository_remote_from_checkout(repo):
-    """Return the longest public org slug candidate in a checkout basename."""
-    if not isinstance(repo, str) or ":" not in repo:
-        return None
-    _, path = repo.split(":", 1)
-    if not path.startswith("/"):
-        return None
-    checkout = PurePosixPath(path.rstrip("/")).name.casefold()
-    matches = [name for name in PUBLIC_ORG_REPOSITORIES
-               if checkout == name or checkout.startswith(name + "-")]
-    if not matches:
-        return None
-    repository = max(matches, key=len)
-    return f"git@github.com:clickety-clacks/{repository}.git"
-
-
 class GitResolver:
     def __init__(self, cache, refs=None, host_routes=None, ttl=300, timeout=4):
         self.cache = Path(cache)
@@ -104,7 +119,6 @@ class GitResolver:
         self.results, self.origins, self.branches, self.targets = {}, {}, {}, {}
         self._failed_targets = {}
         self.clear_diagnostics()
-        self.local_hosts = {socket.gethostname(), socket.gethostname().split(".", 1)[0]}
 
     def _run(self, args):
         return subprocess.run(args, capture_output=True, text=True, timeout=self.timeout)
@@ -114,6 +128,8 @@ class GitResolver:
         # retain diagnostics in the lookup caches or persisted merge evidence.
         self.diagnostics = []
         self.diagnostic_ref_count = 0
+        self.diagnostic_reasons = {}
+        self.diagnostic_failures = {}
         self._diagnostic_ref = None
 
     def _note(self, step, **fields):
@@ -131,6 +147,8 @@ class GitResolver:
         if step in {"origin-selected", "probe"}:
             ref.update({k: fields[k] for k in ("remote", "branch", "rawFetchAllowance")
                         if k in fields})
+            if step == "origin-selected":
+                ref["origin"] = fields.get("remote")
         elif step == "raw-fetch":
             ref["rawFetchAttempts"] += 1
         elif step == "raw-fetch-skipped":
@@ -139,6 +157,15 @@ class GitResolver:
             ref["fallback"] = fields["route"]
         elif step.endswith("-cache"):
             ref["cache"] = step
+            ref["cacheDetail"] = {k: v for k, v in fields.items()
+                                  if k in {"ageMs", "available", "complete", "count", "value"}}
+        elif step == "identity":
+            ref["identityRoute"] = fields["route"]
+        elif step == "targets":
+            ref["targets"] = {"remote": fields["remote"], "count": fields["count"],
+                              "complete": fields["complete"]}
+        elif step == "resolution":
+            ref["reason"] = fields["reason"]
         if step == "commit-object" and fields.get("exitCode"):
             ref["objectMissing"] = True
         # A missing object or non-ancestor is a deciding fact, not a failed
@@ -153,6 +180,13 @@ class GitResolver:
 
     def _finish_diagnostic(self, value):
         if value is None:
+            reason = self._diagnostic_ref.get("reason", "interrupted-reference")
+            self._diagnostic_ref["reason"] = reason
+            self.diagnostic_reasons[reason] = self.diagnostic_reasons.get(reason, 0) + 1
+            failure = self._diagnostic_ref.get("failure")
+            if failure:
+                step = failure["step"]  # Fixed command/decision vocabulary, never output.
+                self.diagnostic_failures[step] = self.diagnostic_failures.get(step, 0) + 1
             self.diagnostic_ref_count += 1
             if len(self.diagnostics) < 4:
                 self.diagnostics.append(self._diagnostic_ref)
@@ -162,7 +196,11 @@ class GitResolver:
         # An unexpected worker exception can interrupt the current reference.
         refs = self.diagnostics + ([self._diagnostic_ref] if self._diagnostic_ref else [])
         count = self.diagnostic_ref_count + bool(self._diagnostic_ref)
-        return {"refs": refs[:4], "omittedRefs": max(0, count - 4)}
+        reasons = dict(self.diagnostic_reasons)
+        if self._diagnostic_ref:
+            reasons["interrupted-reference"] = reasons.get("interrupted-reference", 0) + 1
+        return {"refs": refs[:4], "omittedRefs": max(0, count - 4), "reasonCounts": reasons,
+                "failureCounts": dict(self.diagnostic_failures)}
 
     def _command(self, step, args, **context):
         started = time.monotonic()
@@ -178,13 +216,15 @@ class GitResolver:
         if result.returncode or step == "raw-fetch":
             self._note(step, command=command, **context,
                        elapsedMs=round((time.monotonic() - started) * 1000, 3),
-                       exitCode=result.returncode)
+                       exitCode=result.returncode,
+                       stderrCategory=stderr_category(result.stderr, step))
         return result
 
     def _origin(self, reference):
         explicit_value = reference.get("remote")
         explicit = normalize_remote(explicit_value)
         if explicit:
+            self._note("identity", route="explicit-remote")
             if explicit in self.refs or is_org_remote(explicit):
                 return explicit
             named = repository_remote(explicit_value)
@@ -192,32 +232,20 @@ class GitResolver:
         repo = reference.get("repo")
         cached = self.origins.get(repo)
         if cached and time.monotonic() - cached[0] < self.ttl:
-            self._note("origin-cache", remote=cached[1])
+            self._note("identity", route="cached-origin")
+            self._note("origin-cache", remote=cached[1],
+                       ageMs=round((time.monotonic() - cached[0]) * 1000, 3))
             return cached[1]
         origin = repository_remote(repo)
-        if isinstance(repo, str) and ":" in repo:
-            host, path = repo.split(":", 1)
-            if origin is None and Path(path).is_absolute():
-                command = ["git", "-C", path, "remote", "get-url", "origin"]
-                if host in self.local_hosts:
-                    result = self._command("origin", command)
-                elif host in self.host_routes:
-                    result = self._command("origin", ["ssh", "-o", "BatchMode=yes",
-                                        self.host_routes[host], shlex.join(command)])
-                else:
-                    result = None
-                if result is not None and result.returncode == 0:
-                    found = normalize_remote(result.stdout.strip())
-                    origin = found if found in self.refs or is_org_remote(found) else False
-            if origin is None:
-                origin = repository_remote_from_checkout(repo)
+        self._note("identity", route="named-repository" if origin is not None else "missing-identity")
         self.origins[repo] = (time.monotonic(), origin)
         return origin
 
     def _target_refs(self, remote):
         cached = self.targets.get(remote)
         if cached and time.monotonic() - cached[0] < self.ttl:
-            self._note("targets-cache", remote=remote, complete=cached[1][1])
+            self._note("targets-cache", remote=remote, complete=cached[1][1], count=len(cached[1][0]),
+                       ageMs=round((time.monotonic() - cached[0]) * 1000, 3))
             return cached[1]
         if remote in self._failed_targets:
             self._note("targets-cache", remote=remote,
@@ -274,7 +302,8 @@ class GitResolver:
         key = (remote, branch)
         cached = self.branches.get(key)
         if cached and time.monotonic() - cached[0] < self.ttl:
-            self._note("branch-cache", remote=remote, branch=branch, available=cached[1] is not None)
+            self._note("branch-cache", remote=remote, branch=branch, available=cached[1] is not None,
+                       ageMs=round((time.monotonic() - cached[0]) * 1000, 3))
             return cached[1]
         directory = self.cache / (hashlib.sha256(remote.encode()).hexdigest()[:20] + ".git")
         directory.parent.mkdir(parents=True, exist_ok=True)
@@ -300,10 +329,13 @@ class GitResolver:
         if loaded is None:
             return None
         args, local_ref = loaded
-        if self._command("commit-object", args + ["cat-file", "-e", commit + "^{commit}"], remote=remote, branch=branch).returncode:
+        obj = self._command("commit-object", args + ["cat-file", "-e", commit + "^{commit}"], remote=remote, branch=branch)
+        if obj.returncode:
             if ancestry_only or not allow_commit_fetch:
                 self._note("raw-fetch-skipped", remote=remote, branch=branch,
                            reason="ancestry-only" if ancestry_only else "allowance-exhausted")
+                if ancestry_only and len(commit) in {40, 64} and stderr_category(obj.stderr, "commit-object") == "missing-object":
+                    return False  # Not in this successfully fetched shipping line.
                 return None
             try:
                 fetched = self._command("raw-fetch", args + ["fetch", "--quiet", remote, commit], remote=remote, branch=branch)
@@ -317,15 +349,20 @@ class GitResolver:
         if ancestry.returncode != 1:
             return None
         if ancestry_only:
-            return None
+            return False
         # Preserve patch-equivalence evidence for cherry-picked/rebased work.
+        started = time.monotonic()
         equivalent = self._command("patch-equivalence", args + ["cherry", local_ref, commit, commit + "~1"], remote=remote, branch=branch)
         if equivalent.returncode != 0:
             return None
         lines = equivalent.stdout.splitlines()
         if len(lines) != 1 or lines[0][:1] not in {"-", "+"}:
             self._note("patch-equivalence-output", remote=remote, branch=branch,
-                       error="UnexpectedOutput")
+                       error="UnexpectedOutput", command="git",
+                       elapsedMs=round((time.monotonic() - started) * 1000, 3), outputShape={
+                           "lines": len(lines), "plus": sum(s.startswith("+") for s in lines),
+                           "minus": sum(s.startswith("-") for s in lines),
+                           "other": sum(not s.startswith(("+", "-")) for s in lines)})
             return None
         return lines[0].startswith("-")
 
@@ -333,8 +370,10 @@ class GitResolver:
         """Use known repositories only for positive ancestry recovery."""
         self._note("fallback", route="registered-ancestry")
         probes = []
+        complete = True
         for registered in self.refs:
-            target_refs, _ = self._target_refs(registered)
+            target_refs, inventory_complete = self._target_refs(registered)
+            complete = complete and inventory_complete
             for branch in target_refs:
                 try:
                     probes.append(self._probe(
@@ -342,6 +381,8 @@ class GitResolver:
                         allow_commit_fetch=False))
                 except (OSError, subprocess.TimeoutExpired):
                     probes.append(None)
+        self._note("resolution", reason=("identity-missing" if complete and probes
+                   and all(probe is False for probe in probes) else "registered-lookup-inconclusive"))
         return True if any(probe is True for probe in probes) else None
 
     def resolve(self, references):
@@ -349,37 +390,49 @@ class GitResolver:
         self._failed_targets.clear()
         findings = []
         attempted_commit_fetches = set()
-        for index, reference in enumerate(references):
+        # A proof belongs to this item and exact object only. Named refs run
+        # first so input order cannot make a path miss the matching proof.
+        named_proofs = set()
+        ordered = sorted(enumerate(references), key=lambda pair: is_path_reference(pair[1]))
+        for index, reference in ordered:
             commit = reference.get("commit")
             self._diagnostic_ref = {"index": index, "commit": commit if isinstance(commit, str)
                                     and re.fullmatch(r"[0-9a-f]{7,64}", commit) else "<invalid>",
                                     "failure": None, "rawFetchAttempts": 0,
                                     "rawFetchAllowance": "not-reached", "fallback": None,
-                                    "cache": None}
+                                    "cache": None, "inputDigest": reference_digest([reference]),
+                                    "repository": reference_identity(reference)}
             if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
                 self._note("invalid-commit", error="InvalidCommit")
+                self._note("resolution", reason="invalid-commit")
                 self._finish_diagnostic(None)
                 findings.append(None)
+                continue
+            path_only = is_path_reference(reference)
+            if path_only and len(commit) in {40, 64} and commit in named_proofs:
+                self._note("identity", route="same-item-named-proof")
+                self._finish_diagnostic(True)
+                findings.append(True)
+                # Never cache this dependent proof under the path: another item
+                # may contain that path without the named reference.
                 continue
             key = (reference.get("repo"), reference.get("remote"), commit)
             cached = self.results.get(key)
             if cached and time.monotonic() - cached[0] < self.ttl:
                 self._note("result-cache", value=cached[1],
                            ageMs=round((time.monotonic() - cached[0]) * 1000, 3))
+                self._note("resolution", reason="cached-inconclusive")
                 self._finish_diagnostic(cached[1])
                 findings.append(cached[1])
+                if cached[1] is True and not path_only:
+                    named_proofs.add(commit)
                 continue
             try:
-                repo_identity = reference.get("repo")
-                path_candidate = None
-                if not reference.get("remote") and repository_remote(repo_identity) is None:
-                    path_candidate = repository_remote_from_checkout(repo_identity)
                 remote = self._origin(reference)
-                self._note("origin-selected", remote=remote,
-                           checkoutCandidate=bool(remote) and path_candidate == remote,
-                           available=bool(remote))
+                self._note("origin-selected", remote=remote, available=bool(remote))
                 if remote is False:
                     value = None
+                    self._note("resolution", reason="excluded-repository")
                 elif remote:
                     target_refs, complete = self._target_refs(remote)
                     probes = []
@@ -396,22 +449,21 @@ class GitResolver:
                             probes.append(None)
                     value = True if any(p is True for p in probes) else (
                         False if complete and probes and all(p is False for p in probes) else None)
-                    # A checkout basename only nominates a candidate repo. If
-                    # Git cannot establish an answer there, retain the legacy
-                    # bounded positive-only proof across registered repos.
-                    if path_candidate == remote and value is None:
-                        value = self._registered_ancestry(commit)
+                    self._note("resolution", reason=("no-targets" if not target_refs else
+                               "incomplete-target-inventory" if not complete else "inconclusive-probe"))
                 else:
-                    # A missing checkout cannot identify its repository. Keep
-                    # the existing registered-repository recovery path: only
-                    # a positive ancestry proof may recover that identity.
+                    # Paths cannot nominate repositories. Only the deployment
+                    # registry can recover a proof without a same-item named ref.
                     value = self._registered_ancestry(commit)
             except (OSError, subprocess.TimeoutExpired) as error:
                 self._note("reference-error", error=type(error).__name__[:80])
+                self._note("resolution", reason="reference-error")
                 value = None
             self.results[key] = (time.monotonic(), value)
             self._finish_diagnostic(value)
             findings.append(value)
+            if value is True and not path_only:
+                named_proofs.add(commit)
         self._failed_targets.clear()
         return True if any(v is True for v in findings) else (
             False if findings and all(v is False for v in findings) else None)

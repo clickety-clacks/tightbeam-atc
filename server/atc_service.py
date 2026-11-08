@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 
-from atc_git import GitResolver
+from atc_git import GitResolver, reference_digest
 from atc_model import EvidenceModel
 from atc_evidence import combined_evidence, merge_value_for_refs
 from atc_reads import ReadQueue
@@ -1046,7 +1046,8 @@ class LiveService:
                     "refs": [], "omittedRefs": len(refs)}
                 data = {"item": str(wid)[:120], "worker": threading.current_thread().name[:80],
                         "elapsedMs": round((time.monotonic() - started) * 1000, 3),
-                        "error": error_class, **summary}
+                        "error": error_class, "inputCount": len(refs),
+                        "inputDigest": reference_digest(refs), **summary}
                 line = json.dumps(data, separators=(",", ":"))
                 # Include a count when details are omitted. Keep the entire
                 # warning well below the service journal's stream line limit.

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
-from atc_git import GitResolver
+from atc_git import GitResolver, reference_digest
 from atc_service import LiveService
 
 
@@ -71,6 +71,7 @@ class GitDiagnosticsTest(unittest.TestCase):
         self.assertEqual("raw-fetch", failed["step"])
         self.assertEqual(128, failed["exitCode"])
         self.assertEqual("git", failed["command"])
+        self.assertEqual("other", failed["stderrCategory"])
         self.assertEqual(REMOTE, failed["remote"])
         self.assertEqual("refs/heads/main", failed["branch"])
         self.assertEqual("allowance-exhausted", ref["rawFetchSkipped"])
@@ -80,9 +81,76 @@ class GitDiagnosticsTest(unittest.TestCase):
         self.assertEqual(0, calls)  # Capture must not bypass the result cache.
         ref = cached["refs"][0]
         self.assertEqual("result-cache", ref["cache"])
+        self.assertEqual({"cached-inconclusive": 1}, cached["reasonCounts"])
+        self.assertGreaterEqual(ref["cacheDetail"]["ageMs"], 0)
+        self.assertIsNone(ref["cacheDetail"]["value"])
+        self.assertEqual(data["inputDigest"], cached["inputDigest"])
+        self.assertEqual(reference_digest(refs), cached["inputDigest"])
+        self.assertEqual(1, cached["inputCount"])
         self.assertEqual(0, ref["rawFetchAttempts"])
         self.assertIsNone(ref["failure"])  # Do not invent a current command cause.
         self.assert_lookup_caches_unchanged()
+
+    def test_unlabeled_exclusion_and_invalid_ref_are_identified_without_git(self):
+        refs = [{"repo": "github.com/example/project", "commit": COMMIT},
+                {"remote": "https://user:" + SECRET + "@example.invalid/repo", "commit": SECRET}]
+        data, calls = self.capture(refs, self.command)
+        self.assertEqual(0, calls)
+        self.assertEqual({"excluded-repository": 1, "invalid-commit": 1}, data["reasonCounts"])
+        self.assertEqual("example/project", data["refs"][0]["repository"])
+        self.assertEqual("named-repository", data["refs"][0]["identityRoute"])
+        self.assertEqual("<invalid>", data["refs"][1]["commit"])
+        self.assertIsNone(data["refs"][1]["repository"])
+        self.assertNotEqual(data["refs"][0]["inputDigest"], data["refs"][1]["inputDigest"])
+
+    def test_error_categories_keep_no_raw_stderr(self):
+        for message, category in (("fatal: not our ref ", "object-not-served"),
+                                  ("Permission denied ", "authentication-or-authorization"),
+                                  ("Could not resolve hostname ", "transport"),
+                                  ("unrecognized ", "other")):
+            with self.subTest(category=category):
+                self.resolver.results.clear()
+                def run(args):
+                    result = self.command(args)
+                    if "fetch" in args and args[-1] == COMMIT:
+                        result.stderr = message + SECRET
+                    return result
+                data, _ = self.capture([{"remote": REMOTE, "commit": COMMIT}], run)
+                self.assertEqual(category, data["refs"][0]["failure"]["stderrCategory"])
+
+    def test_merge_patch_output_shape_and_failure_branch_survive_later_probes(self):
+        def run(args):
+            if "cat-file" in args:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if "merge-base" in args:
+                return subprocess.CompletedProcess(args, 1, "", "")
+            if "cherry" in args:
+                return subprocess.CompletedProcess(args, 0, "+ " + COMMIT + "\n- " + SECRET + "\n", "")
+            return self.command(args)
+        data, _ = self.capture([{"remote": REMOTE, "commit": COMMIT}], run)
+        ref = data["refs"][0]
+        self.assertEqual("explicit-remote", ref["identityRoute"])
+        self.assertIsNone(ref["fallback"])
+        self.assertEqual("refs/heads/main", ref["failure"]["branch"])
+        self.assertEqual("refs/heads/0.1.14", ref["branch"])  # Last probe, not the failed step.
+        self.assertEqual({"lines": 2, "plus": 1, "minus": 1, "other": 0},
+                         ref["failure"]["outputShape"])
+        self.assertEqual({"patch-equivalence-output": 1}, data["failureCounts"])
+        self.assertEqual({"inconclusive-probe": 1}, data["reasonCounts"])
+        self.assertNotIn("/private/", json.dumps(data))
+
+    def test_empty_targets_are_distinct_from_failed_branch_cache(self):
+        def empty(args):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        named = "git@github.com:clickety-clacks/example.git"
+        data, calls = self.capture([{"remote": named, "commit": COMMIT}], empty)
+        self.assertEqual(2, calls)
+        self.assertEqual({"no-targets": 1}, data["reasonCounts"])
+        self.assertEqual({"count": 0, "complete": False, "remote": named}, data["refs"][0]["targets"])
+        data, calls = self.capture([{"remote": named, "commit": "b" * 40}], empty)
+        self.assertEqual(0, calls)
+        self.assertEqual("targets-cache", data["refs"][0]["cache"])
+        self.assertEqual(0, data["refs"][0]["cacheDetail"]["count"])
 
     def assert_lookup_caches_unchanged(self):
         for cache in (self.resolver.results, self.resolver.origins,
@@ -103,12 +171,22 @@ class GitDiagnosticsTest(unittest.TestCase):
         self.assertTrue(failed["timeout"])
         self.assertEqual("TimeoutExpired", failed["error"])
         self.assertEqual("registered-ancestry", ref["fallback"])
+        self.assertIsNone(ref["cache"])
+        # A different reference can reuse the failed branch lookup, but must
+        # label that as cached/incomplete rather than proof of absent identity.
+        data, calls = self.capture([{"repo": "retired:/private/other", "commit": "b" * 40}], run)
+        ref = data["refs"][0]
+        self.assertEqual(0, calls)
         self.assertEqual("branch-cache", ref["cache"])
+        self.assertFalse(ref["cacheDetail"]["available"])
+        self.assertGreaterEqual(ref["cacheDetail"]["ageMs"], 0)
+        self.assertIsNone(ref["failure"])
+        self.assertEqual({"registered-lookup-inconclusive": 1}, data["reasonCounts"])
         self.assertNotIn("/private/", json.dumps(data))
         self.assert_lookup_caches_unchanged()
 
     def test_many_refs_and_shipping_lines_have_bounded_line_and_scratch(self):
-        refs = [{"repo": f"retired:/removed/tightbeam-atc-task-{n}",
+        refs = [{"repo": f"retired:/removed/tightbeam-atc-task-{n}", "remote": REMOTE,
                  "commit": f"{n:040x}"} for n in range(100)]
 
         def run(args):
@@ -125,24 +203,29 @@ class GitDiagnosticsTest(unittest.TestCase):
                              + len("merge check inconclusive "), 4096)
         self.assertLessEqual(len(data["refs"]), 4)
         self.assertEqual(100, len(data["refs"]) + data["omittedRefs"])
+        self.assertEqual(100, sum(data["reasonCounts"].values()))
+        self.assertEqual({"raw-fetch": 100}, data["failureCounts"])
+        self.assertEqual(100, data["inputCount"])
+        self.assertEqual(reference_digest(refs), data["inputDigest"])
         self.assertNotIn("priorSteps", json.dumps(data))
         self.assertEqual([], self.resolver.diagnostics)
         self.assertIsNone(self.resolver._diagnostic_ref)
         self.assert_lookup_caches_unchanged()
 
-    def test_routed_ssh_failure_has_no_command_or_error_text(self):
+    def test_path_only_references_do_not_probe_checkout_or_routed_ssh(self):
         self.resolver.host_routes = {"remote-host": "ssh-target-" + SECRET}
 
         def run(args):
-            self.assertEqual("ssh", args[0])
-            raise OSError(SECRET)
+            self.assertEqual("git", args[0])
+            self.assertNotIn("-C", args)
+            self.assertNotIn(SECRET, json.dumps(args))
+            return self.command(args)
 
         data, calls = self.capture([{"repo": "remote-host:/" + SECRET, "commit": COMMIT}], run)
-        self.assertEqual(1, calls)
-        step = data["refs"][0]["failure"]
-        self.assertEqual("origin", step["step"])
-        self.assertEqual("routed-ssh/git", step["command"])
-        self.assertEqual("OSError", step["error"])
+        self.assertGreater(calls, 0)
+        self.assertIsNone(data["refs"][0]["failure"])
+        self.assertEqual("missing-identity", data["refs"][0]["identityRoute"])
+        self.assertEqual({"registered-lookup-inconclusive": 1}, data["reasonCounts"])
 
     def test_definite_results_do_not_log_even_after_another_ref_fails(self):
         for answer in (True, False):
