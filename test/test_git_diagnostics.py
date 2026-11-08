@@ -77,16 +77,19 @@ class GitDiagnosticsTest(unittest.TestCase):
         self.assertEqual("allowance-exhausted", ref["rawFetchSkipped"])
         self.assertEqual([], self.resolver.diagnostics)
         self.assertIsNone(self.resolver._diagnostic_ref)
-        cached, calls = self.capture(refs, self.command)
-        self.assertEqual(0, calls)  # Capture must not bypass the result cache.
-        ref = cached["refs"][0]
+        # A later check retries the unknown result once; duplicates within
+        # that check still reuse it without extra fetches or failure history.
+        repeated = refs + refs
+        cached, calls = self.capture(repeated, self.command)
+        self.assertGreater(calls, 0)
+        self.assertEqual(1, cached["refs"][0]["rawFetchAttempts"])
+        ref = cached["refs"][1]
         self.assertEqual("result-cache", ref["cache"])
-        self.assertEqual({"cached-inconclusive": 1}, cached["reasonCounts"])
+        self.assertEqual(1, cached["reasonCounts"]["cached-inconclusive"])
         self.assertGreaterEqual(ref["cacheDetail"]["ageMs"], 0)
         self.assertIsNone(ref["cacheDetail"]["value"])
-        self.assertEqual(data["inputDigest"], cached["inputDigest"])
-        self.assertEqual(reference_digest(refs), cached["inputDigest"])
-        self.assertEqual(1, cached["inputCount"])
+        self.assertEqual(reference_digest(repeated), cached["inputDigest"])
+        self.assertEqual(2, cached["inputCount"])
         self.assertEqual(0, ref["rawFetchAttempts"])
         self.assertIsNone(ref["failure"])  # Do not invent a current command cause.
         self.assert_lookup_caches_unchanged()
@@ -164,7 +167,9 @@ class GitDiagnosticsTest(unittest.TestCase):
                 raise subprocess.TimeoutExpired(args + [SECRET], 4, stderr=SECRET)
             return self.command(args)
 
-        data, _ = self.capture([{"repo": "retired:/private/tightbeam-atc-task", "commit": COMMIT}], run)
+        refs = [{"repo": "retired:/private/tightbeam-atc-task", "commit": COMMIT},
+                {"repo": "retired:/private/other", "commit": "b" * 40}]
+        data, _ = self.capture(refs, run)
         ref = data["refs"][0]
         failed = ref["failure"]
         self.assertEqual("branch-fetch", failed["step"])
@@ -172,17 +177,21 @@ class GitDiagnosticsTest(unittest.TestCase):
         self.assertEqual("TimeoutExpired", failed["error"])
         self.assertEqual("registered-ancestry", ref["fallback"])
         self.assertIsNone(ref["cache"])
-        # A different reference can reuse the failed branch lookup, but must
+        # A different reference in this check reuses the failed lookup, but must
         # label that as cached/incomplete rather than proof of absent identity.
-        data, calls = self.capture([{"repo": "retired:/private/other", "commit": "b" * 40}], run)
-        ref = data["refs"][0]
-        self.assertEqual(0, calls)
+        ref = data["refs"][1]
         self.assertEqual("branch-cache", ref["cache"])
         self.assertFalse(ref["cacheDetail"]["available"])
         self.assertGreaterEqual(ref["cacheDetail"]["ageMs"], 0)
         self.assertIsNone(ref["failure"])
-        self.assertEqual({"registered-lookup-inconclusive": 1}, data["reasonCounts"])
+        self.assertEqual({"registered-lookup-inconclusive": 2}, data["reasonCounts"])
         self.assertNotIn("/private/", json.dumps(data))
+        # A later check must retry and report the current timeout, rather than
+        # emitting another cause-free cached branch failure.
+        data, calls = self.capture([refs[1]], run)
+        self.assertGreater(calls, 0)
+        self.assertTrue(data["refs"][0]["failure"]["timeout"])
+        self.assertEqual({"registered-lookup-inconclusive": 1}, data["reasonCounts"])
         self.assert_lookup_caches_unchanged()
 
     def test_many_refs_and_shipping_lines_have_bounded_line_and_scratch(self):

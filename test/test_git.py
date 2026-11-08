@@ -37,6 +37,39 @@ class LocalGitResolver(GitResolver):
 
 
 class CanonicalGitTest(unittest.TestCase):
+    def test_failed_branch_load_is_retried_on_next_check_not_each_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, remote, landed, _, _ = self._make_remote(root / "repo", origin=SPECS_REMOTE)
+
+            class BranchFailureResolver(LocalGitResolver):
+                failed = True
+                fetches = 0
+
+                def _run(self, args):
+                    if "fetch" in args and any(a.startswith("refs/heads/main:") for a in args):
+                        self.fetches += 1
+                        if self.failed:
+                            raise subprocess.TimeoutExpired(args, self.timeout)
+                    return super()._run(args)
+
+            resolver = BranchFailureResolver(root / "cache", {SPECS_REMOTE: remote})
+            resolver.refs = {SPECS_REMOTE: ("refs/heads/main",)}
+            # Path-only refs exercise the deployment registry, with no named
+            # repository proof or folder inference to hide a failed branch.
+            ref = {"repo": "retired:/checkout", "commit": landed}
+            other = {"repo": "retired:/other", "commit": "f" * 40}
+            with patch("atc_git.time.monotonic", return_value=100):
+                self.assertIsNone(resolver.resolve([ref, dict(ref), other]))
+                self.assertEqual(1, resolver.fetches)  # Bounded within a check.
+                resolver.failed = False
+                self.assertIs(True, resolver.resolve([ref, dict(ref)]))
+                self.assertEqual(2, resolver.fetches)
+                self.assertIs(True, resolver.resolve([ref]))
+                self.assertEqual(2, resolver.fetches)  # Keep successful caches.
+                self.assertEqual(4, resolver.timeout)
+                self.assertEqual(300, resolver.ttl)
+
     def test_failed_default_discovery_does_not_poison_later_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
