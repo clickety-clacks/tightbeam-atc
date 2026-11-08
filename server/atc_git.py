@@ -211,6 +211,7 @@ class GitResolver:
         self.ttl, self.timeout = ttl, timeout
         self.results, self.origins, self.branches, self.targets = {}, {}, {}, {}
         self._failed_targets = {}
+        self._advertised_heads = {}
         self.clear_diagnostics()
         self.acquisitions = RepositoryAcquisitions(self)
 
@@ -402,9 +403,11 @@ class GitResolver:
             if advertised.returncode == 0:
                 heads_complete = True
                 for line in advertised.stdout.splitlines():
-                    _, separator, branch = line.partition("\t")
+                    object_id, separator, branch = line.partition("\t")
                     if separator and branch.startswith("refs/heads/"):
                         heads.add(branch)
+                        if getattr(self, "_collect_heads", False):
+                            self._advertised_heads.setdefault(remote, {})[branch] = object_id
         except (OSError, subprocess.TimeoutExpired):
             pass
 
@@ -427,7 +430,8 @@ class GitResolver:
     def _acquire_repository(self, remote):
         # The private copy keeps acquisition diagnostics off proof-worker state.
         worker = copy(self)
-        worker.targets, worker._failed_targets = {}, {}
+        worker.targets, worker._failed_targets, worker._advertised_heads = {}, {}, {}
+        worker._collect_heads = True
         worker.clear_diagnostics()
         worker._diagnostic_ref = {"failure": None}
         directory = self.acquisitions.resolver.cache / (
@@ -447,14 +451,28 @@ class GitResolver:
                 # An existing successful acquisition is refreshed under the
                 # ordinary command cap. Only first acquisition gets 120 seconds
                 # total, including discovery and initialization.
-                existing = worker._command("acquisition-state", args + ["show-ref", "--quiet"], remote=remote)
-                if existing.returncode == 1:
-                    worker._acquisition_deadline = started + 120
-                fetched = worker._command("branch-fetch", args + [
-                    "fetch", "--quiet", "--force", "--atomic", "--filter=tree:0", remote,
-                ] + [branch + ":refs/atc/" + hashlib.sha256(branch.encode()).hexdigest()[:20]
-                     for branch in refs], remote=remote)
-                loaded = fetched.returncode == 0
+                existing = worker._command("acquisition-state", args + [
+                    "for-each-ref", "--format=%(refname) %(objectname)", "refs/atc/",
+                ], remote=remote)
+                local = dict(line.split(" ", 1) for line in existing.stdout.splitlines()
+                             if " " in line) if existing.returncode == 0 else {}
+                local_refs = {branch: "refs/atc/" + hashlib.sha256(branch.encode()).hexdigest()[:20]
+                              for branch in refs}
+                advertised = worker._advertised_heads.get(remote, {})
+                # A fresh advertisement matching our fetched heads establishes
+                # current shipping-line identity without another download.
+                # An incomplete advertisement can never take this shortcut.
+                unchanged = complete and all(advertised.get(branch) and
+                    local.get(local_refs[branch]) == advertised[branch] for branch in refs)
+                if unchanged:
+                    loaded = True
+                else:
+                    if not local:
+                        worker._acquisition_deadline = started + 120
+                    fetched = worker._command("branch-fetch", args + [
+                        "fetch", "--quiet", "--force", "--atomic", "--filter=tree:0", remote,
+                    ] + [branch + ":" + local_refs[branch] for branch in refs], remote=remote)
+                    loaded = fetched.returncode == 0
         except (OSError, subprocess.TimeoutExpired) as error:
             if worker._diagnostic_ref.get("failure") is None:
                 worker._note("branch-fetch", remote=remote, error=type(error).__name__,

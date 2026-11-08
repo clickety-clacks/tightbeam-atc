@@ -189,4 +189,43 @@ time.sleep(30)
             resolver.acquisitions.entries.clear()
             resolver.results.clear()
             self.assertIs(True, resolver.resolve([{"repo": "retired:/source", "commit": landed}]))
-            self.assertEqual((4, None), observed[1])
+            self.assertEqual(1, len(observed))  # Fresh advertisement reused identical heads.
+            self.assertEqual(4, resolver.timeout)
+
+
+    def test_refresh_skips_unchanged_heads_but_fetches_new_shipping_commits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = test_git.CanonicalGitTest()
+            repo, remote, landed, _, _ = helper._make_remote(root / "repo")
+            fetches = []
+
+            class Recorded(test_git.LocalGitResolver):
+                def _run(self, args):
+                    if "fetch" in args:
+                        fetches.append((list(args), getattr(self, "_acquisition_deadline", None)))
+                    return super()._run(args)
+
+            resolver = Recorded(root / "cache", {test_git.ATC_REMOTE: remote})
+            resolver.refs = {test_git.ATC_REMOTE: ("refs/heads/main",)}
+            ref = {"repo": "retired:/source", "commit": landed}
+            self.assertIs(True, resolver.resolve([ref]))
+            resolver.acquisitions.entries.clear()
+            resolver.results.clear()
+            self.assertIs(True, resolver.resolve([ref]))
+            self.assertEqual(1, len(fetches))
+            # A changed advertised head must acquire the new history and retain
+            # the ordinary four-second command cap on this already-loaded repo.
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(repo), *args],
+                                               text=True, stderr=subprocess.DEVNULL).strip()
+            git("checkout", "main")
+            (repo / "new.txt").write_text("new shipping commit")
+            git("add", ".")
+            git("commit", "-m", "new shipping commit")
+            latest = git("rev-parse", "HEAD")
+            git("push", str(remote), "main")
+            resolver.acquisitions.entries.clear()
+            self.assertIs(True, resolver.resolve([{**ref, "commit": latest}]))
+            self.assertEqual(2, len(fetches))
+            self.assertIsNone(fetches[-1][1])

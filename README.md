@@ -246,7 +246,9 @@ one acquisition in flight per repository. Initial commits-only acquisition has a
 120-second total deadline; ordinary Git proof and refresh commands retain their
 four-second cap. A failed acquisition is retried no sooner than 300 seconds after
 completion. Pending or failed acquisition is unknown, never negative evidence.
-Loaded repositories remain available while other repositories acquire.
+Loaded repositories remain available while other repositories acquire. Refresh
+checks compare freshly advertised shipping-line SHAs with the fetched heads;
+unchanged history needs no download, while changed heads are fetched before proof.
 An interrupted fetch terminates its helper processes and removes only unfinished
 pack files created by that invocation; successful packs and prior files remain.
 
