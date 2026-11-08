@@ -393,6 +393,13 @@ class GitResolver:
     def resolve(self, references):
         self.clear_diagnostics()
         self._failed_targets.clear()
+        # An inconclusive answer is reusable for duplicate refs in this check,
+        # not evidence that a later check should skip the same branch. Keep
+        # definite results and successfully loaded branches on their usual TTL.
+        for cache in (self.results, self.branches):
+            for key, (_, value) in list(cache.items()):
+                if value is None:
+                    del cache[key]
         findings = []
         attempted_commit_fetches = set()
         # A proof belongs to this item and exact object only. Named refs run
