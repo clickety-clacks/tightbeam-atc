@@ -612,9 +612,11 @@ class GitResolver:
                     self._note(failure.pop("step"), **failure)
             for branch in target_refs:
                 try:
-                    probes.append(self._probe(
-                        registered, branch, commit, ancestry_only=True,
-                        allow_commit_fetch=False))
+                    probe = self._probe(registered, branch, commit, ancestry_only=True,
+                                        allow_commit_fetch=False)
+                    if probe is True:
+                        return True
+                    probes.append(probe)
                 except (OSError, subprocess.TimeoutExpired):
                     probes.append(None)
         self._note("resolution", reason=("identity-missing" if complete and probes
@@ -634,7 +636,6 @@ class GitResolver:
         attempted_commit_fetches = set()
         # A proof belongs to this item and exact object only. Named refs run
         # first so input order cannot make a path miss the matching proof.
-        named_proofs = set()
         ordered = sorted(enumerate(references), key=lambda pair: is_path_reference(pair[1]))
         for index, reference in ordered:
             commit = reference.get("commit")
@@ -651,13 +652,6 @@ class GitResolver:
                 findings.append(None)
                 continue
             path_only = is_path_reference(reference)
-            if path_only and len(commit) in {40, 64} and commit in named_proofs:
-                self._note("identity", route="same-item-named-proof")
-                self._finish_diagnostic(True)
-                findings.append(True)
-                # Never cache this dependent proof under the path: another item
-                # may contain that path without the named reference.
-                continue
             key = (reference.get("repo"), reference.get("remote"), commit)
             cached = self.results.get(key)
             if cached and time.monotonic() - cached[0] < self.ttl:
@@ -666,8 +660,10 @@ class GitResolver:
                 self._note("resolution", reason="cached-inconclusive")
                 self._finish_diagnostic(cached[1])
                 findings.append(cached[1])
-                if cached[1] is True and not path_only:
-                    named_proofs.add(commit)
+                if cached[1] is True:
+                    self._failed_targets.clear()
+                    self.clear_diagnostics()
+                    return True
                 continue
             try:
                 remote = self._origin(reference)
@@ -683,8 +679,11 @@ class GitResolver:
                         allow_fetch = fetch_key not in attempted_commit_fetches
                         attempted_commit_fetches.add(fetch_key)
                         try:
-                            probes.append(self._probe(
-                                remote, branch, commit, allow_commit_fetch=allow_fetch))
+                            probe = self._probe(remote, branch, commit,
+                                                allow_commit_fetch=allow_fetch)
+                            probes.append(probe)
+                            if probe is True:
+                                break
                         except (OSError, subprocess.TimeoutExpired):
                             # A failed branch probe is incomplete evidence for
                             # that branch. Keep checking other shipping lines.
@@ -704,8 +703,12 @@ class GitResolver:
             self.results[key] = (time.monotonic(), value)
             self._finish_diagnostic(value)
             findings.append(value)
-            if value is True and not path_only:
-                named_proofs.add(commit)
+            if value is True:
+                # Item merge status is existential: one authorized proof is
+                # sufficient, including when other references are unavailable.
+                self._failed_targets.clear()
+                self.clear_diagnostics()
+                return True
         self._failed_targets.clear()
         return True if any(v is True for v in findings) else (
             False if findings and all(v is False for v in findings) else None)

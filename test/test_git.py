@@ -424,7 +424,8 @@ class CanonicalGitTest(unittest.TestCase):
             other_path = {**path, "commit": commits["default"]}
             with patch.object(resolver, "_registered_ancestry", wraps=resolver._registered_ancestry) as fallback:
                 self.assertIs(True, resolver.resolve([other_path, named]))
-                fallback.assert_called_once_with(other_path["commit"])
+                fallback.assert_not_called()  # This item already has a proof.
+            self.assertIsNone(resolver.resolve([other_path]))
             self.assertEqual(1, resolver.diagnostic_ref_count)
             # Unmerged or unavailable named references are not positive proof.
             for key in ("quarantine/held-work", "unreachable"):

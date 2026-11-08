@@ -1003,11 +1003,13 @@ class LiveService:
                     and previous.get("lastAttemptComplete", True) == item.get("commitRefsComplete", True)
                     and now_ms() - last_attempt < self.rebuild_interval * 1000):
                 continue
-            if self.merge_pending.get(item["id"]) == refs:
-                continue
+            pending = item["id"] in self.merge_pending
+            # One queued/running check per item. Updates replace its desired
+            # inventory; the worker/result handler reconciles to that inventory.
             self.merge_pending[item["id"]] = deepcopy(refs)
             self.merge_pending_complete[item["id"]] = item.get("commitRefsComplete", True)
-            self.merge_jobs.put((item["id"], deepcopy(refs)))
+            if not pending:
+                self.merge_jobs.put((item["id"], deepcopy(refs)))
 
     def _next_merge_retry_at(self):
         """Return when an unresolved merge observation can be checked again."""
@@ -1036,6 +1038,10 @@ class LiveService:
             if job is None:
                 return
             wid, refs = job
+            with self.model_lock:
+                if wid not in self.merge_pending:
+                    continue
+                refs = deepcopy(self.merge_pending[wid])
             started = time.monotonic()
             error_class = None
             try:
@@ -1190,6 +1196,10 @@ class LiveService:
         elif kind == "merged":
             wid, refs, merged, at = value
             if self.merge_pending.get(wid) != refs:
+                if wid in self.merge_pending:
+                    # The obsolete attempt has finished. Only now queue the
+                    # latest inventory, so variants never occupy two workers.
+                    self.merge_jobs.put((wid, deepcopy(self.merge_pending[wid])))
                 return False
             self.merge_pending.pop(wid)
             refs_complete = self.merge_pending_complete.pop(wid, True)

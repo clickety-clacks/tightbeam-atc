@@ -272,6 +272,10 @@ until a definite recheck replaces it. Removing any ref from the proof requires a
 fresh result once the reference inventory is complete. During an incomplete
 reference load, a previous positive proof remains stale and partial checks do
 not replace it. A negative result does not carry over to a changed ref set.
+Checks stop once a shipping-line proof establishes the item as merged; negative
+or unknown results still require the remaining references. Pending inventory
+updates coalesce per item, and an obsolete running attempt finishes before the
+latest inventory is checked, without overlapping variants.
 Git results are retained in the ATC-owned Git cache across process restarts and
 restored as stale evidence until a new lookup confirms them.
 
