@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from atc_evidence import merge_ring
@@ -36,6 +37,102 @@ class LocalGitResolver(GitResolver):
 
 
 class CanonicalGitTest(unittest.TestCase):
+    def test_failed_default_discovery_does_not_poison_later_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, remote, landed, equivalent, absent = self._make_remote(root / "repo")
+
+            class DiscoveryResolver(LocalGitResolver):
+                failure_kind = None
+                default_calls = 0
+
+                def _run(self, args):
+                    if "--symref" in args:
+                        self.default_calls += 1
+                        if self.failure_kind == "timeout":
+                            raise subprocess.TimeoutExpired(args, 4)
+                        if self.failure_kind == "error":
+                            raise OSError("unavailable")
+                        if self.failure_kind == "exit":
+                            return subprocess.CompletedProcess(args, 128, "", "")
+                    return super()._run(args)
+
+            # This repository has no configured default fallback. The first
+            # item's failed discovery produces no targets, but the next item's
+            # distinct commit must be probed before the ordinary cache expires.
+            for failure in ("timeout", "error", "exit"):
+                with self.subTest(failure=failure), patch("atc_git.time.monotonic", return_value=100):
+                    resolver = DiscoveryResolver(root / failure, {CLAWLINE_REMOTE: remote})
+                    resolver.failure_kind = failure
+                    self.assertIsNone(resolver.resolve([
+                        {"remote": CLAWLINE_REMOTE, "commit": "f" * 40},
+                        {"remote": CLAWLINE_REMOTE, "commit": "e" * 40},
+                    ]))
+                    self.assertEqual(1, resolver.default_calls)  # One attempt per check.
+                    resolver.failure_kind = None
+                    self.assertIs(True, resolver.resolve([{"remote": CLAWLINE_REMOTE, "commit": landed}]))
+                    self.assertEqual(2, resolver.default_calls)
+                    # Successful discovery still caches; real Git establishes
+                    # patch equivalence and definite absence as before.
+                    self.assertIs(True, resolver.resolve([{"remote": CLAWLINE_REMOTE, "commit": equivalent}]))
+                    self.assertIs(False, resolver.resolve([{"remote": CLAWLINE_REMOTE, "commit": absent}]))
+                    self.assertEqual(2, resolver.default_calls)
+                    self.assertEqual(4, resolver.timeout)
+                    self.assertEqual(300, resolver.ttl)
+
+    def test_failed_shipping_inventory_retries_without_losing_positive_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, remote, commits = self._make_shipping_line_remote(root / "repo")
+
+            class DiscoveryResolver(LocalGitResolver):
+                fail_heads = True
+                heads_calls = 0
+
+                def _run(self, args):
+                    if "--heads" in args:
+                        self.heads_calls += 1
+                        if self.fail_heads:
+                            raise subprocess.TimeoutExpired(args, 4)
+                    return super()._run(args)
+
+            resolver = DiscoveryResolver(root / "cache", {TIGHTBEAM_REMOTE: remote})
+            with patch("atc_git.time.monotonic", return_value=100):
+                # A partial inventory cannot prove absence on unlisted lines.
+                self.assertIsNone(resolver.resolve([{
+                    "remote": TIGHTBEAM_REMOTE, "commit": commits["0.1.14-first"],
+                }]))
+                # Known targets can still supply a definite proof on failure.
+                self.assertIs(True, resolver.resolve([{
+                    "remote": TIGHTBEAM_REMOTE, "commit": commits["default"],
+                }]))
+                resolver.fail_heads = False
+                self.assertIs(True, resolver.resolve([{
+                    "remote": TIGHTBEAM_REMOTE, "commit": commits["0.1.14-second"],
+                }]))
+                self.assertEqual(3, resolver.heads_calls)
+
+    def test_successful_empty_target_discovery_stays_cached_and_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "empty.git"
+            subprocess.run(["git", "init", "--bare", str(remote)],
+                           check=True, capture_output=True, text=True)
+
+            class DiscoveryResolver(LocalGitResolver):
+                listings = 0
+
+                def _run(self, args):
+                    if "ls-remote" in args:
+                        self.listings += 1
+                    return super()._run(args)
+
+            resolver = DiscoveryResolver(root / "cache", {CLAWLINE_REMOTE: remote})
+            with patch("atc_git.time.monotonic", return_value=100):
+                for commit in ("a" * 40, "b" * 40):
+                    self.assertIsNone(resolver.resolve([{"remote": CLAWLINE_REMOTE, "commit": commit}]))
+                self.assertEqual(2, resolver.listings)
+
     def test_fresh_registered_proof_without_stored_item_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
