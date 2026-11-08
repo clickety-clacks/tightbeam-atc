@@ -1205,8 +1205,10 @@ class ServiceRecoveryTest(unittest.TestCase):
         for thread in threads:
             thread.start()
         try:
+            service.merge_pending["slow-item"] = [{"commit": "slow"}]
             service.merge_jobs.put(("slow-item", [{"commit": "slow"}]))
             self.assertTrue(slow_started.wait(1))
+            service.merge_pending["fast-item"] = [{"commit": "fast"}]
             service.merge_jobs.put(("fast-item", [{"commit": "fast"}]))
             self.assertTrue(fast_finished.wait(1),
                             "a blocked lookup must not hold up another queued item")

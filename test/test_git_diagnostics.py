@@ -29,6 +29,7 @@ class GitDiagnosticsTest(unittest.TestCase):
         self.addCleanup(self.service.stop)
 
     def run_worker(self, refs, run, resolver=None):
+        self.service.merge_pending["wi_12345678"] = refs
         self.service.merge_jobs.put(("wi_12345678", refs))
         self.service.merge_jobs.put(None)
         with patch.object(self.resolver, "_run", side_effect=run) as command:

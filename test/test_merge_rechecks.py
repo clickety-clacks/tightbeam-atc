@@ -45,6 +45,42 @@ class MergeRecheckTest(unittest.TestCase):
         self.assertEqual({"work": self.refs}, self.service.merge_pending)
         self.assertEqual(("work", self.refs), self.service.merge_jobs.get_nowait())
 
+    def test_pending_variants_coalesce_and_completeness_advances(self):
+        from unittest.mock import Mock
+        latest = self.refs + [{"repo": "example", "commit": "b" * 40}]
+        self.service.current["items"][0]["commitRefsComplete"] = False
+        with patch("atc_service.now_ms", return_value=400_000):
+            self.service._resolve_merges()
+            self.service.current["items"][0].update(commitRefs=latest, commitRefsComplete=True)
+            self.service._resolve_merges()
+        self.assertEqual(1, self.service.merge_jobs.qsize())
+        resolver = Mock()
+        resolver.resolve.return_value = True
+        self.service.merge_jobs.put(None)
+        self.service._git_worker(resolver)
+        resolver.resolve.assert_called_once_with(latest)
+        self.service._handle(*self.service.events.get_nowait())
+        self.assertTrue(self.service.model.merges["work"]["lastAttemptComplete"])
+        self.assertEqual(latest, self.service.model.merges["work"]["refs"])
+
+    def test_running_variant_finishes_before_latest_is_queued(self):
+        from unittest.mock import Mock
+        latest = self.refs + [{"repo": "example", "commit": "b" * 40}]
+        with patch("atc_service.now_ms", return_value=400_000):
+            self.service._resolve_merges()
+        def change_during_check(refs):
+            self.service.current["items"][0]["commitRefs"] = latest
+            self.service._resolve_merges()
+            self.assertTrue(self.service.merge_jobs.empty())
+            self.service.merge_jobs.put(None)
+            return True
+        resolver = Mock()
+        resolver.resolve.side_effect = change_during_check
+        self.service._git_worker(resolver)
+        self.assertFalse(self.service._handle(*self.service.events.get_nowait()))
+        self.assertEqual(("work", latest), self.service.merge_jobs.get_nowait())
+        self.assertIsNone(self.service.model.merges["work"]["value"])
+
     def test_known_merge_result_does_not_enter_unknown_retry_schedule(self):
         self.service.model.merges["work"]["value"] = False
         self.assertIsNone(self.service._next_merge_retry_at())
