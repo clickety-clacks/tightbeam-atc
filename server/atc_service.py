@@ -290,6 +290,8 @@ class LiveService:
         for _ in range(self.merge_workers_started):
             self.merge_jobs.put(None)
         self.reads.close()
+        if isinstance(self.resolver, GitResolver):
+            self.resolver.acquisitions.close()
         with self.condition:
             self.condition.notify_all()
 

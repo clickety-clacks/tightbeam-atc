@@ -239,10 +239,14 @@ inconclusive-lookup label. Neither path implies a wider repository search.
 
 Path-only lookup fetches complete commit ancestry without tree/blob payloads into
 a separate cache. Named-reference patch comparisons keep their full-object cache.
-The existing command timeout and raw-commit fetch allowance apply unchanged.
-A failed registry ancestry download is retried after the existing five-minute
-branch-cache interval, rather than for every unrelated item. Item-level unknowns
-are still rechecked, and other repositories can supply a proof during that interval.
+The raw-commit fetch allowance is unchanged. Item-level unknowns are still
+rechecked, and other repositories can supply a proof during failed-load backoff.
+The shared repository acquisition queue runs separately from proof workers, with
+one acquisition in flight per repository. Initial commits-only acquisition has a
+120-second total deadline; ordinary Git proof and refresh commands retain their
+four-second cap. A failed acquisition is retried no sooner than 300 seconds after
+completion. Pending or failed acquisition is unknown, never negative evidence.
+Loaded repositories remain available while other repositories acquire.
 An interrupted fetch terminates its helper processes and removes only unfinished
 pack files created by that invocation; successful packs and prior files remain.
 

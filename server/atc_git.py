@@ -1,5 +1,7 @@
 """Canonical Git evidence, cached in ATC's own directory."""
 
+from concurrent.futures import ThreadPoolExecutor
+from copy import copy
 import hashlib
 import json
 import os
@@ -8,6 +10,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+import threading
 
 
 # Known default branches are fallbacks for repositories whose symbolic HEAD
@@ -166,6 +169,40 @@ def repository_remote(identity):
     return f"git@github.com:clickety-clacks/{match['repository']}.git"
 
 
+class RepositoryAcquisitions:
+    """Share bounded repository downloads without occupying proof workers."""
+    def __init__(self, resolver):
+        self.resolver = resolver
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="atc-acquire")
+        self.lock = threading.Lock()
+        self.entries = {}
+
+    def get(self, remote):
+        with self.lock:
+            entry = self.entries.get(remote)
+            if entry is not None:
+                future, finished, result = entry
+                if not future.done():
+                    return None
+                if finished is None:
+                    result = future.result()
+                    finished = time.monotonic()
+                    self.entries[remote] = (future, finished, result)
+                if time.monotonic() - finished < self.resolver.ttl:
+                    return result
+            future = self.executor.submit(self.resolver._acquire_repository, remote)
+            self.entries[remote] = (future, None, None)
+            # An inline executor is useful for deterministic transport tests.
+            if future.done():
+                result = future.result()
+                self.entries[remote] = (future, time.monotonic(), result)
+                return result
+            return None
+
+    def close(self):
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+
 class GitResolver:
     def __init__(self, cache, refs=None, host_routes=None, ttl=300, timeout=4):
         self.cache = Path(cache)
@@ -175,6 +212,7 @@ class GitResolver:
         self.results, self.origins, self.branches, self.targets = {}, {}, {}, {}
         self._failed_targets = {}
         self.clear_diagnostics()
+        self.acquisitions = RepositoryAcquisitions(self)
 
     def _run(self, args):
         # Fetch helpers can outlive the parent Git process after a timeout.
@@ -188,7 +226,10 @@ class GitResolver:
                               text=True, start_new_session=(os.name == "posix"),
                               env={**os.environ, "GIT_NO_LAZY_FETCH": "1"}) as process:
             try:
-                stdout, stderr = process.communicate(timeout=self.timeout)
+                limit = self.timeout
+                if "fetch" in args and getattr(self, "_acquisition_deadline", None):
+                    limit = max(0, self._acquisition_deadline - time.monotonic())
+                stdout, stderr = process.communicate(timeout=limit)
                 failed = process.returncode != 0
                 return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
             except subprocess.TimeoutExpired:
@@ -252,7 +293,7 @@ class GitResolver:
         # command. Prefer a canonical probe failure to a missing checkout.
         failed = "error" in fields or (
             fields.get("exitCode", 0) != 0 and step != "commit-object"
-            and not (step == "ancestry" and fields["exitCode"] == 1))
+            and not (step in {"ancestry", "acquisition-state"} and fields["exitCode"] == 1))
         previous = ref.get("failure")
         if failed and (previous is None or (previous["step"] == "origin"
                                            and fields.get("remote") is not None)):
@@ -383,15 +424,62 @@ class GitResolver:
             self._failed_targets[remote] = result
         return result
 
+    def _acquire_repository(self, remote):
+        # The private copy keeps acquisition diagnostics off proof-worker state.
+        worker = copy(self)
+        worker.targets, worker._failed_targets = {}, {}
+        worker.clear_diagnostics()
+        worker._diagnostic_ref = {"failure": None}
+        directory = self.acquisitions.resolver.cache / (
+            hashlib.sha256(remote.encode()).hexdigest()[:20] + ".ancestry.git")
+        args = ["git", "--git-dir", str(directory)]
+        started = time.monotonic()
+        refs, complete, loaded = (), False, False
+        try:
+            refs, complete = worker._target_refs(remote)
+            if refs:
+                directory.parent.mkdir(parents=True, exist_ok=True)
+                if not directory.exists():
+                    initialized = worker._command("cache-init", ["git", "init", "--bare", "--quiet", str(directory)], remote=remote)
+                    if initialized.returncode:
+                        return {"refs": refs, "complete": False, "loaded": False,
+                                "failure": worker._diagnostic_ref.get("failure")}
+                # An existing successful acquisition is refreshed under the
+                # ordinary command cap. Only first acquisition gets 120 seconds
+                # total, including discovery and initialization.
+                existing = worker._command("acquisition-state", args + ["show-ref", "--quiet"], remote=remote)
+                if existing.returncode == 1:
+                    worker._acquisition_deadline = started + 120
+                fetched = worker._command("branch-fetch", args + [
+                    "fetch", "--quiet", "--force", "--atomic", "--filter=tree:0", remote,
+                ] + [branch + ":refs/atc/" + hashlib.sha256(branch.encode()).hexdigest()[:20]
+                     for branch in refs], remote=remote)
+                loaded = fetched.returncode == 0
+        except (OSError, subprocess.TimeoutExpired) as error:
+            if worker._diagnostic_ref.get("failure") is None:
+                worker._note("branch-fetch", remote=remote, error=type(error).__name__,
+                             timeout=isinstance(error, subprocess.TimeoutExpired))
+        return {"refs": refs, "complete": complete, "loaded": loaded,
+                "args": args, "failure": None if loaded else worker._diagnostic_ref.get("failure")}
+
     def _branch(self, remote, branch, ancestry_only=False):
-        key = (remote, branch, "ancestry") if ancestry_only else (remote, branch)
+        if ancestry_only:
+            acquired = self.acquisitions.get(remote)
+            self._note("branch-cache", remote=remote, branch=branch,
+                       available=bool(acquired and acquired["loaded"]), ageMs=0)
+            if not acquired or not acquired["loaded"] or branch not in acquired["refs"]:
+                if acquired and acquired.get("failure"):
+                    failure = dict(acquired["failure"])
+                    self._note(failure.pop("step"), **failure)
+                return None
+            return acquired["args"], "refs/atc/" + hashlib.sha256(branch.encode()).hexdigest()[:20]
+        key = (remote, branch)
         cached = self.branches.get(key)
         if cached and time.monotonic() - cached[0] < self.ttl:
             self._note("branch-cache", remote=remote, branch=branch, available=cached[1] is not None,
                        ageMs=round((time.monotonic() - cached[0]) * 1000, 3))
             return cached[1]
-        suffix = ".ancestry.git" if ancestry_only else ".git"
-        directory = self.cache / (hashlib.sha256(remote.encode()).hexdigest()[:20] + suffix)
+        directory = self.cache / (hashlib.sha256(remote.encode()).hexdigest()[:20] + ".git")
         directory.parent.mkdir(parents=True, exist_ok=True)
         if not directory.exists():
             if self._command("cache-init", ["git", "init", "--bare", "--quiet", str(directory)], remote=remote, branch=branch).returncode:
@@ -399,11 +487,7 @@ class GitResolver:
         local_ref = "refs/atc/" + hashlib.sha256(branch.encode()).hexdigest()[:20]
         args = ["git", "--git-dir", str(directory)]
         try:
-            # Path lookup needs complete commit ancestry, not trees or blobs.
-            # Keep this cache separate from named-reference patch comparison.
-            options = ["--filter=tree:0"] if ancestry_only else []
-            fetched = self._command("branch-fetch", args + ["fetch", "--quiet", "--force"] +
-                                    options + [remote, branch + ":" + local_ref],
+            fetched = self._command("branch-fetch", args + ["fetch", "--quiet", "--force", remote, branch + ":" + local_ref],
                                     remote=remote, branch=branch)
             value = (args, local_ref) if fetched.returncode == 0 else None
         except (OSError, subprocess.TimeoutExpired):
@@ -466,8 +550,19 @@ class GitResolver:
         probes = []
         complete = True
         for registered in self.refs:
-            target_refs, inventory_complete = self._target_refs(registered)
+            acquired = self.acquisitions.get(registered)
+            if acquired is None:
+                probes.append(None)
+                complete = False
+                self._note("branch-cache", remote=registered, available=False, ageMs=0)
+                continue
+            target_refs, inventory_complete = acquired["refs"], acquired["complete"]
             complete = complete and inventory_complete
+            if not target_refs:
+                probes.append(None)
+                if acquired.get("failure"):
+                    failure = dict(acquired["failure"])
+                    self._note(failure.pop("step"), **failure)
             for branch in target_refs:
                 try:
                     probes.append(self._probe(
@@ -482,13 +577,11 @@ class GitResolver:
     def resolve(self, references):
         self.clear_diagnostics()
         self._failed_targets.clear()
-        # Item-level unknowns never suppress a later check. Named-reference
-        # failed loads retry too. Registry ancestry loads use their branch TTL
-        # even on failure: many unrelated path-only items share that download,
-        # and retrying it for every item can repeatedly exhaust the command cap.
+        # Item and named-reference unknowns never suppress a later check.
+        # Shared repository acquisition owns the separate failed-load backoff.
         for cache in (self.results, self.branches):
             for key, (_, value) in list(cache.items()):
-                if value is None and (cache is self.results or len(key) == 2):
+                if value is None:
                     del cache[key]
         findings = []
         attempted_commit_fetches = set()

@@ -51,13 +51,12 @@ class GitFetchTest(unittest.TestCase):
                             "uploadpack.allowFilter", "true"], check=True)
 
             class RetryResolver(test_git.LocalGitResolver):
-                fetches = 0
-                fail = True
+                transport = {"fetches": 0, "fail": True}
 
                 def _run(self, args):
                     if "fetch" in args:
-                        self.fetches += 1
-                        if self.fail:
+                        self.transport["fetches"] += 1
+                        if self.transport["fail"]:
                             raise subprocess.TimeoutExpired(args, self.timeout)
                     return super()._run(args)
 
@@ -69,13 +68,13 @@ class GitFetchTest(unittest.TestCase):
                     self.assertIsNone(resolver.resolve([{
                         "repo": f"retired:/item-{i}", "commit": landed,
                     }]))
-                self.assertEqual(1, resolver.fetches)
-            resolver.fail = False
+                self.assertEqual(1, resolver.transport["fetches"])
+            resolver.transport["fail"] = False
             with patch("atc_git.time.monotonic", return_value=start + resolver.ttl + 1):
                 self.assertIs(True, resolver.resolve([{
                     "repo": "retired:/later-item", "commit": landed,
                 }]))
-            self.assertEqual(2, resolver.fetches)
+            self.assertEqual(2, resolver.transport["fetches"])
             self.assertEqual([], list((root / "cache").rglob("tmp_pack_*")))
 
     @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
@@ -112,3 +111,82 @@ time.sleep(30)
                                        capture_output=True, text=True).stdout.strip()
                 self.assertTrue(not state or state.startswith("Z"), state)
             self.assertEqual({existing.name, complete.name}, {p.name for p in pack_dir.iterdir()})
+
+    def test_acquisition_is_single_flight_and_does_not_block_loaded_proofs(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from atc_service import LiveService
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = test_git.CanonicalGitTest()
+            _, fast, landed, _, _ = helper._make_remote(root / "fast")
+            _, slow, slow_commit, _, _ = helper._make_remote(root / "slow")
+            entered, release = Event(), Event()
+            calls = []
+
+            class HeldTransport(test_git.LocalGitResolver):
+                def _run(self, args):
+                    if "fetch" in args and test_git.SPECS_REMOTE in args:
+                        calls.append(args)
+                        entered.set()
+                        if not release.wait(10):
+                            raise AssertionError("acquisition was not released")
+                    return super()._run(args)
+
+            resolver = HeldTransport(root / "cache", {
+                test_git.ATC_REMOTE: fast, test_git.SPECS_REMOTE: slow,
+            })
+            resolver.refs = {test_git.ATC_REMOTE: ("refs/heads/main",),
+                             test_git.SPECS_REMOTE: ("refs/heads/main",)}
+            resolver.acquisitions.executor = ThreadPoolExecutor(max_workers=2)
+            service = LiveService(object(), resolver=resolver)
+            workers = service._merge_resolvers()
+            try:
+                resolver.acquisitions.get(test_git.ATC_REMOTE)
+                resolver.acquisitions.entries[test_git.ATC_REMOTE][0].result(timeout=10)
+                self.assertTrue(resolver.acquisitions.get(test_git.ATC_REMOTE)["loaded"])
+                self.assertIsNone(resolver.acquisitions.get(test_git.SPECS_REMOTE))
+                self.assertTrue(entered.wait(5))
+                for worker in workers:
+                    self.assertIs(resolver.acquisitions, worker.acquisitions)
+                    self.assertIsNone(worker.acquisitions.get(test_git.SPECS_REMOTE))
+                # This proof executes while the second repository is still held.
+                self.assertIs(True, workers[-1].resolve([
+                    {"repo": "retired:/fast", "commit": landed}]))
+                self.assertFalse(release.is_set())
+                self.assertEqual(1, len(calls))
+                release.set()
+                resolver.acquisitions.entries[test_git.SPECS_REMOTE][0].result(timeout=10)
+                self.assertIs(True, resolver.resolve([
+                    {"repo": "retired:/slow", "commit": slow_commit}]))
+            finally:
+                release.set()
+                resolver.acquisitions.executor.shutdown(wait=True)
+                service.stop()
+
+    def test_first_acquisition_has_separate_deadline_and_proofs_keep_command_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = test_git.CanonicalGitTest()
+            _, remote, landed, _, _ = helper._make_remote(root / "repo")
+            observed = []
+
+            class Deadlines(test_git.LocalGitResolver):
+                def _run(self, args):
+                    if "fetch" in args:
+                        observed.append((self.timeout, getattr(self, "_acquisition_deadline", None)))
+                    return super()._run(args)
+
+            resolver = Deadlines(root / "cache", {test_git.ATC_REMOTE: remote})
+            resolver.refs = {test_git.ATC_REMOTE: ("refs/heads/main",)}
+            began = time.monotonic()
+            self.assertIs(True, resolver.resolve([{"repo": "retired:/source", "commit": landed}]))
+            self.assertEqual(4, observed[0][0])
+            self.assertGreater(observed[0][1], began)
+            self.assertLessEqual(observed[0][1], time.monotonic() + 120)
+            self.assertFalse(hasattr(resolver, "_acquisition_deadline"))
+            # Refresh the same real repository; ordinary command cap applies.
+            resolver.acquisitions.entries.clear()
+            resolver.results.clear()
+            self.assertIs(True, resolver.resolve([{"repo": "retired:/source", "commit": landed}]))
+            self.assertEqual((4, None), observed[1])

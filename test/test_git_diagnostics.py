@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from atc_git import GitResolver, reference_digest
 from atc_service import LiveService
+from test_git import inline_acquisitions
 
 
 REMOTE = "git@github.com:clickety-clacks/tightbeam-atc.git"
@@ -23,6 +24,7 @@ class GitDiagnosticsTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.resolver = GitResolver(Path(self.tmp.name), refs={REMOTE: ("refs/heads/main",)})
+        inline_acquisitions(self.resolver)
         self.service = LiveService(object(), resolver=self.resolver)
         self.addCleanup(self.service.stop)
 
@@ -176,20 +178,20 @@ class GitDiagnosticsTest(unittest.TestCase):
         self.assertTrue(failed["timeout"])
         self.assertEqual("TimeoutExpired", failed["error"])
         self.assertEqual("registered-ancestry", ref["fallback"])
-        self.assertIsNone(ref["cache"])
+        self.assertEqual("branch-cache", ref["cache"])
         # A different reference in this check reuses the failed lookup, but must
         # label that as cached/incomplete rather than proof of absent identity.
         ref = data["refs"][1]
         self.assertEqual("branch-cache", ref["cache"])
         self.assertFalse(ref["cacheDetail"]["available"])
         self.assertGreaterEqual(ref["cacheDetail"]["ageMs"], 0)
-        self.assertIsNone(ref["failure"])
+        self.assertEqual("TimeoutExpired", ref["failure"]["error"])
         self.assertEqual({"registered-lookup-inconclusive": 2}, data["reasonCounts"])
         self.assertNotIn("/private/", json.dumps(data))
-        # A later check must retry and report the current timeout, rather than
-        # emitting another cause-free cached branch failure.
+        # Backoff avoids another download while keeping the bounded failure
+        # category available for the current inconclusive check.
         data, calls = self.capture([refs[1]], run)
-        self.assertGreater(calls, 0)
+        self.assertEqual(calls, 0)
         self.assertTrue(data["refs"][0]["failure"]["timeout"])
         self.assertEqual({"registered-lookup-inconclusive": 1}, data["reasonCounts"])
         self.assert_lookup_caches_unchanged()
