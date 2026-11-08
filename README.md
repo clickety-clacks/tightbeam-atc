@@ -262,7 +262,13 @@ When a natural merge check is inconclusive, the service writes one structured
 commit-reference index and hash, worker, selected repository/branch, failed
 command kind and exit/timeout/error class, fetch allowance, fallback and elapsed
 time. The line is bounded to 4 KiB, summarizes at most four inconclusive refs,
-and counts omitted refs. It keeps a deciding failure rather than a command
+and counts omitted refs. Reason and deciding-failure counts include omitted
+references. Input digests correlate the complete submitted reference list and
+individual references without logging checkout paths. Exact repository names,
+identity-selection routes, cache ages, target completeness, stderr categories
+and patch-output counts distinguish otherwise silent paths; these labels do not
+prove absence from every repository or historical network unreachability.
+It keeps a deciding failure with its own repository and branch rather than a command
 history. Cache hits are labelled as such; their earlier failure details are not
 retained or reported as new attempts. Diagnostic summaries are discarded after
 each check and never stored in lookup caches. Command arguments, checkout paths, output and exception
