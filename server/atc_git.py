@@ -2,10 +2,8 @@
 
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
-import shlex
-import socket
 import subprocess
 import time
 
@@ -30,23 +28,11 @@ ORG_REPOSITORY = re.compile(
     r"clickety-clacks/(?P<repository>[A-Za-z0-9_.-]+?)(?:\.git)?\Z",
     re.IGNORECASE,
 )
-# Bounded vocabulary for matching checkout directory names to public
-# organization repositories. Explicit repo/remote fields remain unrestricted.
-PUBLIC_ORG_REPOSITORIES = frozenset({
-    "agent-window-resolver", "agentd", "agentd-hub", "argus", "clawdbot",
-    "clawline", "clipmesh", "engram", "ghostty", "gooarchy",
-    "gooarchy-flavorings", "harklight-agent", "harklight-app",
-    "harklight-server", "homebrew-tap", "lachesis", "lachesis-omarchy",
-    "omarchy-ask", "omarchy-key-visualizer", "omarchy-nasa2043-theme",
-    "omarchy-subspace", "omarchy-window-panel", "pimcamp", "scottland",
-    "seldon", "subspace", "subspace-daemon", "surf-ace", "swiftterm",
-    "tightbeam", "tightbeam-atc", "tightbeam-chat", "tightbeam-decisions-omarchy",
-    "tightbeam-design", "tightbeam-specs", "tightbeam-tuner",
-    "tightbeam-workitem-pies", "vimarchy", "xdg-desktop-portal-wlr", "yoohoo",
-})
-RELEASE_LINE = re.compile(
-    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
-)
+RELEASE_LINE = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
+
+
+def is_path_reference(reference):
+    return not reference.get("remote") and repository_remote(reference.get("repo")) is None
 
 
 def reference_digest(references):
@@ -68,6 +54,8 @@ def stderr_category(text, step):
         return "missing-checkout"
     if "not our ref" in text or "unadvertised object" in text:
         return "object-not-served"
+    if step == "commit-object" and "not a valid object name" in text:
+        return "missing-object"
     if any(s in text for s in ("authentication failed", "permission denied", "could not read username")):
         return "authentication-or-authorization"
     if any(s in text for s in ("could not resolve", "connection refused", "network is unreachable",
@@ -122,22 +110,6 @@ def repository_remote(identity):
     return f"git@github.com:clickety-clacks/{match['repository']}.git"
 
 
-def repository_remote_from_checkout(repo):
-    """Return the longest public org slug candidate in a checkout basename."""
-    if not isinstance(repo, str) or ":" not in repo:
-        return None
-    _, path = repo.split(":", 1)
-    if not path.startswith("/"):
-        return None
-    checkout = PurePosixPath(path.rstrip("/")).name.casefold()
-    matches = [name for name in PUBLIC_ORG_REPOSITORIES
-               if checkout == name or checkout.startswith(name + "-")]
-    if not matches:
-        return None
-    repository = max(matches, key=len)
-    return f"git@github.com:clickety-clacks/{repository}.git"
-
-
 class GitResolver:
     def __init__(self, cache, refs=None, host_routes=None, ttl=300, timeout=4):
         self.cache = Path(cache)
@@ -147,7 +119,6 @@ class GitResolver:
         self.results, self.origins, self.branches, self.targets = {}, {}, {}, {}
         self._failed_targets = {}
         self.clear_diagnostics()
-        self.local_hosts = {socket.gethostname(), socket.gethostname().split(".", 1)[0]}
 
     def _run(self, args):
         return subprocess.run(args, capture_output=True, text=True, timeout=self.timeout)
@@ -267,24 +238,6 @@ class GitResolver:
             return cached[1]
         origin = repository_remote(repo)
         self._note("identity", route="named-repository" if origin is not None else "missing-identity")
-        if isinstance(repo, str) and ":" in repo:
-            host, path = repo.split(":", 1)
-            if origin is None and Path(path).is_absolute():
-                command = ["git", "-C", path, "remote", "get-url", "origin"]
-                if host in self.local_hosts:
-                    result = self._command("origin", command)
-                elif host in self.host_routes:
-                    result = self._command("origin", ["ssh", "-o", "BatchMode=yes",
-                                        self.host_routes[host], shlex.join(command)])
-                else:
-                    result = None
-                if result is not None and result.returncode == 0:
-                    self._note("identity", route="checkout-origin")
-                    found = normalize_remote(result.stdout.strip())
-                    origin = found if found in self.refs or is_org_remote(found) else False
-            if origin is None:
-                origin = repository_remote_from_checkout(repo)
-                self._note("identity", route="basename-candidate" if origin else "missing-identity")
         self.origins[repo] = (time.monotonic(), origin)
         return origin
 
@@ -376,10 +329,13 @@ class GitResolver:
         if loaded is None:
             return None
         args, local_ref = loaded
-        if self._command("commit-object", args + ["cat-file", "-e", commit + "^{commit}"], remote=remote, branch=branch).returncode:
+        obj = self._command("commit-object", args + ["cat-file", "-e", commit + "^{commit}"], remote=remote, branch=branch)
+        if obj.returncode:
             if ancestry_only or not allow_commit_fetch:
                 self._note("raw-fetch-skipped", remote=remote, branch=branch,
                            reason="ancestry-only" if ancestry_only else "allowance-exhausted")
+                if ancestry_only and len(commit) in {40, 64} and stderr_category(obj.stderr, "commit-object") == "missing-object":
+                    return False  # Not in this successfully fetched shipping line.
                 return None
             try:
                 fetched = self._command("raw-fetch", args + ["fetch", "--quiet", remote, commit], remote=remote, branch=branch)
@@ -393,7 +349,7 @@ class GitResolver:
         if ancestry.returncode != 1:
             return None
         if ancestry_only:
-            return None
+            return False
         # Preserve patch-equivalence evidence for cherry-picked/rebased work.
         started = time.monotonic()
         equivalent = self._command("patch-equivalence", args + ["cherry", local_ref, commit, commit + "~1"], remote=remote, branch=branch)
@@ -414,8 +370,10 @@ class GitResolver:
         """Use known repositories only for positive ancestry recovery."""
         self._note("fallback", route="registered-ancestry")
         probes = []
+        complete = True
         for registered in self.refs:
-            target_refs, _ = self._target_refs(registered)
+            target_refs, inventory_complete = self._target_refs(registered)
+            complete = complete and inventory_complete
             for branch in target_refs:
                 try:
                     probes.append(self._probe(
@@ -423,6 +381,8 @@ class GitResolver:
                         allow_commit_fetch=False))
                 except (OSError, subprocess.TimeoutExpired):
                     probes.append(None)
+        self._note("resolution", reason=("identity-missing" if complete and probes
+                   and all(probe is False for probe in probes) else "registered-lookup-inconclusive"))
         return True if any(probe is True for probe in probes) else None
 
     def resolve(self, references):
@@ -430,7 +390,11 @@ class GitResolver:
         self._failed_targets.clear()
         findings = []
         attempted_commit_fetches = set()
-        for index, reference in enumerate(references):
+        # A proof belongs to this item and exact object only. Named refs run
+        # first so input order cannot make a path miss the matching proof.
+        named_proofs = set()
+        ordered = sorted(enumerate(references), key=lambda pair: is_path_reference(pair[1]))
+        for index, reference in ordered:
             commit = reference.get("commit")
             self._diagnostic_ref = {"index": index, "commit": commit if isinstance(commit, str)
                                     and re.fullmatch(r"[0-9a-f]{7,64}", commit) else "<invalid>",
@@ -444,6 +408,14 @@ class GitResolver:
                 self._finish_diagnostic(None)
                 findings.append(None)
                 continue
+            path_only = is_path_reference(reference)
+            if path_only and len(commit) in {40, 64} and commit in named_proofs:
+                self._note("identity", route="same-item-named-proof")
+                self._finish_diagnostic(True)
+                findings.append(True)
+                # Never cache this dependent proof under the path: another item
+                # may contain that path without the named reference.
+                continue
             key = (reference.get("repo"), reference.get("remote"), commit)
             cached = self.results.get(key)
             if cached and time.monotonic() - cached[0] < self.ttl:
@@ -452,16 +424,12 @@ class GitResolver:
                 self._note("resolution", reason="cached-inconclusive")
                 self._finish_diagnostic(cached[1])
                 findings.append(cached[1])
+                if cached[1] is True and not path_only:
+                    named_proofs.add(commit)
                 continue
             try:
-                repo_identity = reference.get("repo")
-                path_candidate = None
-                if not reference.get("remote") and repository_remote(repo_identity) is None:
-                    path_candidate = repository_remote_from_checkout(repo_identity)
                 remote = self._origin(reference)
-                self._note("origin-selected", remote=remote,
-                           checkoutCandidate=bool(remote) and path_candidate == remote,
-                           available=bool(remote))
+                self._note("origin-selected", remote=remote, available=bool(remote))
                 if remote is False:
                     value = None
                     self._note("resolution", reason="excluded-repository")
@@ -483,18 +451,10 @@ class GitResolver:
                         False if complete and probes and all(p is False for p in probes) else None)
                     self._note("resolution", reason=("no-targets" if not target_refs else
                                "incomplete-target-inventory" if not complete else "inconclusive-probe"))
-                    # A checkout basename only nominates a candidate repo. If
-                    # Git cannot establish an answer there, retain the legacy
-                    # bounded positive-only proof across registered repos.
-                    if path_candidate == remote and value is None:
-                        value = self._registered_ancestry(commit)
-                        self._note("resolution", reason="candidate-and-fallback-inconclusive")
                 else:
-                    # A missing checkout cannot identify its repository. Keep
-                    # the existing registered-repository recovery path: only
-                    # a positive ancestry proof may recover that identity.
+                    # Paths cannot nominate repositories. Only the deployment
+                    # registry can recover a proof without a same-item named ref.
                     value = self._registered_ancestry(commit)
-                    self._note("resolution", reason="unidentified-repository-fallback-inconclusive")
             except (OSError, subprocess.TimeoutExpired) as error:
                 self._note("reference-error", error=type(error).__name__[:80])
                 self._note("resolution", reason="reference-error")
@@ -502,6 +462,8 @@ class GitResolver:
             self.results[key] = (time.monotonic(), value)
             self._finish_diagnostic(value)
             findings.append(value)
+            if value is True and not path_only:
+                named_proofs.add(commit)
         self._failed_targets.clear()
         return True if any(v is True for v in findings) else (
             False if findings and all(v is False for v in findings) else None)
