@@ -229,3 +229,42 @@ time.sleep(30)
             self.assertIs(True, resolver.resolve([{**ref, "commit": latest}]))
             self.assertEqual(2, len(fetches))
             self.assertIsNone(fetches[-1][1])
+
+
+    def test_expired_loaded_repository_refresh_is_not_a_pending_unknown(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = test_git.CanonicalGitTest()
+            _, remote, landed, _, _ = helper._make_remote(root / "repo")
+            entered, release = Event(), Event()
+            control = {"hold": False}
+
+            class HeldRefresh(test_git.LocalGitResolver):
+                def _run(self, args):
+                    if control["hold"] and "--symref" in args:
+                        entered.set()
+                        if not release.wait(10):
+                            raise AssertionError("refresh was not released")
+                    return super()._run(args)
+
+            resolver = HeldRefresh(root / "cache", {test_git.ATC_REMOTE: remote})
+            resolver.refs = {test_git.ATC_REMOTE: ("refs/heads/main",)}
+            ref = {"repo": "retired:/source", "commit": landed}
+            self.assertIs(True, resolver.resolve([ref]))
+            resolver.acquisitions.executor = ThreadPoolExecutor(max_workers=2)
+            future, _, result = resolver.acquisitions.entries[test_git.ATC_REMOTE]
+            resolver.acquisitions.entries[test_git.ATC_REMOTE] = (
+                future, time.monotonic() - resolver.ttl - 1, result)
+            resolver.results.clear()
+            control["hold"] = True
+            with ThreadPoolExecutor(max_workers=1) as proof:
+                task = proof.submit(resolver.resolve, [ref])
+                try:
+                    self.assertTrue(entered.wait(5))
+                    release.set()
+                    self.assertIs(True, task.result(timeout=10))
+                finally:
+                    release.set()
+                    resolver.acquisitions.executor.shutdown(wait=True)

@@ -1,6 +1,6 @@
 """Canonical Git evidence, cached in ATC's own directory."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from copy import copy
 import hashlib
 import json
@@ -176,28 +176,57 @@ class RepositoryAcquisitions:
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="atc-acquire")
         self.lock = threading.Lock()
         self.entries = {}
+        self.refreshing = set()
 
     def get(self, remote):
+        refresh_owner = False
         with self.lock:
             entry = self.entries.get(remote)
             if entry is not None:
                 future, finished, result = entry
                 if not future.done():
-                    return None
-                if finished is None:
+                    # Initial acquisition never occupies proof workers. A
+                    # refresh of an acquired repository uses ordinary commands
+                    # and can be shared by callers without blocking other repos.
+                    if remote not in self.refreshing:
+                        return None
+                else:
+                    if finished is None:
+                        result = future.result()
+                        finished = time.monotonic()
+                        self.entries[remote] = (future, finished, result)
+                    if time.monotonic() - finished < self.resolver.ttl:
+                        return result
+                    if result["loaded"]:
+                        future = Future()
+                        self.entries[remote] = (future, None, None)
+                        self.refreshing.add(remote)
+                        refresh_owner = True
+                    else:
+                        entry = None
+            if entry is None:
+                future = self.executor.submit(self.resolver._acquire_repository, remote)
+                self.entries[remote] = (future, None, None)
+                if future.done():
                     result = future.result()
-                    finished = time.monotonic()
-                    self.entries[remote] = (future, finished, result)
-                if time.monotonic() - finished < self.resolver.ttl:
+                    self.entries[remote] = (future, time.monotonic(), result)
                     return result
-            future = self.executor.submit(self.resolver._acquire_repository, remote)
-            self.entries[remote] = (future, None, None)
-            # An inline executor is useful for deterministic transport tests.
-            if future.done():
-                result = future.result()
+                return None
+        # Do not put short refreshes behind potentially 120-second cold loads,
+        # or turn a queued refresh of already-acquired history into unknown.
+        if refresh_owner:
+            try:
+                result = self.resolver._acquire_repository(remote)
+                future.set_result(result)
+            except BaseException as error:
+                future.set_exception(error)
+                raise
+            finally:
+                with self.lock:
+                    self.refreshing.discard(remote)
+            with self.lock:
                 self.entries[remote] = (future, time.monotonic(), result)
-                return result
-            return None
+        return future.result()
 
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
