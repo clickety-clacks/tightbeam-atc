@@ -102,6 +102,7 @@ class GitResolver:
         self.host_routes = host_routes or {}
         self.ttl, self.timeout = ttl, timeout
         self.results, self.origins, self.branches, self.targets = {}, {}, {}, {}
+        self._failed_targets = {}
         self.clear_diagnostics()
         self.local_hosts = {socket.gethostname(), socket.gethostname().split(".", 1)[0]}
 
@@ -218,13 +219,19 @@ class GitResolver:
         if cached and time.monotonic() - cached[0] < self.ttl:
             self._note("targets-cache", remote=remote, complete=cached[1][1])
             return cached[1]
+        if remote in self._failed_targets:
+            self._note("targets-cache", remote=remote,
+                       complete=self._failed_targets[remote][1])
+            return self._failed_targets[remote]
 
         default_ref = None
+        default_succeeded = False
         heads = set()
         heads_complete = False
         try:
             default = self._command("default-branch", ["git", "ls-remote", "--symref", remote, "HEAD"], remote=remote)
             if default.returncode == 0:
+                default_succeeded = True
                 for line in default.stdout.splitlines():
                     if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
                         default_ref = line.split("\t", 1)[0][5:]
@@ -255,7 +262,12 @@ class GitResolver:
         complete = heads_complete and default_ref is not None and default_ref in heads
         result = (refs, complete)
         self._note("targets", remote=remote, complete=complete, count=len(refs))
-        self.targets[remote] = (time.monotonic(), result)
+        if default_succeeded and heads_complete:
+            self.targets[remote] = (time.monotonic(), result)
+        else:
+            # Reuse failed discovery only within this check. A later item must
+            # not inherit a transient failure as a five-minute empty inventory.
+            self._failed_targets[remote] = result
         return result
 
     def _branch(self, remote, branch):
@@ -334,6 +346,7 @@ class GitResolver:
 
     def resolve(self, references):
         self.clear_diagnostics()
+        self._failed_targets.clear()
         findings = []
         attempted_commit_fetches = set()
         for index, reference in enumerate(references):
@@ -399,5 +412,6 @@ class GitResolver:
             self.results[key] = (time.monotonic(), value)
             self._finish_diagnostic(value)
             findings.append(value)
+        self._failed_targets.clear()
         return True if any(v is True for v in findings) else (
             False if findings and all(v is False for v in findings) else None)
