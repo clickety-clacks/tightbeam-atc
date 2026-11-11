@@ -20,19 +20,19 @@ assert.equal(carded.tier, 'carded', 'a resolved active card is positive evidence
 assert.equal(workPlacementText(carded, agents), 'carded · to Agent A');
 
 const cloud = classifyWorkItemPlacement(openItem('cloud'), agents);
-assert.equal(cloud.tier, 'cloud');
-assert.equal(workPlacementText(cloud, agents), 'cloud · not started, not carded');
+assert.equal(cloud.tier, 'perimeter');
+assert.equal(workPlacementText(cloud, agents), 'orphan ring · no active holder · distance shows age since latest activity');
 
 const perimeter = classifyWorkItemPlacement(openItem('perimeter', {terminal: 2}), agents);
 assert.equal(perimeter.tier, 'perimeter');
-assert.equal(workPlacementText(perimeter, agents), 'perimeter ring · started, not carded to an active agent');
+assert.equal(workPlacementText(perimeter, agents), 'orphan ring · no active holder · distance shows age since latest activity');
 
 const retiredCard = classifyWorkItemPlacement(openItem('retired-card', {
   open: 1, holders: [retired.id],
 }), agents);
 assert.equal(retiredCard.tier, 'perimeter');
 assert.equal(workPlacementText(retiredCard, agents),
-  'perimeter ring · started, not carded to an active agent · open card held by a retired agent');
+  'orphan ring · no active holder · distance shows age since latest activity · open card held by a retired agent');
 
 const unknownHolders = classifyWorkItemPlacement(openItem('unknown-holders', {
   holders: null,
@@ -47,7 +47,7 @@ const summaryOpenItem = (id, started, holders, extra = {}) => ({
   ...extra,
 });
 assert.equal(classifyWorkItemPlacement(summaryOpenItem('summary-cloud', false, []), agents).tier,
-  'cloud', 'the complete item summary can place an unassigned item with stale assignment details');
+  'perimeter', 'the complete item summary can place an unassigned item with stale assignment details');
 assert.equal(classifyWorkItemPlacement(summaryOpenItem('summary-started', true, []), agents).tier,
   'perimeter', 'the complete item summary distinguishes a previously assigned item');
 assert.equal(classifyWorkItemPlacement(summaryOpenItem('summary-carded', true, [active.id]), agents).tier,
@@ -101,8 +101,8 @@ assert.equal(workItemDisplay({state: 'closed'}, 0).landed, true,
 
 assert.equal(OPEN_WORK_STAGE_QUALIFIER,
   'furthest evidence on any of its assignments; the item is still open');
-assert.equal(OPEN_WORK_LEGEND,
-  'open unfinished work: cloud above = not started, not carded · near an agent with a line = carded · ring around the org = started, not carded to an active agent · ? off to the side = assignment state unknown · within a tier, lower and greener = further along');
+assert.match(OPEN_WORK_LEGEND, /distance = age/);
+assert.doesNotMatch(OPEN_WORK_LEGEND, /cloud|started, not carded/);
 
 const points = packedDiscPoints(270);
 assert.equal(points.length, 270);
@@ -141,37 +141,36 @@ const layout = prepareWorkTierLayout([
   {id: 'parked-side', state: 'iceboxed', holders: [], stage: 4},
 ], treeAgents);
 assert.equal(layout.orgRadius, 72);
-assert.equal(layout.cloudPositions.size, 270);
-assert.equal(layout.perimeterPositions.size, 270);
-assert.ok(layout.cloudPositions.size > 0 && layout.cloudPositions.size === cloudItems.length);
-for (const point of layout.cloudPositions.values())
-  assert.ok(Math.hypot(point.x, point.z) <= layout.orgRadius,
-    'the cloud remains inside the spawner-tree footprint');
-
-const expectedRingRadius = Math.max(72 + 12, 2.2 / (2 * Math.sin(Math.PI / 270)));
-assert.ok(Math.abs(layout.ringRadius - expectedRingRadius) < 1e-9);
-assert.ok(Math.abs(layout.ringRadius - 94.54) < .1);
+assert.equal(layout.cloudPositions.size, 0);
+assert.equal(layout.perimeterPositions.size, 540);
+assert.ok(layout.innerRadius > layout.orgRadius);
+assert.ok(layout.outerRadius > layout.innerRadius);
 const ringPoints = [...layout.perimeterPositions.values()];
-let ringGap = Infinity;
 for (let i = 0; i < ringPoints.length; i++) {
-  const here = ringPoints[i], next = ringPoints[(i + 1) % ringPoints.length];
-  assert.ok(Math.abs(Math.hypot(here.x, here.z) - layout.ringRadius) < .01);
-  ringGap = Math.min(ringGap, Math.hypot(here.x - next.x, here.z - next.z));
+  const p = ringPoints[i];
+  assert.ok(Math.abs(Math.hypot(p.x, p.z) - layout.outerRadius) < 1e-8);
+  const next = ringPoints[(i+1)%ringPoints.length];
+  const gap = (Math.atan2(next.z,next.x)-Math.atan2(p.z,p.x)+2*Math.PI)%(2*Math.PI);
+  assert.ok(Math.abs(gap-2*Math.PI/ringPoints.length)<1e-8);
 }
-assert.ok(ringGap >= 2.2 - .001, `perimeter spacing was ${ringGap}`);
-
-assert.ok(workPlacementAltitude('carded', 0, 1.6) < workPlacementAltitude('perimeter', 4));
-assert.ok(workPlacementAltitude('perimeter', null) + .25 < workPlacementAltitude('cloud', null, 0, 0));
-assert.ok(workPlacementAltitude('perimeter', null) + .25 < 40,
-  'the bobbing perimeter band remains below the cloud minimum');
-
-for (const id of ['unknown-side', 'parked-side']) {
-  const point = layout.sideItemPositions.get(id);
-  assert.ok(Math.hypot(point.x, point.z) >= layout.ringRadius + 12 - 1e-9,
-    `${id} clears the ring and its margin`);
-}
+assert.ok(layout.mainPositions.has('parked-side'));
+assert.ok(!layout.sideItemPositions.has('parked-side'));
+assert.ok(layout.sideItemPositions.has('unknown-side'));
 const detached = layout.detachedAgentPositions.get('detached-agent');
-assert.ok(Math.hypot(detached.x, detached.z) >= layout.ringRadius + 12 - 1e-9,
-  'the detached agent area clears the ring and its margin');
-
-console.log('unfinished-work tier rules passed');
+assert.ok(Math.hypot(detached.x,detached.z)<layout.innerRadius);
+const now = 100*86400000;
+const ageItems = [0,1,3,15,30,90].map((age,i)=>openItem('age-'+i,{latestActivityAt:now-age*86400000}));
+const ages = prepareWorkTierLayout(ageItems,treeAgents.slice(0,7),2.2,now);
+const radii = ageItems.map(w=>Math.hypot(...Object.values(ages.perimeterPositions.get(w.id))));
+for(let i=1;i<5;i++) assert.ok(radii[i]>radii[i-1]);
+assert.ok(Math.abs(radii[4]-radii[5])<1e-8);
+const more = prepareWorkTierLayout([...ageItems,openItem('extra')],treeAgents.slice(0,7),2.2,now);
+assert.equal(ages.outerRadius,more.outerRadius);
+const landed = openItem('landed',{merged:true});
+assert.equal(classifyWorkItemPlacement(landed,agents),null);
+for(const days of [0,1,30]) {
+  // The full inventory always supplies geometry, regardless of window membership.
+  const same = prepareWorkTierLayout([...ageItems,{id:'done',state:'closed',holders:[],finishedAt:now}],treeAgents.slice(0,7),2.2,now);
+  assert.deepEqual([...same.perimeterPositions], [...ages.perimeterPositions]);
+}
+console.log('orphan and finished placement rules passed');

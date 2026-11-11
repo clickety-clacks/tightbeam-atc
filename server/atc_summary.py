@@ -6,7 +6,7 @@ from collections import Counter
 def summarize(resource, rows):
     result = {"count": 0, "kinds": Counter(), "verdicts": Counter(), "latest": {},
               "authors": {}, "authorIds": set(), "refs": [], "activity": None,
-              "live": [], "marks": [], "recentActivity": None}
+              "live": [], "marks": [], "recentActivity": None, "assignmentActivity": {}}
     for row in rows:
         result["count"] += 1
         if resource == "attests":
@@ -22,7 +22,7 @@ def summarize(resource, rows):
                 if isinstance(at, (int, float)):
                     result["authors"][author] = max(result["authors"].get(author, 0), at)
             result["refs"].extend(row.get("commitRefs") or [])
-            times = []
+            times = [row.get("ts")]
         elif resource == "turns":
             if row.get("endedAt") is None:
                 result["live"].append(row)
@@ -40,6 +40,12 @@ def summarize(resource, rows):
             times = []
         recent_times = ([row.get(k) for k in ("endedAt", "startedAt", "createdAt")]
                         if resource == "turns" else times)
+        if resource == "turns" and row.get("assignmentId"):
+            recorded = [at for at in recent_times if isinstance(at, (int, float))]
+            if recorded:
+                aid = row["assignmentId"]
+                result["assignmentActivity"][aid] = max(
+                    result["assignmentActivity"].get(aid, 0), *recorded)
         for at in recent_times:
             if isinstance(at, (int, float)):
                 result["recentActivity"] = max(result["recentActivity"] or 0, at)

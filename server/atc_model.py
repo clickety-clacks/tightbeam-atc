@@ -2,6 +2,7 @@
 
 from collections import Counter, defaultdict
 from copy import deepcopy
+from math import isfinite
 from atc_summary import summarize, recent_marks
 
 from atc_evidence import (
@@ -13,6 +14,11 @@ from atc_payloads import has_work_item_summary
 
 KEYS = {"sessions": "sessionKey", "roles": "name", "turns": "seq",
         "wakes": "wakeId", "artifacts": "artifactId"}
+
+
+def latest_time(*values):
+    return max((value for value in values if isinstance(value, (int, float))
+                and not isinstance(value, bool) and isfinite(value) and value > 0), default=None)
 
 
 class EvidenceModel:
@@ -96,6 +102,23 @@ class EvidenceModel:
         by_item = defaultdict(list)
         for assignment in assignments.rows.values():
             by_item[assignment.get("workItemId")].append(assignment)
+
+        item_activity = {}
+        def record_activity(wid, *times):
+            if wid:
+                item_activity[wid] = latest_time(item_activity.get(wid), *times)
+
+        for assignment in assignments.rows.values():
+            record_activity(assignment.get("workItemId"), assignment.get("openedAt"),
+                            assignment.get("closedAt"),
+                            self.summary("attests", assignment["id"])["activity"])
+        for (resource, _scope), inventory in self.inventories.items():
+            if resource == "artifacts":
+                for row in inventory.rows.values():
+                    record_activity(row.get("workItemId"), row.get("createdAt"), row.get("updatedAt"))
+            elif resource == "turns":
+                for aid, at in self.summary(resource, _scope)["assignmentActivity"].items():
+                    record_activity(assignments.rows.get(aid, {}).get("workItemId"), at)
 
         visible = self.active_sessions()
         ids = {s["sessionKey"]: agent_id(s["sessionKey"]) for s in visible}
@@ -341,6 +364,17 @@ class EvidenceModel:
                 started = (bool(owned) if assignments.complete else None)
                 summary_facts = dict(assignments.evidence(), status="unknown", complete=False)
             closed = [a["closedAt"] for a in owned if isinstance(a.get("closedAt"), (int, float))]
+            latest_activity = latest_time(item.get("createdAt"), item.get("bodyUpdatedAt"),
+                                         item.get("rowVersion"), item_activity.get(wid))
+            # Public work-item rows currently expose no terminal-state time.
+            # Never substitute an assignment's closedAt as an exact item close.
+            ended = item["state"] in {"closed", "iceboxed"}
+            exact_finish = latest_time(item.get("closedAt") if item["state"] == "closed"
+                                       else item.get("iceboxedAt")) if ended else None
+            trace_inventory = self.inventories.get(("finish-time", wid))
+            trace = trace_inventory.rows.get(wid, {}) if trace_inventory and trace_inventory.complete else {}
+            if ended and trace.get("state") == item["state"]:
+                exact_finish = latest_time(exact_finish, trace.get("finishedAt"))
             items.append({
                 "id": wid, "short": wid[:11], "title": item["title"], "state": item["state"],
                 "stage": stage, "ring": ring, "merged": merged, "code": code,
@@ -348,6 +382,10 @@ class EvidenceModel:
                 "holders": (holders if item_summary is not None else
                             holders if assignments.complete else (holders or None)),
                 "started": started, "landings": landings,
+                "latestActivityAt": latest_activity,
+                "landingAt": (self.merges.get(wid, {}).get("landingAt") if merged is True else None),
+                "finishedAt": (exact_finish or latest_activity) if ended else None,
+                "finishedAtApproximate": ended and exact_finish is None,
                 "turns": (item_turns.get(wid, {}) if item_turn_facts["complete"]
                           else (item_turns.get(wid) or None)),
                 "flow": {holder: "in" for holder in item_turns.get(wid, {})},

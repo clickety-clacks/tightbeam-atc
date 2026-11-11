@@ -1,15 +1,16 @@
+import {orphanRadius, itemWindow} from './work-item-window.mjs';
 /* Spatial and wording rules for unfinished work. Kept pure so the same
    placement contract can be exercised without a browser or service. */
 const ACTIVE_REASON = "a card holder's agent record is unavailable";
 export const OPEN_WORK_STAGE_QUALIFIER = 'furthest evidence on any of its assignments; the item is still open';
-export const OPEN_WORK_LEGEND = 'open unfinished work: cloud above = not started, not carded · near an agent with a line = carded · ring around the org = started, not carded to an active agent · ? off to the side = assignment state unknown · within a tier, lower and greener = further along';
+export const OPEN_WORK_LEGEND = 'open unlanded work without an active holder: orphan ring · distance = age since latest activity, outer edge = 30 days or unknown age · near an agent with a line = carded · ? = attachment unknown · landed/finished visibility is set in days';
 
 function agentFor(agentsById, id) {
   return agentsById instanceof Map ? agentsById.get(id) : agentsById?.[id];
 }
 
 export function classifyWorkItemPlacement(item, agentsById) {
-  if (item?.state !== 'open') return null;
+  if (item?.state !== 'open' || item.merged === true) return null;
 
   const holders = item.holders;
   const activeHolders = Array.isArray(holders)
@@ -35,9 +36,7 @@ export function classifyWorkItemPlacement(item, agentsById) {
       return {tier: 'unknown', reason: ACTIVE_REASON, activeHolders: [], retiredOpenCard: false};
     if (holders.length)
       return {tier: 'perimeter', reason: null, activeHolders: [], retiredOpenCard: true};
-    return item.started
-      ? {tier: 'perimeter', reason: null, activeHolders: [], retiredOpenCard: false}
-      : {tier: 'cloud', reason: null, activeHolders: [], retiredOpenCard: false};
+    return {tier: 'perimeter', reason: null, activeHolders: [], retiredOpenCard: false};
   }
 
   const open = item.assignments?.open;
@@ -63,9 +62,7 @@ export function classifyWorkItemPlacement(item, agentsById) {
     return {tier: 'unknown', reason: 'assignment inventory incomplete', activeHolders: [], retiredOpenCard: false};
 
   if (open === 0) {
-    return terminal === 0
-      ? {tier: 'cloud', reason: null, activeHolders: [], retiredOpenCard: false}
-      : {tier: 'perimeter', reason: null, activeHolders: [], retiredOpenCard: false};
+    return {tier: 'perimeter', reason: null, activeHolders: [], retiredOpenCard: false};
   }
   return {tier: 'perimeter', reason: null, activeHolders: [],
     retiredOpenCard: holders.some(id => agentFor(agentsById, id).retired)};
@@ -103,7 +100,7 @@ export function workPlacementText(placement, agentsById) {
     return `carded · to ${names.join(', ')}`;
   }
   if (placement.tier === 'perimeter')
-    return 'perimeter ring · started, not carded to an active agent'
+    return 'orphan ring · no active holder · distance shows age since latest activity'
       + (placement.retiredOpenCard ? ' · open card held by a retired agent' : '');
   if (placement.tier === 'unknown')
     return 'unknown · assignment state could not be established, so this item is not placed in a tier'
@@ -165,13 +162,25 @@ function sideAreaShift(points, minimumRadius) {
 
 const idOrder = (left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
 
-export function prepareWorkTierLayout(items, agents, spacing = 2.2) {
+// Preserve failed-item and detached-agent coordinates from the prior layout.
+// These legacy membership facts never place open items in the rendered scene.
+function legacyPlacement(item, agentsById) {
+  const placement = classifyWorkItemPlacement({...item, merged:false}, agentsById);
+  if (placement?.tier !== 'perimeter' || item.holders?.length) return placement;
+  const summaryKnown = typeof item.started === 'boolean'
+    && item.evidence?.summary?.status === 'known' && item.evidence.summary.complete === true;
+  const neverStarted = summaryKnown ? !item.started
+    : item.assignments?.open === 0 && item.assignments?.terminal === 0;
+  return neverStarted ? {...placement, tier:'cloud'} : placement;
+}
+
+function legacyWorkLayout(items, agents, spacing = 2.2) {
   const agentsById = new Map(agents.map(agent => [agent.id, agent]));
   const depths = spawnerAgentDepths(agents);
   const orgRadius = Math.max(0, ...[...depths.values()].map(depth => depth * 12));
   const placements = new Map();
   for (const item of items) {
-    const placement = classifyWorkItemPlacement(item, agentsById);
+    const placement = legacyPlacement(item, agentsById);
     if (placement) placements.set(item.id, placement);
   }
 
@@ -229,4 +238,34 @@ export function prepareWorkTierLayout(items, agents, spacing = 2.2) {
 
   return {agentsById, depths, orgRadius, ringRadius, placements,
     cloudPositions, perimeterPositions, sideOffsets, sideItemPositions, detachedAgentPositions};
+}
+
+export function prepareWorkTierLayout(items, agents, spacing = 2.2, now = Date.now()) {
+  const layout = legacyWorkLayout(items, agents, spacing);
+  const placements = new Map(items.map(item => [item.id,
+    classifyWorkItemPlacement(item, layout.agentsById)]).filter(([, value]) => value));
+  const orphans = items.filter(item => placements.get(item.id)?.tier === 'perimeter').sort(idOrder);
+  // The central extent includes detached agents and the attached-item scatter.
+  const graphRadius = Math.max(layout.orgRadius, ...[...layout.detachedAgentPositions.values()]
+    .map(p => Math.hypot(p.x, p.z))) + 8;
+  const innerRadius = graphRadius + 8, outerRadius = innerRadius + 60;
+  const perimeterPositions = new Map();
+  orphans.forEach((item, index) => {
+    const angle = index * 2 * Math.PI / orphans.length;
+    const radius = orphanRadius(item, innerRadius, outerRadius, now);
+    perimeterPositions.set(item.id, {x: Math.cos(angle) * radius, z: Math.sin(angle) * radius});
+  });
+  const mainPositions = new Map();
+  for (const item of items) {
+    if (!itemWindow(item)) continue;
+    if (Array.isArray(item.holders) && item.holders.some(id =>
+        layout.agentsById.has(id) && !layout.agentsById.get(id).retired)) continue;
+    const scatter = deterministicItemScatter(item.id);
+    const radius = graphRadius * Math.min(.85, Math.hypot(scatter.x, scatter.z) / 5.5);
+    mainPositions.set(item.id, {x: Math.cos(scatter.phase) * radius,
+      z: Math.sin(scatter.phase) * radius});
+    layout.sideItemPositions.delete(item.id);
+  }
+  return {...layout, placements, cloudPositions:new Map(), perimeterPositions,
+    mainPositions, innerRadius, outerRadius, ringRadius:outerRadius};
 }

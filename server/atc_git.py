@@ -239,6 +239,8 @@ class GitResolver:
         self.host_routes = host_routes or {}
         self.ttl, self.timeout = ttl, timeout
         self.results, self.origins, self.branches, self.targets = {}, {}, {}, {}
+        self.landing_times = {}
+        self.landing_at = None
         self._failed_targets = {}
         self._advertised_heads = {}
         self.clear_diagnostics()
@@ -542,6 +544,35 @@ class GitResolver:
         self.branches[key] = (time.monotonic(), value)
         return value
 
+    def _landing_time(self, args, local_ref, commit):
+        """Only an identified integration merge supplies a Git landing time.
+
+        A direct commit or patch-equivalence proof has no known merge event.
+        In particular, the current check time must never become landing time.
+        """
+        try:
+            own = self._run(args + ["show", "-s", "--format=%H %P %ct", commit])
+            if own.returncode:
+                return None
+            row = own.stdout.strip().split()
+            history = self._run(args + ["log", "--first-parent", "--ancestry-path",
+                                       "--reverse", "--format=%H %P %ct", commit + ".." + local_ref])
+            if history.returncode:
+                return None
+            if history.stdout.strip():
+                first = history.stdout.splitlines()[0].split()
+                if len(first) >= 4:
+                    parent = self._run(args + ["merge-base", "--is-ancestor", commit, first[1]])
+                    if parent.returncode == 1:
+                        return int(first[-1]) * 1000
+                    if parent.returncode != 0:
+                        return None
+                # Otherwise the reference was already on the first-parent
+                # line. Only a merge reference itself has a known merge date.
+            return int(row[-1]) * 1000 if len(row) >= 4 else None
+        except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+            return None
+
     def _probe(self, remote, branch, commit, ancestry_only=False,
                allow_commit_fetch=True):
         self._note("probe", remote=remote, branch=branch, ancestryOnly=ancestry_only,
@@ -567,6 +598,7 @@ class GitResolver:
                 return None
         ancestry = self._command("ancestry", args + ["merge-base", "--is-ancestor", commit, local_ref], remote=remote, branch=branch)
         if ancestry.returncode == 0:
+            self.landing_at = self._landing_time(args, local_ref, commit)
             return True
         if ancestry.returncode != 1:
             return None
@@ -624,6 +656,7 @@ class GitResolver:
         return True if any(probe is True for probe in probes) else None
 
     def resolve(self, references):
+        self.landing_at = None
         self.clear_diagnostics()
         self._failed_targets.clear()
         # Item and named-reference unknowns never suppress a later check.
@@ -661,6 +694,7 @@ class GitResolver:
                 self._finish_diagnostic(cached[1])
                 findings.append(cached[1])
                 if cached[1] is True:
+                    self.landing_at = self.landing_times.get(key)
                     self._failed_targets.clear()
                     self.clear_diagnostics()
                     return True
@@ -701,6 +735,7 @@ class GitResolver:
                 self._note("resolution", reason="reference-error")
                 value = None
             self.results[key] = (time.monotonic(), value)
+            self.landing_times[key] = self.landing_at if value is True else None
             self._finish_diagnostic(value)
             findings.append(value)
             if value is True:

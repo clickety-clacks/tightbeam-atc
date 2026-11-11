@@ -158,3 +158,29 @@ Acceptance must also measure realistic active-scope count, achieved active
 confirmation time and read load. If the 30-minute budget cannot be achieved at
 acceptable load, the observed shortfall must be reported; no slower budget is
 silently substituted.
+
+## Item placement time sources
+
+The 0.1.15 source audit above establishes that work-item collection/detail rows
+have no close/icebox timestamp. `WorkItems.trace_result` exposes `JobTrace.build`
+through the read-only `work-item-trace` command; its `causal_event` entries include
+`disposition_transition`, `at`, `seqTiebreak`, `jobRef` and `detail.toState`.
+ATC requests that optional read for closed/iceboxed items when their recorded
+version changes. The latest matching disposition supplies an exact finish time.
+A missing, unavailable or mismatching transition uses the latest recorded item,
+assignment, attributed turn, attest or artifact activity, explicitly approximate.
+A trace failure does not block the core inventory. No trace is read for failed
+placement. The audit is source evidence, not a new live-Gateway observation.
+
+`WorkItems.stamp_version_in_txn` advances `rowVersion` from wall-clock milliseconds
+(or the preceding value plus one within a millisecond); it supplies item-update
+activity, not an exact state-transition time. Assignment `closedAt` remains a
+separate fact and is never called an exact work-item close.
+
+Landing windows use the earliest durable landing `observedAt`. Otherwise the Git
+resolver supplies a commit timestamp only for an identified integration merge:
+the referenced merge itself, or the first first-parent descendant that merges the
+reference from outside its first parent. Direct commits and patch-equivalence
+proofs without an identified merge have unknown landing time. Git-check
+`observedAt` never supplies a window timestamp. Optional date lookup failure
+leaves merge proof intact. Stored Git landing times survive restart.

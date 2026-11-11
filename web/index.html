@@ -292,6 +292,10 @@
       <span id="searchcount"></span>
       <button id="searchclear" title="clear" aria-label="clear search">×</button>
     </div>
+    <label>Finished / landed <select id="finisheddays" aria-label="Days to show finished or landed work">
+      <option value="0">Hide</option><option value="1" selected>1 day</option>
+      <option value="3">3 days</option><option value="7">7 days</option>
+      <option value="30">30 days</option></select></label>
     <div id="cards"></div>
     <div id="selui" class="off">select radius <input id="selrad" type="range" min="8" max="220" value="46"> <b><span id="selradv">46</span>px</b> · <span id="selcount">0</span> sel · [ ] size · f fit · d clear</div>
   </div>
@@ -317,6 +321,10 @@
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
+import {itemInWindow, itemWindow, windowDescription, DEFAULT_FINISHED_DAYS} from './work-item-window.mjs';
+let finishedDays = DEFAULT_FINISHED_DAYS;
+let renderedItemIds = [];
+let sceneTime = Date.now();
 import { areProgramsValid, createDeferredUpdateGate, createRenderLoop, renderInterval,
          scheduleVisualChange } from './render-loop.mjs';
 import { unknownItemFacts, unknownItemType, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
@@ -549,8 +557,7 @@ const HOME_POS = new THREE.Vector3(0,34,66), HOME_TGT = new THREE.Vector3(0,-2,0
    resting view does not rotate without user interaction. */
 let orbitR = 66, orbitH = 36, orbitUserOwned = false;
 const orbitTgt = HOME_TGT.clone();
-/* The resting camera centres the live org and includes the cloud and perimeter
-   tiers. Confirmed parked items stay off to the side; unknown custody remains
+/* The resting camera centres the live org and includes the orphan ring. Confirmed parked items stay off to the side; unknown custody remains
    in the population instead of being treated as an orphan. */
 const _ht = new THREE.Vector3();
 function homeTarget(){
@@ -559,7 +566,7 @@ function homeTarget(){
   itemMeshes.forEach(m => {
     const w = m.userData.w;
     if (!w || (Array.isArray(w.holders) && !w.holders.length
-        && !['cloud', 'perimeter'].includes(m.userData.placement?.tier))) return; /* parked area */
+        && !itemWindow(w) && !['perimeter'].includes(m.userData.placement?.tier))) return; /* parked area */
     c.add(m.getWorldPosition(_ht)); n++;
   });
   Object.values(agentMeshes).forEach(m => {
@@ -578,7 +585,7 @@ function livePoints(){
   selectables().forEach(m => {
     const u = m.userData;
     if (u.w && Array.isArray(u.w.holders) && !u.w.holders.length
-        && !['cloud', 'perimeter'].includes(u.placement?.tier)) return; /* parked area */
+        && !itemWindow(u.w) && !['perimeter'].includes(u.placement?.tier)) return; /* parked area */
     if (u.a && u.a.retired) return;                   /* retired agents */
     fitPoints(m, pts);
   });
@@ -1657,7 +1664,11 @@ function buildLinks(links){
 function buildItems(items, tierLayout=null){
   const layout = tierLayout || prepareWorkTierLayout(items, Object.values(byId));
   disposeGroup(itemGroup); disposeGroup(tetherGroup); itemMeshes = [];
+  const windowNow = Date.now();
+  renderedItemIds = [];
   items.forEach((w,idx)=>{
+    if (!itemInWindow(w, finishedDays, windowNow)) return;
+    renderedItemIds.push(w.id);
     const placement = layout.placements.get(w.id) || null;
     const unfinished = w.state === 'open';
     const holdersKnown = Array.isArray(w.holders);
@@ -1680,7 +1691,7 @@ function buildItems(items, tierLayout=null){
     const sc = deterministicItemScatter(w.short || w.id);
     const cloud = layout.cloudPositions.get(w.id);
     const perimeter = layout.perimeterPositions.get(w.id);
-    const side = layout.sideItemPositions.get(w.id);
+    const side = layout.mainPositions.get(w.id) || layout.sideItemPositions.get(w.id);
     const x = cloud?.x ?? perimeter?.x ?? side?.x ?? anchor.x + sc.x;
     const z = cloud?.z ?? perimeter?.z ?? side?.z ?? anchor.z + sc.z;
     const offset = (idx%3)*.8;
@@ -1751,7 +1762,7 @@ function buildItems(items, tierLayout=null){
       seg.userData = {itemMesh:mesh, hid, state:st, mat:lm, geo:lg};
       tetherGroup.add(seg);
     });
-    if (unfinished && placement?.tier !== 'unknown' && holdersKnown && !active.length){
+    if (placement?.tier === 'perimeter'){
       /* orphan mark: a billboard ring AROUND the item, so it never reads as a
          landing marker on the ground */
       const ring = new THREE.Mesh(new THREE.RingGeometry(.78,.9,48),
@@ -1764,9 +1775,15 @@ function buildItems(items, tierLayout=null){
 }
 
 function buildTieredScene(agents, items){
-  const tierLayout = prepareWorkTierLayout(items, agents);
+  const tierLayout = prepareWorkTierLayout(items, agents, 2.2, sceneTime);
   buildGround(agents, tierLayout);
   buildItems(items, tierLayout);
+  // All bounded orphans and unknown items must remain reachable without fog.
+  const extent = Math.max(tierLayout.outerRadius, ...[...tierLayout.sideItemPositions.values()]
+    .filter(p=>p.area==='unknown').map(p=>Math.hypot(p.x,p.z)));
+  camera.far = Math.max(500, extent * 10);
+  camera.updateProjectionMatrix();
+  if (scene.fog){ scene.fog.near = Math.max(T.fogNear, extent * 4); scene.fog.far = Math.max(T.fogFar, extent * 8); }
   return tierLayout;
 }
 
@@ -2167,6 +2184,13 @@ function selKeyFor(id){
 /* A feed whose ids change shape would strand every key the view holds — the
    selection would empty and a focus would quietly stop highlighting anything,
    with no sign that it had. Re-resolve them when an accepted model arrives. */
+function pruneWindowSelection(){
+  const excluded = new Set((DATA?.items || []).filter(w=>!itemInWindow(w, finishedDays)).map(w=>'i:'+w.id));
+  for (const key of view.selection) if (excluded.has(key)) view.selection.delete(key);
+  if (focusLayer?.subject.kind==='node' && excluded.has(focusLayer.subject.key)){
+    focusLayer = null; projectFocus();
+  }
+}
 function migrateViewKeys(){
   const remap = k => k.startsWith('i:') ? 'i:' + fullId(k.slice(2)) : k;
   const sel = [...view.selection].map(remap);
@@ -2235,14 +2259,14 @@ function refreshModelReferences(model){
   });
   selectables().forEach(mesh=>shadeSelected(mesh, view.selection.has(selKey(mesh))));
 }
-function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
+function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], viewOnly=false}={}){
   model = prepareModelSnapshot(model, lastModel);
   if (!model){
     streamState='stale'; streamError='invalid model envelope ignored'; renderModelStatus(); return false;
   }
   const acceptedByOrder = fullSnapshot
     ? shouldAcceptSnapshot(model, lastModel) : shouldAcceptModel(model, lastModel);
-  if (!acceptedByOrder) return false;
+  if (!acceptedByOrder && !viewOnly) return false;
   const previous = DATA, previousSignature = lastSceneSignature;
   const previousSamples = agentSamples;
   const previousEvidencePages = new Map(itemEvidencePages);
@@ -2273,16 +2297,19 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
       const pose = captureModelPose();
       savedView = captureViewerState(view, focusLayer, pose);
       pendingSceneRollbackView = savedView;
-      nextSignature = sceneSignature(model);
+      nextSignature = sceneSignature(model) + JSON.stringify([finishedDays, model.items.filter(w=>itemInWindow(w, finishedDays)).map(w=>w.id)]);
       sceneChanged = nextSignature !== previousSignature;
       const firstModel = previousSignature === null;
       if (sceneChanged){
+        if (!viewOnly || lastRenderedModel?.generation!==model.generation
+            || lastRenderedModel?.revision!==model.revision) sceneTime = Date.now();
         rebuildWithViewerState(savedView, ()=>{
           clearHover();
           buildTieredScene(model.agents, model.items);
           buildLinks(model.links);
         }, restoreViewerModelState);
         migrateViewKeys();
+        pruneWindowSelection();
         applyView({preserveCamera:!firstModel});
       } else {
         refreshModelReferences(model);
@@ -2309,8 +2336,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[]}={}){
       pendingSceneRollbackView = null;
     });
     lastModel = model;
-    streamState='connected'; streamError=null;
-    spawnWakes(); spawnMessages();
+    if (!viewOnly){ streamState='connected'; streamError=null; spawnWakes(); spawnMessages(); }
     renderModelStatus();
     resumePendingEvidenceReloads(model);
     requestRender();
@@ -2479,6 +2505,20 @@ matchMedia('(prefers-color-scheme: light)').addEventListener('change', ev=>{
 applyTheme();
 startModelStream();
 setInterval(refreshInspectionAges, 1000);
+function refreshFinishedWindow(){
+  if (!DATA) return;
+  receiveModel(DATA, {fullSnapshot:false, viewOnly:true});
+}
+document.getElementById('finisheddays').addEventListener('change', event=>{
+  finishedDays = Number(event.target.value);
+  refreshFinishedWindow();
+});
+// Membership expiry only: unchanged scenes keep their renderer asleep.
+setInterval(()=>{
+  if (!DATA) return;
+  const ids = DATA.items.filter(w=>itemInWindow(w, finishedDays)).map(w=>w.id);
+  if (JSON.stringify(ids)!==JSON.stringify(renderedItemIds)) refreshFinishedWindow();
+}, 60000);
 document.getElementById('touchcontrols').addEventListener('click', e => {
   const action = e.target.closest('button[data-action]')?.dataset.action;
   if (!action) return;
@@ -2953,6 +2993,8 @@ function nodeContent(u, compact){
       + '<div>' + esc(w.title || 'title unknown') + '</div>'
       + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · stage ' + stage + stageQualifier
       + ' · ' + merged + ' · ' + code + ' · ring ' + esc(ringLabels[ring]) + verdict + noHolder
+      + (windowDescription(w) ? '<span class="k">visibility</span>' + esc(windowDescription(w)) : '')
+      + (u.placement?.tier==='perimeter' && !w.latestActivityAt ? '<span class="k">age</span>unknown · outer edge' : '')
       + (placementLine ? '<span class="k">placement</span><span class="seg">' + esc(placementLine) + '</span>' : '')
       + (unknownDetails ? '<span class="k">?</span><span class="seg">'
         + esc(unknownDetails) + '</span>' : '')
@@ -3759,7 +3801,7 @@ function inScope(m){
   return u.w ? hiItems.has(u.w.id) : (u.a && hiAgents.has(u.a.id));
 }
 function nodeLayerOn(m){
-  return m.userData.w ? layerState.workItems : layerState.agents;
+  return m.userData.w ? (m.userData.placement?.tier==='perimeter' || layerState.workItems) : layerState.agents;
 }
 /* Keep node parents mounted: labels and tags are children so they can stay on
    independently when the body they annotate is off. Visibility and picking
@@ -3784,11 +3826,11 @@ function applyLayerVisibility(){
   itemGroup.children.forEach(o => {
     const u = o.userData;
     if (!u.w) return;
-    o.material.visible = layerState.workItems;
-    if (u.lineMat) u.lineMat.visible = layerState.workItems && !u.selected;
+    o.material.visible = nodeLayerOn(o);
+    if (u.lineMat) u.lineMat.visible = nodeLayerOn(o) && !u.selected;
     o.children.forEach(ch => {
       if (ch.isSprite) ch.visible = layerState.annotations && (u.dim ?? 1) > .9;
-      else ch.visible = layerState.workItems;
+      else ch.visible = nodeLayerOn(o);
     });
   });
 }
@@ -3834,6 +3876,7 @@ function clearSelection(){
    changes and each one would otherwise start its own flight. */
 let refitTimer = null;
 function selectionChanged(){
+  pruneWindowSelection();
   applyView();
   if (!view.fit) return;
   if (!view.selection.size) return;        /* the last one out is handled above */
@@ -4273,7 +4316,7 @@ function initializeRings(m){
     m.userData.rings.forEach(seg => {
       seg.material.opacity = .1 * (dim < .999 ? .5 : 1);
       if (m.userData.workingRing) seg.lookAt(camera.position);
-      seg.visible = m.userData.workingRing ? layerState.workItems : layerState.agents;
+      seg.visible = m.userData.workingRing ? nodeLayerOn(m) : layerState.agents;
     });
     return;
   }
@@ -4319,7 +4362,7 @@ function initializeRings(m){
        that is out of scope is still working. */
     seg.material.opacity = .1 * (dim < .999 ? .5 : 1);
     if (m.userData.workingRing) seg.lookAt(camera.position);
-    seg.visible = m.userData.workingRing ? layerState.workItems : layerState.agents;
+    seg.visible = m.userData.workingRing ? nodeLayerOn(m) : layerState.agents;
   });
   m.userData.ringsInitialized = true;
 }
@@ -4509,9 +4552,9 @@ function tickFrame(){
          left every selected node bright underneath a focus, so "everything
          else ghosted" was false exactly where it mattered. */
       shade(m.material, u.selected ? null : u.baseFill, f);
-      m.material.visible = layerState.workItems;
+      m.material.visible = nodeLayerOn(m);
       if (u.lineMat && !u.selected){ u.lineMat.color.copy(u.baseStroke); }
-      if (u.lineMat){ u.lineMat.opacity = .6 * f; u.lineMat.visible = layerState.workItems && !u.selected; }
+      if (u.lineMat){ u.lineMat.opacity = .6 * f; u.lineMat.visible = nodeLayerOn(m) && !u.selected; }
       u.dim = f;
     }
     if (u.workingRing) initializeRings(m);
@@ -4528,7 +4571,7 @@ function tickFrame(){
         ch.material.opacity = f;
         return;
       }
-      ch.visible = layerState.workItems;
+      ch.visible = nodeLayerOn(m);
       if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=.7 * (u.dim ?? 1); ch.scale.setScalar(1.08); }
       if (ch.userData.act==='run'){ ch.material.opacity = .13 * (u.dim ?? 1); }
       if (ch.userData.orphanRing){ ch.lookAt(camera.position); ch.material.opacity = .55 * (u.dim ?? 1); }

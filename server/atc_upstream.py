@@ -64,6 +64,11 @@ class PackagedCLI:
             if not isinstance(key, str) or not key or key.startswith("-"):
                 raise ValueError("read requires an assignment identity")
             args = [verb, key]
+        elif verb == "work-item-trace" and set(params) == {"work_item_id"}:
+            key = params["work_item_id"]
+            if not isinstance(key, str) or not key or key.startswith("-"):
+                raise ValueError("read requires a work-item identity")
+            args = [verb, key]
         elif verb == "role-list" and not params:
             # There is no packaged `role-list` verb. `list` returns the
             # complete roles array through the published inspect command.
@@ -120,7 +125,7 @@ class Gateway:
     def command(self, verb, **params):
         # This closed set is the adapter's read interface, not a generic
         # command proxy available to viewers.
-        if verb not in {"assignments", "attests", "role-list", "assignment-get", "artifacts"}:
+        if verb not in {"assignments", "attests", "role-list", "assignment-get", "artifacts", "work-item-trace"}:
             raise ValueError("unsupported read")
         with self.count_lock:
             self.read_count += 1
@@ -176,6 +181,20 @@ class Gateway:
             elif resource == "attests":
                 rows = [attest_row(r) for r in self.command(
                     "attests", assignment_id=scope)["attests"]]
+            elif resource == "finish-time":
+                trace = self.command("work-item-trace", work_item_id=scope)
+                if trace.get("workItem", {}).get("id") != scope or not isinstance(trace.get("timeline"), list):
+                    raise ValueError("invalid work-item trace")
+                transitions = [entry for entry in trace["timeline"]
+                               if entry.get("type") == "causal_event"
+                               and entry.get("kind") == "disposition_transition"
+                               and entry.get("jobRef") == scope
+                               and isinstance(entry.get("at"), (int, float))]
+                latest = max(transitions, key=lambda entry: (entry["at"], entry.get("seqTiebreak", 0)), default=None)
+                rows = [{"id": scope, "state": trace["workItem"].get("state"),
+                         "finishedAt": latest["at"] if latest and
+                         latest.get("detail", {}).get("toState") == trace["workItem"].get("state") else None}]
+                source = "cli:work-item-trace"
             elif resource == "roles":
                 rows = self.command("role-list")["roles"]
             elif resource == "artifacts":

@@ -17,6 +17,27 @@ class ReadCompletionTest(unittest.TestCase):
     def setUp(self):
         self.gateway = Gateway("http://example.invalid", Mock())
 
+    def test_finish_time_uses_latest_matching_disposition_not_other_trace_events(self):
+        self.gateway.cli.read.return_value = {
+            "workItem": {"id": "work", "state": "iceboxed"},
+            "timeline": [
+                {"type": "causal_event", "kind": "disposition_transition", "jobRef": "work",
+                 "at": 10, "seqTiebreak": 1, "detail": {"toState": "closed"}},
+                {"type": "causal_event", "kind": "disposition_transition", "jobRef": "work",
+                 "at": 20, "seqTiebreak": 2, "detail": {"toState": "open"}},
+                {"type": "causal_event", "kind": "disposition_transition", "jobRef": "work",
+                 "at": 30, "seqTiebreak": 3, "detail": {"toState": "iceboxed"}},
+                {"type": "attest", "at": 40},
+            ]}
+        result = self.gateway.read("finish-time", "work")
+        self.assertTrue(result.complete)
+        self.assertEqual(30, result.rows[0]["finishedAt"])
+        self.gateway.cli.read.assert_called_once_with("work-item-trace", work_item_id="work")
+        self.gateway.cli.read.return_value["workItem"]["state"] = "closed"
+        self.assertIsNone(self.gateway.read("finish-time", "work").rows[0]["finishedAt"])
+        self.gateway.cli.read.side_effect = ValueError("unavailable")
+        self.assertFalse(self.gateway.read("finish-time", "work").complete)
+
     def test_walks_every_page_before_claiming_complete(self):
         self.gateway.request = Mock(side_effect=[
             page([{"id": "a"}], True, "cursor"), page([{"id": "b"}])])
@@ -93,6 +114,7 @@ class PackagedCLITest(unittest.TestCase):
             ("attests", {"assignment_id": "assignment"}, ["attests", "assignment"]),
             ("assignment-get", {"assignment_id": "assignment"}, ["assignment-get", "assignment"]),
             ("role-list", {}, ["list"]),
+            ("work-item-trace", {"work_item_id":"work"}, ["work-item-trace","work"]),
             ("artifacts", {}, ["artifacts"]),
         ]
         with patch.dict("os.environ", {"TIGHTBEAM_URL": "wrong-endpoint",

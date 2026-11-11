@@ -31,6 +31,38 @@ class ModelTest(unittest.TestCase):
     def read(self, kind, rows, scope=None, complete=True):
         self.model.accept(kind, scope, Read(rows, complete, 10, "test-read"))
 
+    def test_item_activity_and_approximate_finish_are_not_assignment_close(self):
+        self.read("work-items", [{"id": "work", "title": "Work", "state": "closed",
+                                  "createdAt": 2, "rowVersion": 11}])
+        self.read("attests", [{"id": "note", "ts": 12, "kind": "progress"}], "assignment")
+        self.read("artifacts", [{"artifactId": "artifact", "workItemId": "work",
+                                 "createdAt": 13, "updatedAt": 14}])
+        self.read("turns", [{"seq": 1, "assignmentId": "assignment",
+                             "startedAt": 15, "endedAt": 16}], "agent s_author")
+        item = self.model.snapshot(20)["items"][0]
+        self.assertEqual(16, item["latestActivityAt"])
+        self.assertEqual(16, item["finishedAt"])
+        self.assertTrue(item["finishedAtApproximate"])
+        self.assertEqual(10, item["closedAt"])
+        self.read("work-items", [{"id": "work", "title": "Work", "state": "closed",
+                                  "createdAt": 2, "closedAt": 9}])
+        item = self.model.snapshot(20)["items"][0]
+        self.assertEqual(9, item["finishedAt"])
+        self.assertFalse(item["finishedAtApproximate"])
+        self.read("work-items", [{"id": "work", "title": "Work", "state": "failed"}])
+        self.assertIsNone(self.model.snapshot(20)["items"][0]["finishedAt"])
+
+    def test_trace_finish_time_is_exact_and_never_applies_to_a_different_state(self):
+        self.read("work-items", [{"id":"work", "title":"Work", "state":"iceboxed", "rowVersion":100}])
+        self.read("finish-time", [{"id":"work", "state":"iceboxed", "finishedAt":50}], "work")
+        item = self.model.snapshot(200)["items"][0]
+        self.assertEqual(50, item["finishedAt"])
+        self.assertFalse(item["finishedAtApproximate"])
+        self.read("work-items", [{"id":"work", "title":"Work", "state":"closed", "rowVersion":150}])
+        item = self.model.snapshot(200)["items"][0]
+        self.assertEqual(150, item["finishedAt"])
+        self.assertTrue(item["finishedAtApproximate"])
+
     def test_partial_attest_load_keeps_full_persisted_proof_visible(self):
         proof = [{"repo": "example", "commit": f"{n:040x}"} for n in range(15)]
         self.model.merges["work"] = {
