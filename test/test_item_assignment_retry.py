@@ -209,7 +209,9 @@ class ItemAssignmentRetryTest(unittest.TestCase):
         epoch = service.reads.epochs['item-assignment-source', 'work']
         gateway.rows['work-items', None] = [summarized_work('New title', 2, holders=['other'],
             refs=[{'commit': 'new'}], attest_counts={'progress': 4})]
-        service._refresh('work-items', key='work')
+        # Both lifetimes use the same work-item source and confirmation time;
+        # the complete-source comparison retains every evidence field.
+        service._refresh('work-items')
         self.settle(service)
         held = service.current['items'][0]
         self.assertEqual('New title', held['title'])
