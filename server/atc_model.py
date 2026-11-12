@@ -430,8 +430,7 @@ class EvidenceModel:
             self.summaries.pop(("attests", aid), None)
         assignments.rows.update(staged.open_rows)
         facts = dict(self.assignment_evidence(wid), status="known", complete=True,
-                     freshness="live", observedAt=result.at, confirmedAt=result.at,
-                     unconfirmedSince=None)
+                     freshness="live", observedAt=result.at, unconfirmedSince=None)
         self.item_assignment_facts[wid] = facts
         assignments.observations.update((aid, dict(facts)) for aid in staged.open_rows)
         assignments.data_revision += 1
