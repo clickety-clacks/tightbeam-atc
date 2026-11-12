@@ -1815,6 +1815,7 @@ function advanceFirstScene(){
     }
   } catch (error){
     firstLoadTask.cancel();
+    firstBoardComplete = false;
     streamState = 'stale'; streamError = 'model build failed; board incomplete';
     renderModelStatus();
     console.error('ATC: first scene build failed', error);
@@ -2329,6 +2330,10 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFir
       sceneChanged = nextSignature !== previousSignature;
       const firstModel = previousSignature === null;
       const finishScene = () => {
+        // All scene records now exist. Fit against the completed HUD, whose
+        // height determines the available camera rectangle, before drawing.
+        firstBoardComplete = true;
+        renderModelStatus();
         if (sceneChanged){
           migrateViewKeys();
           applyView({preserveCamera:!firstModel || userMoved || view.selection.size > 0});
@@ -2355,8 +2360,6 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFir
         deferredSceneSyncError = null;
       }
       pendingSceneRollbackView = null;
-        firstBoardComplete = true;
-        renderModelStatus();
       };
       if (!firstBoardComplete){
         firstLoadTask?.cancel();
