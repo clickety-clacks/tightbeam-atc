@@ -3,7 +3,7 @@
 from collections import Counter, defaultdict
 from copy import deepcopy
 from math import isfinite
-from atc_summary import summarize, recent_marks, HistoryFold, HISTORY_KEYS
+from atc_summary import summarize, recent_marks, HistoryFold, HISTORY_KEYS, HISTORY_TIMES
 
 from atc_evidence import (
     Inventory, HistoryInventory, agent_id, code_state, combined_evidence, evidence_stage, merge_ring,
@@ -66,8 +66,7 @@ class EvidenceModel:
             if fold is None:
                 fold = HistoryFold(resource, result.at, self.current_ids(resource, scope))
                 fold.add(result.rows)
-            if resource == "attests" and (inventory.folded != fold.summary
-                                           or inventory.rows != fold.rows):
+            if resource == "attests" and inventory.fingerprint != fold.fingerprint.hexdigest():
                 self.details_revision += 1
             inventory.read_fold(fold, complete=result.complete, at=result.at, source=result.source)
             return
@@ -81,6 +80,15 @@ class EvidenceModel:
 
     def detail(self, resource, scope, result):
         inventory = self.inventory(resource, scope)
+        if isinstance(inventory, HistoryInventory):
+            if result.complete:
+                for row in result.rows:
+                    policy = "immutable" if resource in {"attests", "messages"} else "strict-version"
+                    if not inventory.payload(row, at=result.at, source=result.source, policy=policy):
+                        inventory.invalidate()
+            else:
+                inventory.invalidate()
+            return
         if result.complete:
             for row in result.rows:
                 key = str(row[inventory.key])
@@ -172,6 +180,10 @@ class EvidenceModel:
             if isinstance(inventory, HistoryInventory):
                 inventory.keep_ids = self.current_ids(resource, scope)
                 inventory.prune(now)
+                for row in inventory.rows.values():
+                    at = row.get(HISTORY_TIMES[resource])
+                    if isinstance(at, (int, float)) and at + 60_000 > now:
+                        self._expires(at + 60_000)
         self.recent_expiries = {key: at for key, at in self.recent_expiries.items() if at > now}
         work = self.inventory("work-items")
         assignments = self.inventory("assignments")

@@ -235,6 +235,7 @@ class HistoryInventory(Inventory):
         super().__init__(HISTORY_KEYS[resource])
         self.resource = resource
         self.keep_ids = set()
+        self.fingerprint = None
         self.folded = summarize(resource, ())
 
     def read_fold(self, fold, *, complete, at, source):
@@ -244,6 +245,7 @@ class HistoryInventory(Inventory):
         self.keep_ids = fold.keep_ids
         super().read(fold.rows.values(), complete=complete, at=at, source=source)
         if complete or first_read:
+            self.fingerprint = fold.fingerprint.hexdigest()
             self.folded = fold.summary
         else:
             # A partial walk cannot subtract previously established facts or
@@ -275,6 +277,11 @@ class HistoryInventory(Inventory):
                 continue
             at = row.get(timestamp)
             if self.resource == "turns" and row.get("endedAt") is None:
+                if not isinstance(at, (int, float)) or at <= now - 60_000:
+                    self.rows[key] = {k: row[k] for k in (
+                        "seq", "sessionKey", "assignmentId", "wakeId", "createdAt",
+                        "startedAt", "endedAt", "rowVersion") if k in row}
+                    self.observations.pop(key, None)
                 continue
             if not isinstance(at, (int, float)) or at <= now - 60_000:
                 del self.rows[key]
@@ -302,8 +309,13 @@ class HistoryInventory(Inventory):
             summarize(self.resource, (row,), into=self.folded, now=at)
         elif self.resource in {"turns", "wakes"}:
             current = summarize(self.resource, self.rows.values(), now=at)
-            for name in ("live", "marks"):
-                self.folded[name] = current[name]
+            self.folded["live"] = current["live"]
+            if self.resource == "wakes":
+                marks = {str(mark[self.key]): mark for mark in self.folded["marks"]}
+                marks.pop(key, None)
+                marks.update((str(mark[self.key]), mark) for mark in current["marks"])
+                self.folded["marks"] = sorted(marks.values(),
+                                              key=lambda mark: mark["firedAt"], reverse=True)
             for name in ("activity", "recentActivity"):
                 values = [v for v in (self.folded[name], current[name]) if v is not None]
                 self.folded[name] = max(values) if values else None

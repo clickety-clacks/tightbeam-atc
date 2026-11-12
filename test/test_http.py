@@ -114,6 +114,9 @@ class HttpTest(unittest.TestCase):
         rows = [{"id": str(i), "assignmentId": "assignment", "kind": "progress",
                  "ts": i, "note": "Note " + str(i), "byUser": None, "bySession": None}
                 for i in range(3)]
+        from unittest.mock import Mock
+        self.live.gateway = Mock()
+        self.live.gateway.read.side_effect = lambda resource, scope: Read(rows, True, 1, "test-read")
         self.live.model.accept("attests", "assignment", Read(rows, True, 1, "test-read"))
         self.live._publish()
         status, first = self.request("/api/items/item/evidence?limit=2")

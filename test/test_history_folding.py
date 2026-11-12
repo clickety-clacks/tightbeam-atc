@@ -85,3 +85,36 @@ class HistoryFoldingTest(unittest.TestCase):
         self.assertEqual(2, result.folded.summary["count"])
         self.assertEqual({"new"}, set(result.folded.rows))
         self.assertEqual(["new"], [m["id"] for m in result.folded.summary["marks"]])
+
+    def test_old_wake_needed_by_live_turn_survives_raw_expiry(self):
+        from atc_model import EvidenceModel
+        from atc_upstream import Read
+        model = EvidenceModel()
+        model.accept("turns", "session", Read([
+            {"seq": 1, "sessionKey": "session", "createdAt": 1,
+             "startedAt": 2, "endedAt": None, "wakeId": "old", "prompt": "large"}],
+            True, 1_000_000, "fixture"))
+        model.accept("wakes", "session", Read([
+            {"wakeId": "old", "sessionKey": "session", "createdAt": 1,
+             "firedAt": 2, "state": "fired", "creatorSessionKey": "source", "prompt": "large"}],
+            True, 1_000_000, "fixture"))
+        wakes = model.inventory("wakes", "session")
+        self.assertEqual("source", wakes.rows["old"]["creatorSessionKey"])
+        self.assertNotIn("prompt", wakes.rows["old"])
+        self.assertEqual([], wakes.folded["marks"])
+        model.accept("turns", "session", Read([], True, 1_000_001, "fixture"))
+        model.snapshot(1_000_001)
+        self.assertEqual({}, wakes.rows)
+
+    def test_expired_note_change_changes_fingerprint_without_retaining_note(self):
+        from atc_model import EvidenceModel
+        from atc_upstream import Read
+        model = EvidenceModel()
+        row = {"id": "old", "kind": "progress", "ts": 1, "note": "first"}
+        model.accept("attests", "task", Read([row], True, 1_000_000, "fixture"))
+        before = model.details_revision
+        model.accept("attests", "task", Read([dict(row)], True, 1_000_001, "fixture"))
+        self.assertEqual(before, model.details_revision)
+        model.accept("attests", "task", Read([dict(row, note="changed")], True, 1_000_002, "fixture"))
+        self.assertGreater(model.details_revision, before)
+        self.assertEqual({}, model.inventory("attests", "task").rows)

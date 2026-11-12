@@ -1,6 +1,8 @@
 """Compact history projections, rebuilt only when their own scope changes."""
 
 from collections import Counter
+import hashlib
+import json
 
 
 def summarize(resource, rows, *, into=None, now=None):
@@ -94,6 +96,7 @@ class HistoryFold:
         self.keep_ids = set(keep_ids)
         self.summary = summarize(resource, ())
         self.rows = {}
+        self.fingerprint = hashlib.blake2b(digest_size=16)
 
     def add(self, rows):
         from copy import deepcopy
@@ -102,6 +105,8 @@ class HistoryFold:
         summarize(resource, rows, into=self.summary, now=self.now)
         live = {str(row["seq"]): row for row in self.summary["live"]}
         for row in rows:
+            self.fingerprint.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode())
+            self.fingerprint.update(b"\n")
             at = row.get(timestamp)
             if isinstance(at, (int, float)) and at > self.now - 60_000:
                 self.rows[str(row[key])] = deepcopy(row)

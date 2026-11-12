@@ -164,6 +164,7 @@ class Gateway:
                 if not cursor or cursor in seen:
                     raise ValueError("collection cursor did not advance")
                 seen.add(cursor)
+                del items, result, page  # Release this page before fetching the next.
         except Exception as error:
             # Keep partial pages, but never expose response bodies or tokens.
             return Read(rows, False, now_ms(), path, type(error).__name__, page_number, fold)

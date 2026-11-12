@@ -938,7 +938,10 @@ class LiveService:
             if found:
                 self.correlation_gaps.discard((resource, key))
                 self.reads.touch(resource, found)
-                self._refresh(resource, found, None if resource == "attests" else key)
+                if resource == "attests":
+                    self._refresh(resource, found)
+                else:
+                    self.reads.schedule(resource, found, key, priority=True)
             else:
                 self._state("stale", "uncorrelated " + resource + " change")
             return True
