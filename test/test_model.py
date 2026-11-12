@@ -31,6 +31,95 @@ class ModelTest(unittest.TestCase):
     def read(self, kind, rows, scope=None, complete=True):
         self.model.accept(kind, scope, Read(rows, complete, 10, "test-read"))
 
+    def test_item_activity_and_approximate_finish_are_not_assignment_close(self):
+        self.read("work-items", [{"id": "work", "title": "Work", "state": "closed",
+                                  "createdAt": 2, "rowVersion": 11}])
+        self.read("attests", [{"id": "note", "ts": 12, "kind": "progress"}], "assignment")
+        self.read("artifacts", [{"artifactId": "artifact", "workItemId": "work",
+                                 "createdAt": 13, "updatedAt": 14}])
+        self.read("turns", [{"seq": 1, "assignmentId": "assignment",
+                             "startedAt": 15, "endedAt": 16}], "agent s_author")
+        item = self.model.snapshot(20)["items"][0]
+        self.assertEqual(16, item["latestActivityAt"])
+        self.assertEqual(16, item["finishedAt"])
+        self.assertTrue(item["finishedAtApproximate"])
+        self.assertEqual(10, item["closedAt"])
+        self.read("work-items", [{"id": "work", "title": "Work", "state": "closed",
+                                  "createdAt": 2, "closedAt": 9}])
+        item = self.model.snapshot(20)["items"][0]
+        self.assertEqual(9, item["finishedAt"])
+        self.assertFalse(item["finishedAtApproximate"])
+        self.read("work-items", [{"id": "work", "title": "Work", "state": "failed"}])
+        self.assertIsNone(self.model.snapshot(20)["items"][0]["finishedAt"])
+
+    def test_item_activity_cache_tracks_reads_payloads_and_removals(self):
+        first = self.model.item_activity()
+        self.read("roles", [{"name": "other", "boundSessionKey": "elsewhere"}])
+        self.model.invalidate()
+        self.assertIs(first, self.model.item_activity(), "freshness alone cannot change activity")
+        self.read("artifacts", [{"artifactId": "new", "workItemId": "work", "updatedAt": 50}])
+        self.assertEqual(50, self.model.item_activity()["work"])
+        self.read("artifacts", [], complete=False)
+        self.assertEqual(50, self.model.item_activity()["work"], "partial reads retain known rows")
+        self.read("artifacts", [])
+        self.assertEqual(10, self.model.item_activity()["work"], "complete removal invalidates the maximum")
+        self.model.inventory("attests", "assignment").payload(
+            {"id": "later", "ts": 60, "kind": "progress"}, at=60, source="feed", policy="immutable")
+        self.assertEqual(60, self.model.item_activity()["work"])
+        self.model.detail("assignments", None, Read([{"id": "assignment", "workItemId": "moved",
+            "openedAt": 3}], True, 70, "detail"))
+        self.assertNotIn("work", self.model.item_activity())
+        self.assertEqual(60, self.model.item_activity()["moved"])
+        self.read("turns", [{"seq": 2, "assignmentId": "assignment", "endedAt": 80}], "other")
+        self.assertEqual(80, self.model.item_activity()["moved"])
+
+    def test_unchanged_activity_does_not_visit_historical_rows(self):
+        class CountedRows(dict):
+            visits = 0
+            def values(self):
+                for row in super().values():
+                    self.visits += 1
+                    yield row
+        self.read("artifacts", [{"artifactId": str(n), "workItemId": "work", "updatedAt": n+1}
+                                for n in range(10000)])
+        artifacts = self.model.inventory("artifacts")
+        artifacts.rows = CountedRows(artifacts.rows)
+        assignments = self.model.inventory("assignments")
+        assignments.rows = CountedRows(assignments.rows)
+        cached = self.model.item_activity()
+        self.assertEqual(10000, cached["work"])
+        visited = (artifacts.rows.visits, assignments.rows.visits)
+        for _ in range(20):
+            self.assertIs(cached, self.model.item_activity())
+        self.assertEqual(visited, (artifacts.rows.visits, assignments.rows.visits))
+        # Frequent turn changes must not evict unrelated historical maxima.
+        for n in range(5):
+            self.read("turns", [{"seq": n, "assignmentId": "assignment", "endedAt": 20000+n}], "other")
+            self.assertEqual(20000+n, self.model.item_activity()["work"])
+        self.assertEqual(visited, (artifacts.rows.visits, assignments.rows.visits))
+        self.assertEqual(20004, self.model.snapshot(20000)["items"][0]["latestActivityAt"])
+        self.assertEqual(visited[0], artifacts.rows.visits, "publication reuses artifact activity")
+
+    def test_current_failure_records_never_invent_acceptance(self):
+        self.read("work-items", [{"id":"work", "title":"Work", "state":"failed",
+                                  "failReason":"The operator accepted this; see a decision in prose",
+                                  "byUser":"operator", "rowVersion":100}])
+        item = self.model.snapshot(200)["items"][0]
+        self.assertEqual("failed", item["state"])
+        self.assertIsNone(item.get("failureAcceptance"))
+        self.assertIsNone(item["finishedAt"])
+
+    def test_trace_finish_time_is_exact_and_never_applies_to_a_different_state(self):
+        self.read("work-items", [{"id":"work", "title":"Work", "state":"iceboxed", "rowVersion":100}])
+        self.read("finish-time", [{"id":"work", "state":"iceboxed", "finishedAt":50}], "work")
+        item = self.model.snapshot(200)["items"][0]
+        self.assertEqual(50, item["finishedAt"])
+        self.assertFalse(item["finishedAtApproximate"])
+        self.read("work-items", [{"id":"work", "title":"Work", "state":"closed", "rowVersion":150}])
+        item = self.model.snapshot(200)["items"][0]
+        self.assertEqual(150, item["finishedAt"])
+        self.assertTrue(item["finishedAtApproximate"])
+
     def test_partial_attest_load_keeps_full_persisted_proof_visible(self):
         proof = [{"repo": "example", "commit": f"{n:040x}"} for n in range(15)]
         self.model.merges["work"] = {

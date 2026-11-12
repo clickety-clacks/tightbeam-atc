@@ -13,7 +13,7 @@ import time
 import uuid
 
 from atc_git import GitResolver, reference_digest
-from atc_model import EvidenceModel
+from atc_model import EvidenceModel, latest_time
 from atc_evidence import combined_evidence, merge_value_for_refs
 from atc_reads import ReadQueue
 from atc_reconciliation import ActiveBackstop, RETRY_MS
@@ -134,6 +134,7 @@ class LiveService:
         self.feed_max_lag_ms = None
         self.correlation_gaps = set()
         self.merge_jobs = queue.Queue()
+        self.finish_trace_versions = {}
         self.merge_pending = {}
         self.merge_pending_complete = {}
         self.merge_workers_started = 0
@@ -333,6 +334,7 @@ class LiveService:
                         "lastAttemptAt": attempted_at, "lastAttemptRefs": attempted_refs,
                         "lastAttemptComplete": record.get("lastAttemptComplete", True),
                         "refs": refs, "freshness": "stale",
+                        **({"landingAt": record["landingAt"]} if record.get("landingAt") is not None else {}),
                     }
         except FileNotFoundError:
             return {}
@@ -353,6 +355,7 @@ class LiveService:
                   "lastAttemptRefs": result.get("lastAttemptRefs", result["refs"]),
                   "lastAttemptComplete": result.get("lastAttemptComplete", True),
                   "value": result["value"], "observedAt": result["observedAt"],
+                  "landingAt": result.get("landingAt"),
                   "lastAttemptAt": result.get("lastAttemptAt", result["observedAt"])}
         try:
             with self.merge_cache_lock:
@@ -383,6 +386,7 @@ class LiveService:
                         "lastAttemptRefs": result.get("lastAttemptRefs", result["refs"]),
                         "lastAttemptComplete": result.get("lastAttemptComplete", True),
                         "value": result["value"], "observedAt": result["observedAt"],
+                  "landingAt": result.get("landingAt"),
                         "lastAttemptAt": result.get("lastAttemptAt", result["observedAt"]),
                     }, separators=(",", ":"), sort_keys=True) + "\n")
             os.replace(temporary, path)
@@ -633,6 +637,7 @@ class LiveService:
         return dict(kinds) == item["attestCounts"] and dict(verdicts) == item["verdictCounts"]
 
     def _reconcile_item_attests(self, item):
+        self._schedule_finish_time(item)
         if not self._summary_contract_active() or not has_work_item_summary(item):
             return
         assignments = self.model.inventory("assignments")
@@ -870,6 +875,22 @@ class LiveService:
         else:
             self._incomplete_state("incomplete read or disconnected feed")
 
+    def _schedule_finish_time(self, item):
+        wid = item["id"]
+        marker = (item.get("state"), item.get("rowVersion"))
+        if self.finish_trace_versions.get(wid) == marker:
+            return
+        self.finish_trace_versions[wid] = marker
+        self.reads.touch("finish-time", wid)
+        self.model.inventory("finish-time", wid).rows.clear()
+        # A disposition advances rowVersion. An older version cannot hide a
+        # finish inside the selector's largest (30-day) window. Unknown bounds
+        # remain eligible; unrelated recent edits may conservatively over-read.
+        version_at = latest_time(item.get("rowVersion"))
+        could_be_visible = version_at is None or version_at >= now_ms() - 30 * 86_400_000
+        if item.get("state") in {"closed", "iceboxed"} and could_be_visible:
+            self.reads.schedule("finish-time", wid)
+
     def _read_done(self, value):
         job, epoch, result = value
         resource, scope, key = job
@@ -883,6 +904,11 @@ class LiveService:
                     "result": "epoch-discarded", "at": now_ms(),
                 }
             return False
+        if resource == "finish-time":
+            # Optional enrichment: a missing route uses the labeled activity
+            # fallback rather than blocking the core inventory's freshness.
+            self.model.accept(resource, scope, result)
+            return True
         if resource == "work-items" and supports_work_item_summary(self.version):
             invalid = [row for row in result.rows if not has_work_item_summary(row)]
             if invalid:
@@ -1066,7 +1092,10 @@ class LiveService:
                 LOG.warning("merge check inconclusive %s", line)
             if isinstance(resolver, GitResolver):
                 resolver.clear_diagnostics()
-            self.events.put(("merged", (wid, refs, value, now_ms())))
+            landing_at = getattr(resolver, "landing_at", None)
+            if not isinstance(landing_at, (int, float)) or isinstance(landing_at, bool):
+                landing_at = None
+            self.events.put(("merged", (wid, refs, value, now_ms(), landing_at)))
 
     def _refresh(self, resource, scope=None, key=None):
         self.metrics["targetedReads"] += 1
@@ -1194,7 +1223,8 @@ class LiveService:
                 return self.change(notice)
             return self.change(value)
         elif kind == "merged":
-            wid, refs, merged, at = value
+            wid, refs, merged, at = value[:4]
+            landing_at = value[4] if len(value) > 4 else None
             if self.merge_pending.get(wid) != refs:
                 if wid in self.merge_pending:
                     # The obsolete attempt has finished. Only now queue the
@@ -1218,8 +1248,12 @@ class LiveService:
                 self._persist_merge_result(wid, stale)
                 return (previous.get("freshness") != "stale"
                         or previous.get("lastAttemptComplete", True) != refs_complete)
+            if (merged is True and landing_at is None and previous
+                    and previous.get("value") is True and previous.get("refs") == refs):
+                landing_at = previous.get("landingAt")
             result = {"value": merged, "observedAt": at, "lastAttemptAt": at,
-                      "refs": refs, "freshness": "live", "lastAttemptComplete": refs_complete}
+                      "refs": refs, "freshness": "live", "lastAttemptComplete": refs_complete,
+                      **({"landingAt": landing_at} if merged is True and landing_at is not None else {})}
             self.model.merges[wid] = result
             self._persist_merge_result(wid, result)
         return True

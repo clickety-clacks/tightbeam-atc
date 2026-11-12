@@ -18,17 +18,24 @@ draw labelled arrows between them.
   tree: the root deepest, leaves at the surface, each family in its own sector.
   Colour is recency — solid blue for an agent that has just acted, fading to
   grey by an hour idle. Size shrinks with depth.
-- **Floating solids above the grid are work items.** Open unfinished work is placed by where it
-  stands in its assignment life first. Work not yet started and not carded to anyone floats in a
-  cloud high above the org. Work carded to an active agent sits lower, over that agent, with a
-  line to it. Work that has started but is not carded to an active agent forms a ring around the
-  org's perimeter at middle height. Within each of these, colour shows the furthest evidence
-  recorded on any of the item's assignments, from 0 to 4, and lower sits further along. That is
-  not completion of the item: open work stays in its tier until the item is closed, and never
-  sits on the floor. When assignment state cannot be established, the item is not placed in any
-  of them: it waits off to the side with a `?`, and hover says why. Closed, iceboxed and failed
-  items keep their own placement. Missing evidence stays unknown; later evidence does not
-  manufacture earlier steps.
+- **Floating solids above the grid are work items.** Open, unlanded work without
+  an active holder sits on an evenly spaced orphan ring. Distance shows age since
+  latest activity: recent work is near the agent graph, increasing linearly to a
+  fixed outer edge at 30 days. The recent-age bound is 3 days; unknown age is at
+  the edge and labeled unknown. Ring radii scale with the central graph extent.
+  Work attached to an agent stays over that agent with a line to it. When
+  assignment state cannot be established, the item stays visible with a `?`.
+  The finished / landed selector shows closed, iceboxed and merged work in the
+  main graph for 0, 1, 3, 7 or 30 days, defaulting to 1 on each page load.
+  Approximate finish times are labeled in detail; unknown times are outside the
+  window. This control never removes or repositions unfinished orphans.
+  Unaccepted failures remain visible at every setting, even when merged. With
+  no active holder they join the ring, marked by a geometric **×**; with a holder
+  they keep their attached position, and unknown attachment stays marked `?`.
+  Accepted failures use the finished window. Current records cannot establish
+  failure acceptance, so they remain unaccepted; prose and user attribution do
+  not establish acceptance. Detail explains missing or conflicting evidence.
+  Stage, colors and merge rings continue to describe the same evidence.
 - **On the floor, a ring says what happened.** Black means merge proven by Git. Green means an explicit ready-to-merge verdict.
   Light gray means durably non-code. Yellow means code with unknown merge status.
   A floating item has no merge ring; floor position alone does not prove a merge.
@@ -160,7 +167,7 @@ are retired; they are not part of this service.
 | `TB_ATC_REBUILD_SECONDS` | full reconciliation interval, shown in the viewer; malformed values use the default | `300` |
 
 The read-only bridge invokes `assignments --state all`, `attests <assignmentId>`,
-`assignment-get <assignmentId>`, `list` (for its complete roles array), and
+`assignment-get <assignmentId>`, optional `work-item-trace <itemId>` for finish times, `list` (for its complete roles array), and
 `artifacts`, each with `--as-user <TB_ATC_USER>`. There is no packaged `role-list`
 command. The bridge sets `TIGHTBEAM_BASE_DIR` explicitly, removes inherited
 endpoint overrides and runs outside any session working directory so the CLI

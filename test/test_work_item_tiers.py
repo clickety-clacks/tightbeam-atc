@@ -21,12 +21,8 @@ class ViewerWorkTierTest(unittest.TestCase):
     def test_readme_explains_all_open_work_placements(self):
         readme = " ".join((ROOT / "README.md").read_text().split())
         for phrase in (
-            "cloud high above the org",
-            "with a line to it",
-            "forms a ring around the",
-            "assignment state cannot be established",
-            "open work stays in its tier",
-            "Closed, iceboxed and failed",
+            "orphan ring", "latest activity", "with a line to it",
+            "assignment state cannot be established", "finished", "Failed",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, readme)
