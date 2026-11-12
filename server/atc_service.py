@@ -1301,6 +1301,10 @@ class LiveService:
                                                      self._last_publication + PUBLICATION_INTERVAL)
                         self.model.invalidate()
                         self._state("stale", "model update failed: " + type(error).__name__)
+                    finally:
+                        # A quiet worker must not keep its last Read (or feed
+                        # payload) alive until the next event arrives.
+                        event = value = None
                     if index == EVENT_BATCH_LIMIT - 1:
                         break
                     try:

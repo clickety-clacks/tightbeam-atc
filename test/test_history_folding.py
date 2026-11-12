@@ -161,3 +161,49 @@ class HistoryFoldingTest(unittest.TestCase):
         inventory = model.inventory("wakes", "session")
         self.assertNotIn("prompt", inventory.rows["wake"])
         self.assertEqual({}, inventory.observations)
+
+    def test_idle_worker_releases_completed_event_payload(self):
+        import gc
+        import queue
+        import threading
+        import time
+        import weakref
+        from unittest.mock import patch
+        from atc_service import LiveService
+        from test_service import PublishedReads
+
+        class Payload:
+            pass
+
+        class ObservedQueue(queue.Queue):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+                self.idle = threading.Event()
+
+            def get(self, block=True, timeout=None):
+                if block:
+                    self.calls += 1
+                    if self.calls >= 2:
+                        self.idle.set()
+                return super().get(block, timeout)
+
+        service = LiveService(PublishedReads())
+        self.addCleanup(service.stop)
+        service.events = ObservedQueue()
+        service._next_maintenance = time.monotonic() + 60
+        payload = Payload()
+        reference = weakref.ref(payload)
+        service.events.put(('fixture', payload))
+        del payload
+        with patch.object(service, '_handle', new=lambda kind, value: False):
+            worker = threading.Thread(target=service._worker)
+            worker.start()
+            try:
+                self.assertTrue(service.events.idle.wait(5))
+                gc.collect()
+                self.assertIsNone(reference())
+            finally:
+                service.events.put(('stop', None))
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
