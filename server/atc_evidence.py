@@ -225,3 +225,90 @@ def merge_value_for_refs(observation, refs, refs_complete=True):
             and all(ref in refs for ref in proof_refs)):
         return True
     return None
+
+
+class HistoryInventory(Inventory):
+    """Current facts plus a short raw window, never the full history corpus."""
+
+    def __init__(self, resource):
+        from atc_summary import HISTORY_KEYS, summarize
+        super().__init__(HISTORY_KEYS[resource])
+        self.resource = resource
+        self.keep_ids = set()
+        self.folded = summarize(resource, ())
+
+    def read_fold(self, fold, *, complete, at, source):
+        from atc_summary import summarize
+        previous = self.folded
+        first_read = self.observed_at is None
+        self.keep_ids = fold.keep_ids
+        super().read(fold.rows.values(), complete=complete, at=at, source=source)
+        if complete or first_read:
+            self.folded = fold.summary
+        else:
+            # A partial walk cannot subtract previously established facts or
+            # add its counts to them: the walks overlap. Keep counted evidence
+            # unconfirmed until an authoritative complete walk replaces it.
+            self.folded = previous
+            for name in ("activity", "recentActivity"):
+                values = [v for v in (previous[name], fold.summary[name]) if v is not None]
+                previous[name] = max(values) if values else None
+            for name in ("latest", "authors", "assignmentActivity"):
+                for key, value in fold.summary[name].items():
+                    previous[name][key] = max(previous[name].get(key, 0), value)
+            previous["authorIds"].update(fold.summary["authorIds"])
+            # Current rows can still establish a newer turn state or mark.
+            current = summarize(self.resource, self.rows.values(), now=at)
+            previous["live"] = current["live"]
+            if self.resource in {"messages", "wakes"}:
+                marks = {str(row[self.key]): row for row in previous["marks"]}
+                marks.update((str(row[self.key]), row) for row in current["marks"])
+                field = "at" if self.resource == "messages" else "firedAt"
+                previous["marks"] = sorted(marks.values(), key=lambda row: row[field], reverse=True)
+        self.prune(at)
+
+    def prune(self, now):
+        from atc_summary import HISTORY_TIMES
+        timestamp = HISTORY_TIMES[self.resource]
+        for key, row in list(self.rows.items()):
+            if key in self.keep_ids:
+                continue
+            at = row.get(timestamp)
+            if self.resource == "turns" and row.get("endedAt") is None:
+                continue
+            if not isinstance(at, (int, float)) or at <= now - 60_000:
+                del self.rows[key]
+                self.observations.pop(key, None)
+        if self.resource in {"messages", "wakes"}:
+            field = "at" if self.resource == "messages" else "firedAt"
+            self.folded["marks"][:] = [row for row in self.folded["marks"]
+                                      if row[field] > now - 300_000]
+
+    def payload(self, row, *, at, source, policy):
+        from atc_summary import HISTORY_TIMES, summarize
+        key = str(row[self.key])
+        old = self.rows.get(key)
+        timestamp = row.get(HISTORY_TIMES[self.resource])
+        if old is None and (not isinstance(timestamp, (int, float))
+                            or timestamp <= (self.folded["recentActivity"] or 0)):
+            # An old identity may already have been counted and discarded.
+            # The authoritative scoped read resolves it without an ID ledger.
+            return False
+        if not super().payload(row, at=at, source=source, policy=policy):
+            return False
+        if old == self.rows.get(key):
+            return True
+        if old is None:
+            summarize(self.resource, (row,), into=self.folded, now=at)
+        elif self.resource in {"turns", "wakes"}:
+            current = summarize(self.resource, self.rows.values(), now=at)
+            for name in ("live", "marks"):
+                self.folded[name] = current[name]
+            for name in ("activity", "recentActivity"):
+                values = [v for v in (self.folded[name], current[name]) if v is not None]
+                self.folded[name] = max(values) if values else None
+            for aid, when in current["assignmentActivity"].items():
+                self.folded["assignmentActivity"][aid] = max(
+                    self.folded["assignmentActivity"].get(aid, 0), when)
+        self.prune(at)
+        return True

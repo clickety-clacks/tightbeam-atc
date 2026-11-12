@@ -47,3 +47,41 @@ class HistoryFoldingTest(unittest.TestCase):
         self.assertNotIn("prompt", mark)
         self.assertEqual("source", mark["creatorSessionKey"])
         self.assertEqual([], summarize("turns", [dict(turn, endedAt=20)])["live"])
+
+    def test_old_attests_are_counted_without_rows_or_observations(self):
+        from atc_model import EvidenceModel
+        from atc_upstream import Read
+        model = EvidenceModel()
+        rows = [{"id": str(n), "kind": "progress", "ts": n,
+                 "bySession": "author", "note": "payload" * 100} for n in range(1000)]
+        model.accept("attests", "task", Read(rows, True, 1_000_000, "fixture"))
+        inventory = model.inventory("attests", "task")
+        self.assertEqual({}, inventory.rows)
+        self.assertEqual({}, inventory.observations)
+        self.assertEqual(1000, model.summary("attests", "task")["count"])
+        model.accept("attests", "task", Read([], False, 1_000_001, "fixture"))
+        self.assertEqual(1000, model.summary("attests", "task")["count"])
+        self.assertFalse(inventory.complete)
+        model.accept("attests", "task", Read(rows, True, 1_000_002, "fixture"))
+        self.assertEqual(1000, model.summary("attests", "task")["count"])
+        self.assertFalse(inventory.payload(rows[0], at=1_000_003, source="feed", policy="immutable"))
+        self.assertEqual(1000, inventory.folded["count"])
+
+    def test_paged_history_folds_before_requesting_the_next_page(self):
+        from atc_upstream import Gateway
+        from unittest.mock import Mock, patch
+        gateway = Gateway("http://example.invalid", Mock())
+        pages = iter([
+            {"schemaVersion": 1, "items": [{"id": "old", "at": 1, "content": "large"}],
+             "page": {"hasMoreBefore": False, "hasMoreAfter": True, "newestCursor": "next"}},
+            {"schemaVersion": 1, "items": [{"id": "new", "at": 999_999}],
+             "page": {"hasMoreBefore": True, "hasMoreAfter": False}},
+        ])
+        gateway.request = lambda path: next(pages)
+        with patch("atc_upstream.now_ms", return_value=1_000_000):
+            result = gateway.read_current("messages", "session")
+        self.assertTrue(result.complete)
+        self.assertEqual([], result.rows)
+        self.assertEqual(2, result.folded.summary["count"])
+        self.assertEqual({"new"}, set(result.folded.rows))
+        self.assertEqual(["new"], [m["id"] for m in result.folded.summary["marks"]])

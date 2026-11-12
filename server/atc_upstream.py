@@ -23,6 +23,7 @@ class Read:
     source: str
     error: str | None = None
     page: int | None = None
+    folded: object | None = None
 
 
 # These are the evidence fields shared by the published attest read and feed.
@@ -131,7 +132,7 @@ class Gateway:
             self.read_count += 1
         return self.cli.read(verb, **params)
 
-    def collection(self, path):
+    def collection(self, path, *, fold=None):
         rows, cursor, seen, page_number = [], None, set(), 0
         try:
             while True:
@@ -147,13 +148,16 @@ class Gateway:
                 items, page = result["items"], result["page"]
                 if not isinstance(items, list) or not all(isinstance(r, dict) for r in items):
                     raise ValueError("invalid collection rows")
-                rows.extend(items)
+                if fold is None:
+                    rows.extend(items)
+                else:
+                    fold.add(items)
                 if cursor is None and page["hasMoreBefore"] is not False:
                     raise ValueError("collection did not start at head")
                 if page["hasMoreAfter"] is False:
                     # Starting at the head and walking forward is complete;
                     # a server unexpectedly returning a tail is not.
-                    return Read(rows, True, now_ms(), path, page=page_number)
+                    return Read(rows, True, now_ms(), path, page=page_number, folded=fold)
                 if page["hasMoreAfter"] is not True:
                     raise ValueError("invalid page completion")
                 cursor = page["newestCursor"]
@@ -162,7 +166,21 @@ class Gateway:
                 seen.add(cursor)
         except Exception as error:
             # Keep partial pages, but never expose response bodies or tokens.
-            return Read(rows, False, now_ms(), path, type(error).__name__, page_number)
+            return Read(rows, False, now_ms(), path, type(error).__name__, page_number, fold)
+
+    def read_current(self, resource, scope=None, *, keep_ids=()):
+        from atc_summary import HistoryFold, HISTORY_KEYS
+        if resource not in HISTORY_KEYS:
+            return self.read(resource, scope)
+        fold = HistoryFold(resource, now_ms(), keep_ids)
+        if resource != "attests":
+            return self.collection("/api/sessions/" + quote(scope, safe="") + "/" + resource,
+                                   fold=fold)
+        result = self.read(resource, scope)
+        fold.add(result.rows)
+        result.rows = []
+        result.folded = fold
+        return result
 
     def read(self, resource, scope=None):
         if resource in {"work-items", "sessions", "decision-requests"}:

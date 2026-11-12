@@ -7,8 +7,9 @@ from atc_upstream import Read, now_ms
 
 
 class ReadQueue:
-    def __init__(self, gateway, events, workers):
+    def __init__(self, gateway, events, workers, current_ids=None):
         self.gateway, self.events, self.workers = gateway, events, workers
+        self.current_ids = current_ids or (lambda resource, scope: ())
         self.executor = ThreadPoolExecutor(max_workers=workers)
         self.pending = OrderedDict()
         self.active = {}
@@ -51,16 +52,18 @@ class ReadQueue:
             epoch = self.epochs[inventory]
             self.active[inventory] = job, epoch
             self.active_priorities[inventory] = priority
-            future = self.executor.submit(self._read, job)
+            future = self.executor.submit(self._read, job, self.current_ids(*job[:2]))
             future.add_done_callback(
                 lambda done, job=job, epoch=epoch:
                 None if done.cancelled() else
                 self.events.put(("read", (job, epoch, done.result()))))
 
-    def _read(self, job):
+    def _read(self, job, keep_ids=()):
         resource, scope, key = job
         try:
             if key is None:
+                if hasattr(self.gateway, "read_current"):
+                    return self.gateway.read_current(resource, scope, keep_ids=keep_ids)
                 return self.gateway.read(resource, scope)
             return self.gateway.detail(resource, key, scope=scope)
         except Exception as error:

@@ -112,7 +112,7 @@ class LiveService:
         self.generation, self.revision = uuid.uuid4().hex, 0
         self.rebuild_interval, self.workers = rebuild_interval, workers
         self.events = queue.Queue()
-        self.reads = ReadQueue(gateway, self.events, workers)
+        self.reads = ReadQueue(gateway, self.events, workers, self.model.current_ids)
         self.backstop = ActiveBackstop()
         self.scope_budget = scope_budget
         self.rotation = deque()
@@ -247,10 +247,16 @@ class LiveService:
                 return (404 if work.complete else 503), {"error": "item-unavailable", **pin}
             assignments = self.model.inventory("assignments")
             owned = [a for a in assignments.rows.values() if a.get("workItemId") == item_id]
-            scopes = [self.model.inventory("attests", a["id"]) for a in owned]
+            reads = [self.gateway.read("attests", a["id"]) for a in owned]
+            scopes = []
+            for result in reads:
+                from atc_evidence import Inventory
+                evidence = Inventory()
+                evidence.read((), complete=result.complete, at=result.at, source=result.source)
+                scopes.append(evidence)
             facts = combined_evidence(work.evidence(), assignments.evidence(),
                                       *(scope.evidence() for scope in scopes))
-            rows = sorted((row for scope in scopes for row in scope.rows.values()),
+            rows = sorted((row for result in reads for row in result.rows),
                           key=lambda row: (row.get("ts") or 0, row["id"]))
             end = offset + limit
             return 200, deepcopy({
@@ -940,6 +946,10 @@ class LiveService:
             self.model.accept(resource, scope, result)
         else:
             self.model.detail(resource, scope, result)
+        if resource == "turns" and scope is not None and result.complete:
+            wakes = self.model.inventory("wakes", scope)
+            if self.model.current_ids("wakes", scope) - wakes.rows.keys():
+                self._refresh("wakes", scope)
         if resource == "work-items" and result.complete:
             if key is None:
                 for row in result.rows:
@@ -1099,6 +1109,8 @@ class LiveService:
 
     def _refresh(self, resource, scope=None, key=None):
         self.metrics["targetedReads"] += 1
+        if resource in HISTORIES and scope is not None:
+            key = None  # Discarded identities require an authoritative scoped fold.
         self.reads.schedule(resource, scope, key, priority=True)
 
     def change(self, notice):

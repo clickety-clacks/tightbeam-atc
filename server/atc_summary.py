@@ -80,3 +80,34 @@ def recent_marks(summary, field, now):
         if row[field] <= now - 300_000:
             break
         yield row
+
+
+HISTORY_KEYS = {"attests": "id", "turns": "seq", "wakes": "wakeId", "messages": "id"}
+HISTORY_TIMES = {"attests": "ts", "turns": "createdAt", "wakes": "createdAt", "messages": "at"}
+
+
+class HistoryFold:
+    """One authoritative history read, folded while each page is in hand."""
+
+    def __init__(self, resource, now, keep_ids=()):
+        self.resource, self.now = resource, now
+        self.keep_ids = set(keep_ids)
+        self.summary = summarize(resource, ())
+        self.rows = {}
+
+    def add(self, rows):
+        from copy import deepcopy
+        resource = self.resource
+        key, timestamp = HISTORY_KEYS[resource], HISTORY_TIMES[resource]
+        summarize(resource, rows, into=self.summary, now=self.now)
+        live = {str(row["seq"]): row for row in self.summary["live"]}
+        for row in rows:
+            at = row.get(timestamp)
+            if isinstance(at, (int, float)) and at > self.now - 60_000:
+                self.rows[str(row[key])] = deepcopy(row)
+            elif resource == "wakes" and str(row[key]) in self.keep_ids:
+                self.rows[str(row[key])] = {k: row[k] for k in (
+                    "wakeId", "sessionKey", "creatorSessionKey", "state", "firedAt") if k in row}
+            elif resource == "turns" and row.get("endedAt") is None:
+                # The live turn is board state, but its prompt is not.
+                self.rows[str(row[key])] = dict(live[str(row[key])])

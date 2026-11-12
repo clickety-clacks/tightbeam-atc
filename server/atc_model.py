@@ -3,10 +3,10 @@
 from collections import Counter, defaultdict
 from copy import deepcopy
 from math import isfinite
-from atc_summary import summarize, recent_marks
+from atc_summary import summarize, recent_marks, HistoryFold, HISTORY_KEYS
 
 from atc_evidence import (
-    Inventory, agent_id, code_state, combined_evidence, evidence_stage, merge_ring,
+    Inventory, HistoryInventory, agent_id, code_state, combined_evidence, evidence_stage, merge_ring,
     turn_state, merge_value_for_refs,
 )
 from atc_payloads import has_work_item_summary
@@ -34,6 +34,8 @@ class EvidenceModel:
 
     def summary(self, resource, scope):
         inventory = self.inventory(resource, scope)
+        if isinstance(inventory, HistoryInventory):
+            return inventory.folded
         cached = self.summaries.get((resource, scope))
         if cached is None or cached[0] != inventory.data_revision:
             cached = inventory.data_revision, summarize(resource, inventory.rows.values())
@@ -41,7 +43,17 @@ class EvidenceModel:
         return cached[1]
 
     def inventory(self, resource, scope=None):
-        return self.inventories.setdefault((resource, scope), Inventory(KEYS.get(resource, "id")))
+        key = resource, scope
+        if key not in self.inventories:
+            self.inventories[key] = (HistoryInventory(resource) if resource in HISTORY_KEYS
+                                     else Inventory(KEYS.get(resource, "id")))
+        return self.inventories[key]
+
+    def current_ids(self, resource, scope):
+        if resource != "wakes":
+            return set()
+        return {str(turn["wakeId"]) for turn in self.summary("turns", scope)["live"]
+                if turn.get("wakeId") is not None}
 
     def mark_unconfirmed(self, at):
         for inventory in self.inventories.values():
@@ -49,6 +61,16 @@ class EvidenceModel:
 
     def accept(self, resource, scope, result):
         inventory = self.inventory(resource, scope)
+        if isinstance(inventory, HistoryInventory):
+            fold = result.folded
+            if fold is None:
+                fold = HistoryFold(resource, result.at, self.current_ids(resource, scope))
+                fold.add(result.rows)
+            if resource == "attests" and (inventory.folded != fold.summary
+                                           or inventory.rows != fold.rows):
+                self.details_revision += 1
+            inventory.read_fold(fold, complete=result.complete, at=result.at, source=result.source)
+            return
         if resource in {"attests", "assignments", "work-items"}:
             incoming = {str(row[inventory.key]): row for row in result.rows}
             if (any(inventory.rows.get(k) != row for k, row in incoming.items())
@@ -146,6 +168,10 @@ class EvidenceModel:
 
     def snapshot(self, now):
         self.next_expiry = None
+        for (resource, scope), inventory in list(self.inventories.items()):
+            if isinstance(inventory, HistoryInventory):
+                inventory.keep_ids = self.current_ids(resource, scope)
+                inventory.prune(now)
         self.recent_expiries = {key: at for key, at in self.recent_expiries.items() if at > now}
         work = self.inventory("work-items")
         assignments = self.inventory("assignments")
