@@ -85,7 +85,10 @@ class ItemAssignmentRetryTest(unittest.TestCase):
                 self.assertFalse(service.current['items'][0]['evidence']['assignments']['complete'])
                 self.assertNotIn('first', service.model.inventory('assignments').rows)
                 self.settle(service)
-                self.assertEqual(self.facts(self.fresh(service)), self.facts(service))
+                fresh = self.fresh(service)
+                self.assertEqual(self.facts(fresh), self.facts(service))
+                for name in ('agents', 'items', 'links', 'wakes', 'messages'):
+                    self.assertEqual(fresh.current[name], service.current[name], name)
                 self.assertFalse(service.model.inventory('assignments').complete)
                 self.assertTrue(service.current['items'][0]['evidence']['assignments']['complete'])
                 self.assertEqual({'open'}, service.model.inventory('assignments').rows.keys())
@@ -126,5 +129,34 @@ class ItemAssignmentRetryTest(unittest.TestCase):
         self.assertIn(('detail', 'assignments', None, 'last'), service.gateway.calls)
         self.assertIn(('membership', 'work'), service.gateway.calls)
         self.assertNotIn(('read', 'assignments', None), service.gateway.calls)
-        self.assertEqual(self.facts(self.fresh(service)), self.facts(service))
+        fresh = self.fresh(service)
+        for name in ('agents', 'items', 'links', 'wakes', 'messages'):
+            self.assertEqual(fresh.current[name], service.current[name], name)
+
+    def test_item_completion_does_not_clear_later_outage_evidence(self):
+        service = self.service()
+        self.partial(service, {'first'})
+        self.settle(service)
+        service.model.mark_unconfirmed(2000)
+        fact = service.model.assignment_evidence('work')
+        self.assertEqual('unconfirmed', fact['freshness'])
+        self.assertEqual(2000, fact['unconfirmedSince'])
+        service.model.invalidate()
+        self.assertEqual('stale', service.model.assignment_evidence('work')['freshness'])
+
+    def test_unrelated_fold_keeps_complete_item_reference_order(self):
+        service = self.service()
+        self.partial(service, {'first'})
+        self.settle(service)
+        model = service.model
+        expected = self.facts(service)[0]['commitRefs']
+        # A different item acquires closed construction rows during a complete
+        # source cycle. Existing per-item order must survive that item's fold.
+        model.inventory('assignments').complete = True
+        model.detail('assignments', None, Read([dict(id='other-closed', workItemId='other-work',
+                     state='closed', holderKey='other', effectKind='spec')], True, 10, 'published-detail'))
+        model.accept('attests', 'other-closed', Read([], True, 10, 'published-read'))
+        model.fold_closed_assignments()
+        item = next(row for row in model.snapshot(1000)['items'] if row['id'] == 'work')
+        self.assertEqual(expected, item['commitRefs'])
 

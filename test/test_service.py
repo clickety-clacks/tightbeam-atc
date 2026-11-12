@@ -320,7 +320,11 @@ class ServiceRecoveryTest(unittest.TestCase):
 
         self.drain()
         self.assertEqual("rebuilding", self.service.state)
-        self.assertEqual({("attests", "assignment")}, self.service.cycle["pending"])
+        # R12 retries the complete item source instead of publishing a partial
+        # attest fold. The inventory's confirmation/outage credit stays intact.
+        self.assertEqual(set(), self.service.cycle["pending"])
+        self.assertEqual({"work"}, self.service.model.item_assignment_pending)
+        self.assertIn(("item-assignment-source", "work", None), self.service.read_retries)
         self.assertFalse(self.service.model.inventory("work-items").stale)
         self.assertFalse(self.service.model.inventory("assignments").stale)
         self.assertTrue(self.service.model.inventory("attests", "assignment").stale)
@@ -800,14 +804,18 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.gateway.partial.add(("attests", "assignment"))
         self.gateway.rows[("attests", "assignment")] = []
         before = self.service.last_sweep
+        previous_stage = self.item()["stage"]
         self.service.rebuild(recovery=False)
         self.drain()
         self.assertIn("progress", self.service.model.inventory("attests", "assignment").rows)
-        self.assertIsNone(self.item()["stage"])
+        self.assertEqual(previous_stage, self.item()["stage"])
+        self.assertFalse(self.item()["evidence"]["stage"]["complete"])
         self.assertEqual("rebuilding", self.service.state)
         self.assertTrue(self.service.model.inventory("attests", "assignment").stale)
         self.assertEqual(before, self.service.last_sweep)
         self.gateway.partial.clear()
+        self.service.read_retries["item-assignment-source", "work", None] = (0, 2)
+        self.service._retry_incomplete_reads()
         self.service.rebuild(recovery=False)
         self.drain()
         self.assertEqual({}, self.service.model.inventory("attests", "assignment").rows)

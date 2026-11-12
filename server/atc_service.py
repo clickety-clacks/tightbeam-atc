@@ -741,15 +741,18 @@ class LiveService:
 
     def _reconciliation(self):
         cycle = self.cycle
+        item_reads = {("item-assignment-source", wid) for wid in self.model.item_assignment_pending}
+        pending = (cycle["pending"] if cycle else set()) | item_reads
+        seen = (cycle["seen"] if cycle else set()) | item_reads
         histories = len(self._history_scopes())
         repeated_history = self._repeated_history_scopes()
         terminal = len(repeated_history)
         backstop = self.backstop.metadata(self.model, self.connected)
         backstop["history"] = self.backstop.group(self.model, repeated_history)
         return {"mode": cycle["mode"] if cycle else None,
-                "pendingScopes": len(cycle["pending"]) if cycle else 0,
-                "pendingByResource": _resource_counts(cycle["pending"]) if cycle else {},
-                "totalScopes": len(cycle["seen"]) if cycle else 0,
+                "pendingScopes": len(pending),
+                "pendingByResource": _resource_counts(pending),
+                "totalScopes": len(seen),
                 "scopeBudget": self.scope_budget,
                 "historyScopes": histories,
                 "estimatedSweepMs": ((terminal + self.scope_budget - 1) // self.scope_budget
@@ -1145,7 +1148,7 @@ class LiveService:
         if resource == "assignments" and key is not None and self.model.closed_sources_released:
             row = result.rows[0] if result.complete and len(result.rows) == 1 else None
             wid = (row or assignments.rows.get(key, {})).get("workItemId")
-            if wid and self._request_item_assignments(wid):
+            if wid and self._request_item_assignments(wid, changed=True):
                 self.read_retries.pop(job, None)
                 self.retry_in_flight.discard(job)
             else:
@@ -1158,7 +1161,8 @@ class LiveService:
             owner = assignments.rows.get(scope, {}).get("workItemId")
             if owner and (not result.complete or owner in self.model.item_assignment_pending):
                 self.last_incomplete_read = self._read_outcome(*job, result)
-                self._request_item_assignments(owner)
+                self._request_item_assignments(owner, changed=True)
+                self.model.inventory(resource, scope).invalidate()
                 # The complete item read replaces this scope too. Its retry
                 # owns the incompleteness, without retaining the partial rows.
                 self._forget_scopes({job[:2]})
@@ -1170,10 +1174,13 @@ class LiveService:
             affected = set(self.model.work_items())
             affected.update(row.get("workItemId") for row in result.rows)
             for wid in affected:
-                self._request_item_assignments(wid)
+                self._request_item_assignments(wid, changed=True)
             # Record the global failure independently. None of this partial
             # collection may overwrite an item's last complete source facts.
             result.rows = []
+        elif resource == "assignments" and key is None and result.complete:
+            for wid in tuple(self.model.item_assignment_pending):
+                self._request_item_assignments(wid, changed=True)
         if (resource == "assignments" and key is not None and result.rows
                 and result.rows[0].get("workItemId") in self.model.item_assignment_pending):
             self._request_item_assignments(result.rows[0]["workItemId"])

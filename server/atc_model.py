@@ -292,6 +292,11 @@ class EvidenceModel:
     def mark_unconfirmed(self, at):
         for inventory in self.inventories.values():
             inventory.mark_unconfirmed(at)
+        for fact in self.item_assignment_facts.values():
+            if fact["complete"] and fact.get("unconfirmedSince") is None:
+                fact["unconfirmedSince"] = at
+                if fact["freshness"] != "stale":
+                    fact["freshness"] = "unconfirmed"
         for part in self.closed_items.values():
             for fact in (part["facts"], *part["authorFacts"].values()):
                 if fact["complete"] and fact.get("unconfirmedSince") is None:
@@ -315,6 +320,9 @@ class EvidenceModel:
             return set()
         grouped = {}
         item_positions = Counter()
+        previous_order = self.open_assignment_order
+        raw_closed_items = {row.get("workItemId") for row in assignments.rows.values()
+                            if row.get("state") != "open"}
         self.open_assignment_order = {}
         live_ids = {turn.get("assignmentId") for resource, scope in self.inventories
                     if resource == "turns" for turn in self.summary(resource, scope)["live"]}
@@ -326,7 +334,8 @@ class EvidenceModel:
             position = item_positions[wid]
             item_positions[wid] += 1
             if row.get("state") == "open":
-                self.open_assignment_order[aid] = order
+                self.open_assignment_order[aid] = (order if wid in raw_closed_items else
+                                                    previous_order.get(aid, order))
                 continue
             fold = grouped.setdefault(wid, ClosedAssignmentFold())
             fold.add(row, self.inventory("attests", aid), order=order, position=position)
@@ -524,6 +533,8 @@ class EvidenceModel:
     def invalidate(self):
         for inventory in self.inventories.values():
             inventory.invalidate()
+        for fact in self.item_assignment_facts.values():
+            fact["freshness"] = "stale"
         for part in self.closed_items.values():
             for fact in (part["facts"], *part["authorFacts"].values()):
                 fact["freshness"] = "stale"
