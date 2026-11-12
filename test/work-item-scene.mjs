@@ -13,7 +13,8 @@ const context = vm.createContext({THREE, ...tiers, ...windowRules, factValue, kn
   ringMeaning, unknownItemType, Date, Map, Object,
   byId:{}, APOS:{}, itemGroup:new THREE.Group(), tetherGroup:new THREE.Group(),
   itemMeshes:[], renderedItemIds:[], finishedDays:1,
-  T:{stage:[0,1,2,3,4,5,6], itemClosed:1, factUnknown:2, orphan:3},
+  T:{stage:[0,1,2,3,4,5,6], itemClosed:1, factUnknown:2, orphan:3,
+    discBlack:0x000000, discG:0x00ff00, discN:0xdddddd, discY:0xffff00, tetherSched:0x999999},
   disposeGroup(group){group.clear();}, labelSprite(){return new THREE.Sprite();},
   diagramMesh(geometry,color){return new THREE.Mesh(geometry,new THREE.MeshBasicMaterial({color}));},
   layerState:{workItems:false, agents:true},
@@ -116,6 +117,7 @@ for (const days of [0,30,1]) {
     if (item.merged) {
       const disc = context.itemMeshes.find(m=>m.userData.isDisc && m.userData.w.id===item.id);
       assert.ok(disc, 'known merge retains its floor ring');
+      assert.equal(disc.material.color.getHex(),0x000000);
     }
   }
   assert.equal(byId.has('accepted'),days>0);
