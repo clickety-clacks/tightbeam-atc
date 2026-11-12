@@ -217,7 +217,7 @@ export function createRenderLoop({
 /* Advance the existing scene builders between rendered frames. The iterator
    owns the complete model; a batch limit never changes its membership. */
 export function createSceneLoad(steps, finish, {now = () => performance.now(),
-  budgetMs = 6, batchSize = 32} = {}) {
+  budgetMs = 6, batchSize = 256} = {}) {
   let pending = true;
   let held = false;
   return {

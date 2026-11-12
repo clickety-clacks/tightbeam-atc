@@ -28,6 +28,21 @@ assert.equal(applied.length-before,2,'time budget yields even below record limit
 costly.cancel(); costly.advance();
 assert.equal(applied.length-before,2,'superseded revision cannot add later records');
 
+// Cheap records should use the frame budget rather than force a long sequence
+// of almost-empty frames. Costly records still yield at the same time limit.
+let clock = 0, cheapApplied = 0;
+function* cheapRecords(){ for(let i=0;i<2200;i++){cheapApplied++; clock+=.1; yield;} }
+const timed = createSceneLoad(cheapRecords(),()=>{}, {now:()=>clock});
+timed.advance();
+assert.ok(cheapApplied >= 59 && cheapApplied <= 61, 'cheap work uses the six-millisecond budget');
+assert.ok(timed.pending, 'a full-size model still paints a real partial board');
+const heldCount=cheapApplied;
+timed.hold(true); timed.advance();
+assert.equal(cheapApplied,heldCount);
+timed.hold(false);
+while(timed.pending)timed.advance();
+assert.equal(cheapApplied,2200);
+
 const hud = {};
 renderModelStatusElement(hud,{model:null,streamState:'connecting',loading:true});
 assert.match(hud.textContent,/loading.*incomplete/);
