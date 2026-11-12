@@ -133,3 +133,42 @@ class RetiredActivityTest(unittest.TestCase):
             self.assertIsNone(service.cycle)
             self.assertEqual(800000, service.snapshot()['items'][0]['latestActivityAt'])
             self.assertNotIn(('turns', 'agent s_author'), service.model.inventories)
+
+    def test_retired_turn_notice_folds_and_session_reappearance_rereads(self):
+        with patch('atc_service.now_ms', return_value=1000000):
+            gateway = self.gateway(True)
+            service = self.load(gateway)
+            gateway.calls.clear()
+            for resource in ('messages', 'wakes'):
+                self.assertFalse(service.change(dict(resource=resource,
+                    refs={'sessionKey': 'agent s_author'}, payload={})))
+            self.assertEqual([], gateway.calls)
+            gateway.rows['turns', 'agent s_author'][0]['endedAt'] = 800000
+            service.change(dict(resource='turns', refs={'sessionKey': 'agent s_author', 'seq': 1},
+                                payload={'sessionKey': 'agent s_author'}))
+            self.drain(service)
+            service._publish()
+            self.assertEqual(800000, service.snapshot()['items'][0]['latestActivityAt'])
+            self.assertNotIn(('turns', 'agent s_author'), service.model.inventories)
+            gateway.rows['sessions', None][0]['state'] = 'active'
+            gateway.rows['assignments', None][0]['state'] = 'open'
+            gateway.calls.clear()
+            service.rebuild(recovery=True)
+            self.drain(service)
+            service._publish()
+            self.assertEqual(1, len(service.snapshot()['agents']))
+            self.assertIn(('read', 'turns', 'agent s_author'), gateway.calls)
+            fresh = self.load(gateway)
+            self.assertEqual(fresh.snapshot()['items'], service.snapshot()['items'])
+            self.assertEqual(fresh.snapshot()['agents'], service.snapshot()['agents'])
+
+    def test_reconnect_catches_retired_activity_missed_during_outage(self):
+        with patch('atc_service.now_ms', return_value=1000000):
+            gateway = self.gateway(True)
+            service = self.load(gateway)
+            service._handle('lost', 'test outage')
+            gateway.rows['turns', 'agent s_author'][0]['endedAt'] = 900000
+            service._handle('ready', {'version': '0.1.11', 'build': 1, 'sha': 'test'})
+            self.drain(service)
+            service._publish()
+            self.assertEqual(900000, service.snapshot()['items'][0]['latestActivityAt'])

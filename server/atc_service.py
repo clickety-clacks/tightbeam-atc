@@ -1007,6 +1007,8 @@ class LiveService:
                 # Partial late reads carry positive facts, but cannot certify
                 # the final activity of the retired holder.
                 self.retired_activity_marker = None
+                if job[:2] in self.model.inventories:
+                    self.model.inventories[job[:2]].invalidate()
                 self._ensure_retired_activity()
             self.reads.epochs.pop(job[:2], None)
             self.read_retries.pop(job, None)
@@ -1240,6 +1242,15 @@ class LiveService:
             scope = payload.get("sessionKey") or refs.get("sessionKey")
         else:
             scope = None
+        if (resource in {"turns", "wakes", "messages"} and scope is not None
+                and self.model.inventory("sessions").complete
+                and self.model.inventory("assignments").complete
+                and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
+            linked = any(row.get("holderKey") == scope and row.get("workItemId") in
+                         self.model.inventory("work-items").rows for row in
+                         self.model.inventory("assignments").rows.values())
+            if resource != "turns" or not linked:
+                return False
         if resource in {"attests", "turns", "wakes", "messages"} and not scope:
             self.correlation_gaps.add((normalized, key))
             # No global scan for an actual correlation gap. Messages have no
@@ -1321,11 +1332,14 @@ class LiveService:
             self.policies = policies_for(value)
             self.payload_warning = payload_policy_warning(value)
             self.rebuild(resume=self.cycle is not None)
+            self._ensure_retired_activity()
         elif kind == "lost":
             was_connected = self.connected
             self.connected = False
             changed = self._state("stale", value) or was_connected
             if was_connected:
+                if self.model.retired_item_activity:
+                    self.retired_activity_marker = None
                 self.model.mark_unconfirmed(now_ms())
                 # Reject only snapshots already in flight. Completed scopes
                 # retain their data and completion credit, with the outage
