@@ -79,7 +79,9 @@ class EvidenceModel:
         # visible; publication will transfer their maxima before releasing them.
         unread = tuple(session for session in sessions
                        if not (self.inventories.get(("turns", session))
-                               and self.inventories["turns", session].complete))
+                               and self.inventories["turns", session].complete
+                               and not self.inventories["turns", session].stale
+                               and self.inventories["turns", session].unconfirmed_since is None))
         return marker, unread, assignment_items
 
     def fold_retired_activity(self, activity):

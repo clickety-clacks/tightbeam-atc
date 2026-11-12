@@ -793,6 +793,8 @@ class LiveService:
         bounded history scopes. A collection establishes absence only after
         every page succeeds.
         """
+        if recovery and not resume:
+            self.retired_activity_marker = None
         if self.cycle is not None:
             if recovery:
                 self.cycle["mode"] = "recovery"
@@ -1001,6 +1003,11 @@ class LiveService:
                     fold.add(result.rows)
                     activity = fold.activity
                 self.model.fold_retired_activity(activity)
+            if not result.complete:
+                # Partial late reads carry positive facts, but cannot certify
+                # the final activity of the retired holder.
+                self.retired_activity_marker = None
+                self._ensure_retired_activity()
             self.reads.epochs.pop(job[:2], None)
             self.read_retries.pop(job, None)
             self.retry_in_flight.discard(job)
@@ -1282,6 +1289,8 @@ class LiveService:
                 self._state("stale", "change missing primary reference")
         if resource == "sessions" and applied:
             self._discover_histories()
+        if resource in {"sessions", "assignments", "work-items"} and applied:
+            self._ensure_retired_activity()
         if resource == "attests":
             assignment = self.model.inventory("assignments").rows.get(str(scope))
             # Completion can close the holder, and a review verdict can settle

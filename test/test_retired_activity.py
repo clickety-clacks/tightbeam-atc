@@ -1,4 +1,7 @@
 """Retired holders retain item facts without retaining session histories."""
+import json
+import shutil
+import subprocess
 import sys
 import time
 import unittest
@@ -76,3 +79,57 @@ class RetiredActivityTest(unittest.TestCase):
             self.assertEqual(800000, item['finishedAt'])
             self.assertFalse(item['finishedAtApproximate'])
             self.assertNotIn(('read', 'turns', 'agent s_unlinked'), gateway.calls)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for viewer tests')
+    def test_published_item_outside_browser_window_keeps_retired_activity(self):
+        now = 40 * 86400000
+        with patch('atc_service.now_ms', return_value=now):
+            gateway = self.gateway(False)
+            warm = self.load(gateway)
+            gateway.rows['sessions', None][0]['state'] = 'retired'
+            warm.rebuild(recovery=True)
+            self.drain(warm)
+            warm._publish()
+            cold = self.load(self.gateway(True))
+            self.assertEqual(warm.snapshot()['items'], cold.snapshot()['items'])
+            item = cold.snapshot()['items'][0]
+            self.assertEqual(700000, item['latestActivityAt'])
+            self.assertEqual(700000, item['finishedAt'])
+            root = Path(__file__).resolve().parents[1]
+            result = subprocess.run([shutil.which('node'), '--input-type=module', '-e',
+                "import {itemInWindow} from './web/work-item-window.mjs';"
+                "const item=JSON.parse(process.argv[1]);"
+                "console.log(JSON.stringify([1,30].map(days=>itemInWindow(item,days,Number(process.argv[2])))));",
+                json.dumps(item), str(now)], cwd=root, capture_output=True, text=True, check=True)
+            self.assertEqual([False, False], json.loads(result.stdout))
+            self.assertEqual([], cold.snapshot()['agents'])
+            self.assertNotIn(('turns', 'agent s_author'), cold.model.inventories)
+
+    def test_recovery_refreshes_retired_item_activity(self):
+        with patch('atc_service.now_ms', return_value=1000000):
+            gateway = self.gateway(True)
+            service = self.load(gateway)
+            gateway.rows['turns', 'agent s_author'][0]['endedAt'] = 900000
+            service.rebuild(recovery=True)
+            self.drain(service)
+            service._publish()
+            self.assertEqual(900000, service.snapshot()['items'][0]['latestActivityAt'])
+            self.assertEqual(900000, service.snapshot()['items'][0]['finishedAt'])
+
+    def test_partial_retired_history_retries_without_claiming_complete(self):
+        with patch('atc_service.now_ms', return_value=1000000):
+            gateway = self.gateway(True)
+            gateway.partial.add(('turns', 'agent s_author'))
+            service = self.load(gateway)
+            self.assertIsNotNone(service.cycle)
+            self.assertIn(('retired-turns', None, None), service.read_retries)
+            self.assertEqual(700000, service.snapshot()['items'][0]['latestActivityAt'])
+            gateway.partial.clear()
+            gateway.rows['turns', 'agent s_author'][0]['endedAt'] = 800000
+            service.read_retries['retired-turns', None, None] = (0, 0)
+            service._retry_incomplete_reads()
+            self.drain(service)
+            service._publish()
+            self.assertIsNone(service.cycle)
+            self.assertEqual(800000, service.snapshot()['items'][0]['latestActivityAt'])
+            self.assertNotIn(('turns', 'agent s_author'), service.model.inventories)
