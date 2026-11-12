@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import {readFileSync} from 'node:fs';
 import {createSceneLoad} from '../web/render-loop.mjs';
 import {renderModelStatusElement} from '../web/viewer-semantics.mjs';
 
@@ -39,3 +41,19 @@ assert.doesNotMatch(hud.textContent,/1 agents/,'partial board never advertises a
 renderModelStatusElement(hud,{model,streamState:'connected',loading:false},1000);
 assert.doesNotMatch(hud.textContent,/loading/);
 assert.match(hud.textContent,/1 agents/);
+
+// Opening camera fitting uses the same status chrome as the full loader,
+// without ever drawing that temporary measurement state or losing freshness.
+const page=readFileSync(new URL('../web/index.html',import.meta.url),'utf8');
+const poseCode=page.slice(page.indexOf('function firstModelPose('),page.indexOf('function flyTo('));
+const status={textContent:'stale · loading board (incomplete)',className:'stale',title:'loading'};
+const original={...status};
+const c=vm.createContext({document:{getElementById:()=>status},renderModelStatusElement,
+  openingFrameStatus:{model:null,streamState:'connecting'},
+  restingPose:()=>({fitStatus:status.textContent})});
+vm.runInContext(poseCode,c);
+assert.deepEqual(JSON.parse(JSON.stringify(c.firstModelPose(0))),{fitStatus:'connecting to live model…'});
+assert.deepEqual(status,original,'measurement restores the visible incomplete status');
+c.restingPose=()=>{throw new Error('fit failed');};
+assert.throws(()=>c.firstModelPose(0),/fit failed/);
+assert.deepEqual(status,original,'failed fit also restores the status');

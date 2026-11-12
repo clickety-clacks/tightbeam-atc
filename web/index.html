@@ -440,6 +440,7 @@ layerCards.addEventListener('click', ev => {
 renderLayerCards();
 
 let firstBoardComplete = false, firstLoadTask = null, firstLoadHeld = false;
+let openingFrameStatus = null;
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
 let streamState = 'connecting', streamError = null, startupWarning = null,
     modelEventSource = null, resyncTimer = null, startupStatusChecked = false,
@@ -593,6 +594,17 @@ function restingPose(ang){
     .multiplyScalar(Math.cos(.42)).setY(Math.sin(.42)).normalize();
   const {camPos, target} = frameTo(pts, homeTarget(), e);
   return {pos: camPos, target};
+}
+function firstModelPose(ang){
+  // The synchronous loader fitted before replacing its connecting status.
+  // Measure that same chrome for the opening pose, then restore the current
+  // loading status in this turn, before any frame can be drawn.
+  const el = document.getElementById('mode');
+  const saved = {textContent:el.textContent, className:el.className, title:el.title};
+  try {
+    renderModelStatusElement(el, openingFrameStatus);
+    return restingPose(ang);
+  } finally { Object.assign(el, saved); }
 }
 function flyTo(pos, target, after){
   flight = {p0:camera.position.clone(), p1:pos.clone(),
@@ -2296,6 +2308,9 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFir
     ? shouldAcceptSnapshot(model, lastModel) : shouldAcceptModel(model, lastModel);
   if (!acceptedByOrder && !(rebuildFirst && !firstBoardComplete && model.generation === DATA?.generation && model.revision === DATA?.revision)) return false;
   const previous = DATA, previousSignature = lastSceneSignature;
+  if (!previous && !openingFrameStatus){
+    openingFrameStatus = {model:null, streamState, streamError, startupWarning};
+  }
   const previousSamples = agentSamples;
   const previousEvidencePages = new Map(itemEvidencePages);
   const previousEvidenceNotices = new Map(itemEvidenceNotices);
@@ -2330,10 +2345,6 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFir
       sceneChanged = nextSignature !== previousSignature;
       const firstModel = previousSignature === null;
       const finishScene = () => {
-        // All scene records now exist. Fit against the completed HUD, whose
-        // height determines the available camera rectangle, before drawing.
-        firstBoardComplete = true;
-        renderModelStatus();
         if (sceneChanged){
           migrateViewKeys();
           applyView({preserveCamera:!firstModel || userMoved || view.selection.size > 0});
@@ -2344,7 +2355,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFir
       /* The opening frame is chosen once, only if the viewer has not already
          moved. Later model events never recenter or alter the camera. */
       if (firstModel && view.framing==='none' && !userMoved && !view.selection.size && !flight && !orbitUserOwned){
-        const home = restingPose(Math.atan2(camera.position.x, camera.position.z));
+        const home = firstModelPose(Math.atan2(camera.position.x, camera.position.z));
         camera.position.copy(home.pos);
         orbitTgt.copy(home.target);
         const d = home.pos.clone().sub(home.target);
@@ -2360,6 +2371,9 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFir
         deferredSceneSyncError = null;
       }
       pendingSceneRollbackView = null;
+        firstBoardComplete = true;
+        openingFrameStatus = null;
+        renderModelStatus();
       };
       if (!firstBoardComplete){
         firstLoadTask?.cancel();
