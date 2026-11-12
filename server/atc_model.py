@@ -557,7 +557,8 @@ class EvidenceModel:
         for item in self.work_items().values():
             summary = (self.item_assignment_summary.get(item["id"])
                        if item["id"] in self.item_assignment_pending else item)
-            if summary is not None and "holders" in summary:
+            if summary is not None and (item["id"] in self.item_assignment_pending
+                                        or has_work_item_summary(summary)):
                 holders.update(summary["holders"])
         return [s for s in self.inventory("sessions").rows.values()
                 if s.get("state") == "active" or s["sessionKey"] in holders]

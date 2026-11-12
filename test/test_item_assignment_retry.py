@@ -244,3 +244,14 @@ class ItemAssignmentRetryTest(unittest.TestCase):
         self.assertNotIn('work', service.model.item_assignment_summary)
         self.assertNotIn(('item-assignment-source', 'work', None), service.read_retries)
 
+    def test_partial_summary_does_not_replace_assignment_holder_evidence(self):
+        gateway = ItemReads()
+        gateway.rows['work-items', None][0]['holders'] = None
+        service = self.service(gateway)
+        self.assertEqual({'author', 'other'},
+                         {row['sessionKey'] for row in service.current['agents']})
+        before = self.facts(service)
+        self.partial(service, {'first'})
+        self.settle(service)
+        self.assertEqual(before, self.facts(service))
+
