@@ -433,10 +433,13 @@ class EvidenceModel:
         for resource, session in released:
             if resource == "turns":
                 self.release_turn_activity(session, at)
-                for aid, activity_at in self.summary(resource, session)["assignmentActivity"].items():
+                turn_summary = self.summary(resource, session)
+                for aid, activity_at in turn_summary["assignmentActivity"].items():
                     wid = assignments.get(aid, {}).get("workItemId")
                     if wid:
                         activity[wid] = max(activity.get(wid, 0), activity_at)
+                for wid, activity_at in turn_summary["jobRefActivity"].items():
+                    activity[wid] = max(activity.get(wid, 0), activity_at)
         self.fold_retired_activity(activity)
         for key in released:
             del self.inventories[key]
@@ -1356,8 +1359,11 @@ class EvidenceModel:
                 activity.update(self.retired_item_activity)
                 for resource, scope in self.inventories:
                     if resource == "turns":
-                        for aid, at in self.summary(resource, scope)["assignmentActivity"].items():
+                        turn_summary = self.summary(resource, scope)
+                        for aid, at in turn_summary["assignmentActivity"].items():
                             record(assignments.rows.get(aid, {}).get("workItemId"), at)
+                        for wid, at in turn_summary["jobRefActivity"].items():
+                            record(wid, at)
             self._item_activity_parts[group] = revision, activity
         if changed:
             combined = {}

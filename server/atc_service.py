@@ -1829,6 +1829,8 @@ class LiveService:
                         wid = mapping.get(aid)
                         if wid:
                             activity[wid] = max(activity.get(wid, 0), at)
+                    for wid, at in result.folded.summary["jobRefActivity"].items():
+                        activity[wid] = max(activity.get(wid, 0), at)
                 else:
                     fold = ItemActivityFold(mapping)
                     fold.add(result.rows)

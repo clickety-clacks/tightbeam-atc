@@ -30,7 +30,8 @@ def summarize(resource, rows, *, into=None, now=None):
     """
     result = into if into is not None else {"count": 0, "kinds": Counter(), "verdicts": Counter(), "latest": {},
               "authors": {}, "refs": [], "activity": None,
-              "live": [], "marks": [], "recentActivity": None, "assignmentActivity": {}}
+              "live": [], "marks": [], "recentActivity": None, "assignmentActivity": {},
+              "jobRefActivity": {}}
     for row in rows:
         result["count"] += 1
         if resource == "attests":
@@ -71,12 +72,19 @@ def summarize(resource, rows, *, into=None, now=None):
             times = []
         recent_times = ([row.get(k) for k in ("endedAt", "startedAt", "createdAt")]
                         if resource == "turns" else times)
-        if resource == "turns" and row.get("assignmentId"):
+        if resource == "turns":
             recorded = [at for at in recent_times if isinstance(at, (int, float))]
             if recorded:
-                aid = row["assignmentId"]
-                result["assignmentActivity"][aid] = max(
-                    result["assignmentActivity"].get(aid, 0), *recorded)
+                if row.get("assignmentId"):
+                    aid = row["assignmentId"]
+                    result["assignmentActivity"][aid] = max(
+                        result["assignmentActivity"].get(aid, 0), *recorded)
+                elif row.get("jobRef"):
+                    # A canonical item link contributes activity without
+                    # implying an assignment or an attached agent.
+                    wid = row["jobRef"]
+                    result["jobRefActivity"][wid] = max(
+                        result["jobRefActivity"].get(wid, 0), *recorded)
         for at in recent_times:
             if isinstance(at, (int, float)):
                 result["recentActivity"] = max(result["recentActivity"] or 0, at)
@@ -148,12 +156,12 @@ class HistoryFold:
                 # A terminal observation can settle a previously live turn,
                 # including on a partial read. Its prompt is not board state.
                 self.rows[str(row[key])] = {k: row[k] for k in (
-                    "seq", "sessionKey", "assignmentId", "wakeId", "createdAt",
+                    "seq", "sessionKey", "assignmentId", "jobRef", "wakeId", "createdAt",
                     "startedAt", "endedAt", "rowVersion") if k in row}
 
 
 class ItemActivityFold:
-    """The item attribution used by turn summaries, without a turn inventory."""
+    """Fold assignment-linked and jobRef-only activity without turn history."""
 
     def __init__(self, assignment_items):
         self.assignment_items = assignment_items
@@ -161,7 +169,8 @@ class ItemActivityFold:
 
     def add(self, rows):
         for row in rows:
-            wid = self.assignment_items.get(row.get("assignmentId"))
+            aid = row.get("assignmentId")
+            wid = self.assignment_items.get(aid) if aid else row.get("jobRef")
             if wid is None:
                 continue
             times = [row.get(key) for key in ("createdAt", "startedAt", "endedAt")]

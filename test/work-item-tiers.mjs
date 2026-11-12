@@ -164,6 +164,16 @@ const ages = prepareWorkTierLayout(ageItems,treeAgents.slice(0,7),2.2,now);
 const radii = ageItems.map(w=>Math.hypot(...Object.values(ages.perimeterPositions.get(w.id))));
 for(let i=1;i<5;i++) assert.ok(radii[i]>radii[i-1]);
 assert.ok(Math.abs(radii[4]-radii[5])<1e-8);
+const jobRefOrphan = openItem('jobref-only',{latestActivityAt:now-20*86400000});
+const jobRefOld = prepareWorkTierLayout([jobRefOrphan],treeAgents.slice(0,7),2.2,now);
+const jobRefRecent = prepareWorkTierLayout([
+  {...jobRefOrphan,latestActivityAt:now-86400000},
+],treeAgents.slice(0,7),2.2,now);
+assert.equal(jobRefOld.placements.get('jobref-only').tier,'perimeter');
+assert.equal(jobRefRecent.placements.get('jobref-only').tier,'perimeter',
+  'recent jobRef activity moves an unattached open item inward without removing it from the ring');
+assert.ok(Math.hypot(...Object.values(jobRefRecent.perimeterPositions.get('jobref-only')))
+  < Math.hypot(...Object.values(jobRefOld.perimeterPositions.get('jobref-only'))));
 const more = prepareWorkTierLayout([...ageItems,openItem('extra')],treeAgents.slice(0,7),2.2,now);
 assert.equal(ages.outerRadius,more.outerRadius);
 const landed = openItem('landed',{merged:true});

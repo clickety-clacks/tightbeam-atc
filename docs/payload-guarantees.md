@@ -168,7 +168,8 @@ through the read-only `work-item-trace` command; its `causal_event` entries incl
 ATC requests that optional read for closed/iceboxed items when their recorded
 version changes. The latest matching disposition supplies an exact finish time.
 A missing, unavailable or mismatching transition uses the latest recorded item,
-assignment, attributed turn, attest or artifact activity, explicitly approximate.
+assignment, assignment-linked or jobRef-only turn, attest or artifact activity,
+explicitly approximate.
 Trace reads are limited to items whose `rowVersion` could fall within the maximum
 30-day window: every disposition advances that version, so an older version is a
 safe upper bound. Missing or invalid versions remain eligible. Activity maxima
