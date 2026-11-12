@@ -86,11 +86,41 @@ class EvidenceModel:
             return inventory.rows.get(wid) == row
         return self.older_items[wid]["fingerprint"] == self.item_fingerprint(row)
 
+    def payload_work_item(self, row, *, at, source, policy):
+        inventory = self.inventory("work-items")
+        wid = str(row["id"])
+        same = self.same_work_item(wid, row)
+        older = self.older_items.get(wid) if wid not in inventory.rows else None
+        if older is not None:
+            version, previous = row.get("rowVersion"), older["fields"].get("rowVersion")
+            if policy != "strict-version" or not isinstance(version, int) or not isinstance(previous, int):
+                return False
+            if version < previous:
+                return True
+            if version == previous:
+                if not same:
+                    inventory.invalidate()
+                    return False
+                older["observation"] = ("known", "live", at, source, True)
+                inventory.data_revision += 1
+                return True
+        before = inventory.rows.get(wid)
+        if not inventory.payload(row, at=at, source=source, policy=policy):
+            return False
+        # Inventory accepts an ignored older version without changing its row.
+        if inventory.rows.get(wid) is before:
+            return True
+        self.older_items.pop(wid, None)
+        if wid not in self._work_item_order:
+            self._work_item_order.append(wid)
+        if not same:
+            self.details_revision += 1
+        return True
+
     def fold_older_work_items(self):
         """Release older source rows while keeping the full board's inputs.
 
-        Service integration must provide on-demand source detail before calling
-        this after publication; a compact item is not a full detail response.
+        Called after publication; a compact item is not a full detail response.
         """
         inventory = self.inventory("work-items")
         if not self.older_item_sources_released:

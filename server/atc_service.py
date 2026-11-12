@@ -244,9 +244,23 @@ class LiveService:
             if generation is not None and (generation != self.generation or revision != self.revision):
                 return 409, {"error": "revision-mismatch", **pin}
             work = self.model.inventory("work-items")
-            item = work.rows.get(item_id)
+            item = self.model.work_items().get(item_id)
             if item is None:
                 return (404 if work.complete else 503), {"error": "item-unavailable", **pin}
+            if item_id in self.model.older_items and item_id not in work.rows:
+                result = self.gateway.detail("work-items", item_id)
+                if (not result.complete or len(result.rows) != 1
+                        or result.rows[0].get("id") != item_id):
+                    return 503, {"error": "item-unavailable", **pin}
+                if not self.model.same_work_item(item_id, result.rows[0]):
+                    # Do not publish new source text under an old detail pin or
+                    # leave request-only rows in the model queue. Its existing
+                    # detail read will reconcile before the caller retries.
+                    self._dirty = True
+                    self.events.put(("detail-item-reload", item_id))
+                    return 409, {"error": "revision-mismatch", **pin}
+                item = result.rows[0]
+                del result
             assignments = self.model.inventory("assignments")
             owned = [a for a in assignments.rows.values() if a.get("workItemId") == item_id]
             from heapq import nsmallest
@@ -530,6 +544,7 @@ class LiveService:
         if comparison == self._comparison and self.model.details_revision == self._published_details:
             self._release_retired_histories()
             self.model.release_auxiliary_sources()
+            self.model.fold_older_work_items()
             return False
         previous = self.current
         base_revision = self.revision
@@ -558,6 +573,7 @@ class LiveService:
             self.condition.notify_all()
         self._release_retired_histories()
         self.model.release_auxiliary_sources()
+        self.model.fold_older_work_items()
         return True
 
     def _release_retired_histories(self):
@@ -685,7 +701,7 @@ class LiveService:
 
     def _history_scopes(self):
         summary_active = self._summary_contract_active()
-        work_items = self.model.inventory("work-items").rows
+        work_items = self.model.work_items()
         attest_scopes = []
         for assignment in self.model.inventory("assignments").rows.values():
             item = work_items.get(assignment.get("workItemId"))
@@ -745,7 +761,7 @@ class LiveService:
             return True
         if isinstance(self.version, dict) and self.version.get("version") is not None:
             return False
-        rows = self.model.inventory("work-items").rows.values()
+        rows = self.model.work_items().values()
         rows = list(rows)
         return bool(rows) and all(has_work_item_summary(row) for row in rows)
 
@@ -831,7 +847,7 @@ class LiveService:
     def _reconcile_work_item_attests(self):
         if not self._summary_contract_active():
             return
-        for item in self.model.inventory("work-items").rows.values():
+        for item in self.model.work_items().values():
             self._reconcile_item_attests(item)
 
     def _read_diagnostics(self):
@@ -1360,7 +1376,7 @@ class LiveService:
                 self.rebuild(recovery=True)
                 return True
             linked = any(row.get("holderKey") == scope and row.get("workItemId") in
-                         self.model.inventory("work-items").rows for row in
+                         self.model.work_items() for row in
                          self.model.inventory("assignments").rows.values())
             if resource != "turns" or not linked:
                 return False
@@ -1387,20 +1403,24 @@ class LiveService:
                 and str(payload.get(inventory.key)) == str(key)):
             row = attest_row(payload) if resource == "attests" else payload
             previous = inventory.rows.get(str(row[inventory.key]))
-            applied = inventory.payload(row, at=now_ms(), source="feed:" + notice["class"],
-                                        policy=policy)
+            if resource == "work-items":
+                applied = self.model.payload_work_item(
+                    row, at=now_ms(), source="feed:" + notice["class"], policy=policy)
+            else:
+                applied = inventory.payload(row, at=now_ms(), source="feed:" + notice["class"],
+                                            policy=policy)
             if applied:
                 self.metrics["payloads"] += 1
-                if resource in {"work-items", "attests"} and previous != inventory.rows.get(str(row[inventory.key])):
+                if resource == "attests" and previous != inventory.rows.get(str(row[inventory.key])):
                     self.model.details_revision += 1
                 if resource == "work-items":
-                    self._reconcile_item_attests(inventory.rows[str(row[inventory.key])])
+                    self._reconcile_item_attests(self.model.work_items()[str(row[inventory.key])])
         if not applied:
             if resource == "roles":
                 self._refresh(normalized, scope)
             elif resource == "attests":
                 assignment = self.model.inventory("assignments").rows.get(str(scope))
-                item = (self.model.inventory("work-items").rows.get(assignment.get("workItemId"))
+                item = (self.model.work_items().get(assignment.get("workItemId"))
                         if assignment else None)
                 if (not self._summary_contract_active()
                         or not has_work_item_summary(item or {})
@@ -1473,6 +1493,9 @@ class LiveService:
             return changed
         elif kind == "read":
             return self._read_done(value)
+        elif kind == "detail-item-reload":
+            self.reads.touch("work-items", None)
+            self._refresh("work-items", key=value)
         elif kind == "detail-history":
             scope, epoch, result = value
             if (self.model.closed_sources_released
