@@ -29,7 +29,7 @@ class EvidenceModel:
         self.details_revision = 0
         self.recent_expiries = {}
         self.summaries = {}
-        self._item_activity_versions = None
+        self._item_activity_parts = {}
         self._item_activity = {}
 
     def summary(self, resource, scope):
@@ -95,37 +95,54 @@ class EvidenceModel:
         return [ref for attest in attests for ref in (attest.get("commitRefs") or [])]
 
     def item_activity(self):
-        # Revision keys include scoped inventories and feed payload mutations.
-        # Cache only the per-item maximum, not copies of historical rows.
-        def versions():
-            return tuple((key, inventory.data_revision)
-                         for key, inventory in self.inventories.items()
-                         if key[0] in {"assignments", "attests", "artifacts", "turns"})
-
-        if self._item_activity_versions == versions():
-            return self._item_activity
+        # Keep independently changing histories separate: a turn must not make
+        # publication rescan all artifacts or assignments. Revision checks also
+        # cover direct feed payload updates and complete-inventory removals.
+        versions = {"assignments": [], "artifacts": [], "turns": []}
+        for key, inventory in self.inventories.items():
+            resource = key[0]
+            if resource in {"assignments", "attests"}:
+                versions["assignments"].append((key, inventory.data_revision))
+            if resource in {"artifacts", "turns"}:
+                versions[resource].append((key, inventory.data_revision))
         assignments = self.inventory("assignments")
-        item_activity = {}
-        def record_activity(wid, *times):
-            if wid:
-                item_activity[wid] = latest_time(item_activity.get(wid), *times)
-
-        for assignment in assignments.rows.values():
-            record_activity(assignment.get("workItemId"), assignment.get("openedAt"),
-                            assignment.get("closedAt"),
-                            self.summary("attests", assignment["id"])["activity"])
-        for (resource, _scope), inventory in self.inventories.items():
-            if resource == "artifacts":
-                for row in inventory.rows.values():
-                    record_activity(row.get("workItemId"), row.get("createdAt"), row.get("updatedAt"))
-            elif resource == "turns":
-                for aid, at in self.summary(resource, _scope)["assignmentActivity"].items():
-                    record_activity(assignments.rows.get(aid, {}).get("workItemId"), at)
-
-        self._item_activity = item_activity
-        # Summarizing an assignment can create its initially empty attest scope.
-        self._item_activity_versions = versions()
-        return item_activity
+        versions["turns"].append((("assignments", None), assignments.data_revision))
+        changed = False
+        for group, revision in versions.items():
+            cached = self._item_activity_parts.get(group)
+            if cached is not None and cached[0] == revision:
+                continue
+            changed = True
+            activity = {}
+            def record(wid, *times):
+                if wid:
+                    activity[wid] = latest_time(activity.get(wid), *times)
+            if group == "assignments":
+                for assignment in assignments.rows.values():
+                    record(assignment.get("workItemId"), assignment.get("openedAt"),
+                           assignment.get("closedAt"),
+                           self.summary("attests", assignment["id"])["activity"])
+                # Missing attest scopes are created by summary on first use.
+                revision = [(key, inv.data_revision) for key, inv in self.inventories.items()
+                            if key[0] in {"assignments", "attests"}]
+            elif group == "artifacts":
+                for (resource, _scope), inventory in self.inventories.items():
+                    if resource == "artifacts":
+                        for row in inventory.rows.values():
+                            record(row.get("workItemId"), row.get("createdAt"), row.get("updatedAt"))
+            else:
+                for resource, scope in self.inventories:
+                    if resource == "turns":
+                        for aid, at in self.summary(resource, scope)["assignmentActivity"].items():
+                            record(assignments.rows.get(aid, {}).get("workItemId"), at)
+            self._item_activity_parts[group] = revision, activity
+        if changed:
+            combined = {}
+            for _revision, activity in self._item_activity_parts.values():
+                for wid, at in activity.items():
+                    combined[wid] = latest_time(combined.get(wid), at)
+            self._item_activity = combined
+        return self._item_activity
 
     def snapshot(self, now):
         self.next_expiry = None

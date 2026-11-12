@@ -92,7 +92,12 @@ class ModelTest(unittest.TestCase):
         for _ in range(20):
             self.assertIs(cached, self.model.item_activity())
         self.assertEqual(visited, (artifacts.rows.visits, assignments.rows.visits))
-        self.assertEqual(10000, self.model.snapshot(20000)["items"][0]["latestActivityAt"])
+        # Frequent turn changes must not evict unrelated historical maxima.
+        for n in range(5):
+            self.read("turns", [{"seq": n, "assignmentId": "assignment", "endedAt": 20000+n}], "other")
+            self.assertEqual(20000+n, self.model.item_activity()["work"])
+        self.assertEqual(visited, (artifacts.rows.visits, assignments.rows.visits))
+        self.assertEqual(20004, self.model.snapshot(20000)["items"][0]["latestActivityAt"])
         self.assertEqual(visited[0], artifacts.rows.visits, "publication reuses artifact activity")
 
     def test_current_failure_records_never_invent_acceptance(self):
