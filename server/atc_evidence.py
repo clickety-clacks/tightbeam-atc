@@ -266,6 +266,7 @@ class HistoryInventory(Inventory):
             previous["live"] = current["live"]
             if self.resource in {"messages", "wakes"}:
                 marks = {str(row[self.key]): row for row in previous["marks"]}
+                marks.update((str(row[self.key]), row) for row in fold.summary["marks"])
                 marks.update((str(row[self.key]), row) for row in current["marks"])
                 field = "at" if self.resource == "messages" else "firedAt"
                 previous["marks"] = sorted(marks.values(), key=lambda row: row[field], reverse=True)
@@ -284,7 +285,11 @@ class HistoryInventory(Inventory):
         self.raw_expiry = None
         timestamp = HISTORY_TIMES[self.resource]
         for key, row in list(self.rows.items()):
-            if key in self.keep_ids:
+            if self.resource == "wakes" and key in self.keep_ids:
+                self.rows[key] = {k: row[k] for k in (
+                    "wakeId", "sessionKey", "creatorSessionKey", "state", "firedAt",
+                    "rowVersion") if k in row}
+                self.observations.pop(key, None)
                 continue
             at = row.get(timestamp)
             if isinstance(at, (int, float)) and at + 60_000 > now:

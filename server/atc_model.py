@@ -51,6 +51,8 @@ class EvidenceModel:
         return self.inventories[key]
 
     def current_ids(self, resource, scope):
+        if resource == "turns":
+            return {str(turn["seq"]) for turn in self.summary("turns", scope)["live"]}
         if resource != "wakes":
             return set()
         return {str(turn["wakeId"]) for turn in self.summary("turns", scope)["live"]

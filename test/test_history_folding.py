@@ -118,3 +118,46 @@ class HistoryFoldingTest(unittest.TestCase):
         model.accept("attests", "task", Read([dict(row, note="changed")], True, 1_000_002, "fixture"))
         self.assertGreater(model.details_revision, before)
         self.assertEqual({}, model.inventory("attests", "task").rows)
+
+    def test_partial_page_can_finish_old_live_turn_without_retaining_payload(self):
+        from atc_model import EvidenceModel
+        from atc_upstream import Read
+        model = EvidenceModel()
+        turn = {"seq": 1, "createdAt": 1, "startedAt": 2, "endedAt": None,
+                "sessionKey": "session", "prompt": "large", "rowVersion": 1}
+        model.accept("turns", "session", Read([turn], True, 1_000_000, "fixture"))
+        model.accept("turns", "session", Read([dict(turn, endedAt=100, rowVersion=2)],
+                                               False, 1_000_001, "fixture"))
+        inventory = model.inventory("turns", "session")
+        self.assertEqual([], inventory.folded["live"])
+        self.assertEqual({}, inventory.rows)
+        self.assertEqual(100, inventory.folded["activity"])
+        self.assertFalse(inventory.complete)
+
+    def test_partial_page_adds_four_minute_mark_without_raw_row(self):
+        from atc_model import EvidenceModel
+        from atc_upstream import Read
+        model = EvidenceModel()
+        model.accept("messages", "session", Read([], True, 1_000_000, "fixture"))
+        model.accept("messages", "session", Read([
+            {"id": "visible", "at": 760_000, "sessionKey": "session", "content": "large"}],
+            False, 1_000_001, "fixture"))
+        inventory = model.inventory("messages", "session")
+        self.assertEqual({}, inventory.rows)
+        self.assertEqual(["visible"], [r["id"] for r in inventory.folded["marks"]])
+        self.assertFalse(inventory.complete)
+
+    def test_recent_wake_required_by_live_turn_drops_payload_immediately(self):
+        from atc_model import EvidenceModel
+        from atc_upstream import Read
+        model = EvidenceModel()
+        model.accept("turns", "session", Read([
+            {"seq": 1, "createdAt": 1, "startedAt": 2, "endedAt": None, "wakeId": "wake"}],
+            True, 1_000_000, "fixture"))
+        model.accept("wakes", "session", Read([
+            {"wakeId": "wake", "createdAt": 999_999, "state": "fired",
+             "firedAt": 999_999, "prompt": "large", "creatorSessionKey": "source"}],
+            True, 1_000_000, "fixture"))
+        inventory = model.inventory("wakes", "session")
+        self.assertNotIn("prompt", inventory.rows["wake"])
+        self.assertEqual({}, inventory.observations)

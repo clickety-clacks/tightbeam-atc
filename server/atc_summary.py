@@ -103,7 +103,6 @@ class HistoryFold:
         resource = self.resource
         key, timestamp = HISTORY_KEYS[resource], HISTORY_TIMES[resource]
         summarize(resource, rows, into=self.summary, now=self.now)
-        live = {str(row["seq"]): row for row in self.summary["live"]}
         for row in rows:
             self.fingerprint.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode())
             self.fingerprint.update(b"\n")
@@ -113,6 +112,10 @@ class HistoryFold:
             elif resource == "wakes" and str(row[key]) in self.keep_ids:
                 self.rows[str(row[key])] = {k: row[k] for k in (
                     "wakeId", "sessionKey", "creatorSessionKey", "state", "firedAt") if k in row}
-            elif resource == "turns" and row.get("endedAt") is None:
-                # The live turn is board state, but its prompt is not.
-                self.rows[str(row[key])] = dict(live[str(row[key])])
+            elif resource == "turns" and (row.get("endedAt") is None
+                                           or str(row[key]) in self.keep_ids):
+                # A terminal observation can settle a previously live turn,
+                # including on a partial read. Its prompt is not board state.
+                self.rows[str(row[key])] = {k: row[k] for k in (
+                    "seq", "sessionKey", "assignmentId", "wakeId", "createdAt",
+                    "startedAt", "endedAt", "rowVersion") if k in row}
