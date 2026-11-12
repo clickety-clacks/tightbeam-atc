@@ -236,6 +236,8 @@ class HistoryInventory(Inventory):
         self.resource = resource
         self.keep_ids = set()
         self.fingerprint = None
+        self.raw_expiry = None
+        self._pruned_keep_ids = None
         self.folded = summarize(resource, ())
 
     def read_fold(self, fold, *, complete, at, source):
@@ -267,15 +269,26 @@ class HistoryInventory(Inventory):
                 marks.update((str(row[self.key]), row) for row in current["marks"])
                 field = "at" if self.resource == "messages" else "firedAt"
                 previous["marks"] = sorted(marks.values(), key=lambda row: row[field], reverse=True)
-        self.prune(at)
+        self.prune(at, force=True)
 
-    def prune(self, now):
+    def prune(self, now, *, force=False):
         from atc_summary import HISTORY_TIMES
+        if (not force and self.keep_ids == self._pruned_keep_ids
+                and (self.raw_expiry is None or self.raw_expiry > now)):
+            if self.resource in {"messages", "wakes"}:
+                field = "at" if self.resource == "messages" else "firedAt"
+                self.folded["marks"][:] = [row for row in self.folded["marks"]
+                                          if row[field] > now - 300_000]
+            return
+        self._pruned_keep_ids = set(self.keep_ids)
+        self.raw_expiry = None
         timestamp = HISTORY_TIMES[self.resource]
         for key, row in list(self.rows.items()):
             if key in self.keep_ids:
                 continue
             at = row.get(timestamp)
+            if isinstance(at, (int, float)) and at + 60_000 > now:
+                self.raw_expiry = min(self.raw_expiry, at + 60_000) if self.raw_expiry is not None else at + 60_000
             if self.resource == "turns" and row.get("endedAt") is None:
                 if not isinstance(at, (int, float)) or at <= now - 60_000:
                     self.rows[key] = {k: row[k] for k in (
@@ -322,5 +335,5 @@ class HistoryInventory(Inventory):
             for aid, when in current["assignmentActivity"].items():
                 self.folded["assignmentActivity"][aid] = max(
                     self.folded["assignmentActivity"].get(aid, 0), when)
-        self.prune(at)
+        self.prune(at, force=True)
         return True

@@ -115,7 +115,7 @@ class HttpTest(unittest.TestCase):
                  "ts": i, "note": "Note " + str(i), "byUser": None, "bySession": None}
                 for i in range(3)]
         from unittest.mock import Mock
-        self.live.gateway = Mock()
+        self.live.gateway = Mock(read_count=0)
         self.live.gateway.read.side_effect = lambda resource, scope: Read(rows, True, 1, "test-read")
         self.live.model.accept("attests", "assignment", Read(rows, True, 1, "test-read"))
         self.live._publish()

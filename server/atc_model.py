@@ -3,7 +3,7 @@
 from collections import Counter, defaultdict
 from copy import deepcopy
 from math import isfinite
-from atc_summary import summarize, recent_marks, HistoryFold, HISTORY_KEYS, HISTORY_TIMES
+from atc_summary import summarize, recent_marks, HistoryFold, HISTORY_KEYS
 
 from atc_evidence import (
     Inventory, HistoryInventory, agent_id, code_state, combined_evidence, evidence_stage, merge_ring,
@@ -26,6 +26,7 @@ class EvidenceModel:
         self.inventories = {}
         self.merges = {}
         self.next_expiry = None
+        self.next_raw_expiry = None
         self.details_revision = 0
         self.recent_expiries = {}
         self.summaries = {}
@@ -176,14 +177,14 @@ class EvidenceModel:
 
     def snapshot(self, now):
         self.next_expiry = None
+        self.next_raw_expiry = None
         for (resource, scope), inventory in list(self.inventories.items()):
             if isinstance(inventory, HistoryInventory):
                 inventory.keep_ids = self.current_ids(resource, scope)
                 inventory.prune(now)
-                for row in inventory.rows.values():
-                    at = row.get(HISTORY_TIMES[resource])
-                    if isinstance(at, (int, float)) and at + 60_000 > now:
-                        self._expires(at + 60_000)
+                if inventory.raw_expiry is not None:
+                    self.next_raw_expiry = (min(self.next_raw_expiry, inventory.raw_expiry)
+                                            if self.next_raw_expiry is not None else inventory.raw_expiry)
         self.recent_expiries = {key: at for key, at in self.recent_expiries.items() if at > now}
         work = self.inventory("work-items")
         assignments = self.inventory("assignments")

@@ -1319,7 +1319,8 @@ class LiveService:
             self.rebuild(recovery=self.metrics["bootstrapReads"] is None)
             self._dirty = True
         at = now_ms()
-        expired = self.model.next_expiry is not None and self.model.next_expiry <= at
+        expired = any(expiry is not None and expiry <= at for expiry in (
+            self.model.next_expiry, self.model.next_raw_expiry))
         merge_retry_at = self._next_merge_retry_at()
         merge_retry_due = merge_retry_at is not None and merge_retry_at <= at
         self._dirty = self._update_backstop(at) or self._dirty or expired or merge_retry_due
@@ -1338,8 +1339,9 @@ class LiveService:
         deadlines = []
         if self.cycle is None:
             deadlines.append(self.last_rebuild + self.rebuild_interval - time.monotonic())
-        if self.model.next_expiry is not None:
-            deadlines.append((self.model.next_expiry - now_ms()) / 1000)
+        for expiry in (self.model.next_expiry, self.model.next_raw_expiry):
+            if expiry is not None:
+                deadlines.append((expiry - now_ms()) / 1000)
         backstop_deadline = self.backstop.deadline(self.model, self.reads, now_ms(), self.connected)
         if backstop_deadline is not None:
             deadlines.append((backstop_deadline - now_ms()) / 1000)
