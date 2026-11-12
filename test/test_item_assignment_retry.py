@@ -255,3 +255,18 @@ class ItemAssignmentRetryTest(unittest.TestCase):
         self.settle(service)
         self.assertEqual(before, self.facts(service))
 
+    def test_complete_item_retry_confirms_item_without_confirming_global_scope(self):
+        service = self.service()
+        original = service.gateway.read
+        def later_read(resource, scope=None):
+            result = original(resource, scope)
+            result.at = 2000
+            return result
+        with patch.object(service.gateway, 'read', side_effect=later_read):
+            self.partial(service, {'first'})
+            self.assertEqual(10, service.model.assignment_evidence('work')['confirmedAt'])
+            self.settle(service)
+        self.assertEqual(2000, service.model.assignment_evidence('work')['confirmedAt'])
+        self.assertFalse(service.model.inventory('assignments').complete)
+        self.assertEqual(10, service.model.inventory('assignments').confirmed_at)
+
