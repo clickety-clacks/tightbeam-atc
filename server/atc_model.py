@@ -36,6 +36,10 @@ class EvidenceModel:
         self._item_activity = {}
         self.retired_item_activity = {}
         self.retired_activity_revision = 0
+        self.closed_items = {}
+        self.closed_revision = 0
+        self.open_assignment_order = {}
+        self.live_assignment_items = {}
 
     def summary(self, resource, scope):
         inventory = self.inventory(resource, scope)
@@ -122,6 +126,12 @@ class EvidenceModel:
     def mark_unconfirmed(self, at):
         for inventory in self.inventories.values():
             inventory.mark_unconfirmed(at)
+        for part in self.closed_items.values():
+            for fact in (part["facts"], *part["authorFacts"].values()):
+                if fact["complete"] and fact.get("unconfirmedSince") is None:
+                    fact["unconfirmedSince"] = at
+                    if fact["freshness"] != "stale":
+                        fact["freshness"] = "unconfirmed"
 
     def release_auxiliary_sources(self):
         for (resource, _scope), inventory in self.inventories.items():
@@ -131,6 +141,92 @@ class EvidenceModel:
                 # The board uses scope completeness, not decision source text.
                 inventory.rows.clear()
                 inventory.observations.clear()
+
+    def fold_closed_assignments(self):
+        """Fold a settled assignment read into per-item board facts."""
+        assignments = self.inventory("assignments")
+        if not assignments.complete or not any(row.get("state") != "open" for row in assignments.rows.values()):
+            return set()
+        grouped = {}
+        self.open_assignment_order = {}
+        live_ids = {turn.get("assignmentId") for resource, scope in self.inventories
+                    if resource == "turns" for turn in self.summary(resource, scope)["live"]}
+        self.live_assignment_items = {aid: wid for aid, wid in self.live_assignment_items.items()
+                                      if aid in live_ids}
+        released = set()
+        for order, (aid, row) in enumerate(assignments.rows.items()):
+            if row.get("state") == "open":
+                self.open_assignment_order[aid] = order
+                continue
+            wid = row.get("workItemId")
+            part = grouped.setdefault(wid, {
+                "count": 0, "closedAt": None, "activity": None,
+                "code": False, "unknownEffect": False, "refs": [],
+                "corrections": [], "summary": summarize("attests", ()),
+                "facts": [], "authorFacts": {},
+            })
+            summary = self.summary("attests", aid)
+            facts = self.inventory("attests", aid).evidence()
+            part["count"] += 1
+            close = row.get("closedAt")
+            if isinstance(close, (int, float)):
+                part["closedAt"] = max(part["closedAt"], close) if part["closedAt"] is not None else close
+            part["activity"] = latest_time(part["activity"], row.get("openedAt"), close, summary["activity"])
+            part["code"] |= row.get("effectKind") in {"code", "release", "live_mutation"}
+            part["unknownEffect"] |= not bool(row.get("effectKind"))
+            corrections = row.get("commitRefCorrections") or []
+            refs = (corrections[-1].get("commitRefs") or []) if corrections else summary["refs"]
+            part["refs"].extend((order, i, ref) for i, ref in enumerate(refs))
+            if not row.get("reviewsAssignmentId"):
+                part["code"] |= bool(refs)
+            part["corrections"].extend((order, i, {k: v for k, v in correction.items()
+                                      if k not in {"reason", "note"}})
+                                      for i, correction in enumerate(corrections))
+            folded = part["summary"]
+            folded["count"] += summary["count"]
+            folded["kinds"].update(summary["kinds"])
+            folded["verdicts"].update(summary["verdicts"])
+            for field in ("latest", "authors"):
+                for key, at in summary[field].items():
+                    folded[field][key] = max(folded[field].get(key, 0), at)
+            folded["authorIds"].update(summary["authorIds"])
+            for author in summary["authorIds"]:
+                existing = part["authorFacts"].get(author)
+                part["authorFacts"][author] = combined_evidence(existing, facts) if existing else combined_evidence(facts)
+            part["facts"].append(facts)
+            if aid in live_ids:
+                self.live_assignment_items[aid] = wid
+            released.add(aid)
+        if not released:
+            return set()
+        for wid, part in grouped.items():
+            part["facts"] = combined_evidence(*part["facts"])
+            self.closed_items[wid] = part
+        # Finished turn attribution becomes item state before its assignment
+        # identity is released; only unfinished turns keep a lookup entry.
+        for resource, scope in tuple(self.inventories):
+            if resource != "turns":
+                continue
+            linked = self.summary(resource, scope)["assignmentActivity"]
+            for aid in tuple(linked):
+                if aid in released:
+                    wid = assignments.rows[aid].get("workItemId")
+                    part = self.closed_items[wid]
+                    part["activity"] = latest_time(part["activity"], linked[aid])
+                    del linked[aid]
+        for aid in released:
+            assignments.rows.pop(aid)
+            assignments.observations.pop(aid, None)
+            self.inventories.pop(("attests", aid), None)
+            self.summaries.pop(("attests", aid), None)
+        self.closed_revision += 1
+        self._item_activity_parts.clear()
+        return {("attests", aid) for aid in released}
+
+    def closed_item(self, wid, owned):
+        # A fresh complete collection supplies replacement source rows. Until
+        # folded, those rows are the contribution, not both them and its prior fold.
+        return self.closed_items.get(wid) if not any(a.get("state") != "open" for a in owned) else None
 
     def accept(self, resource, scope, result):
         inventory = self.inventory(resource, scope)
@@ -150,6 +246,12 @@ class EvidenceModel:
                 self.details_revision += 1
         inventory.read(
             result.rows, complete=result.complete, at=result.at, source=result.source)
+        if resource == "assignments" and result.complete:
+            closed = {row.get("workItemId") for row in result.rows if row.get("state") != "open"}
+            self.closed_items = {wid: part for wid, part in self.closed_items.items() if wid in closed}
+            self.live_assignment_items.clear()
+            self.open_assignment_order.clear()
+            self.closed_revision += 1
 
     def detail(self, resource, scope, result):
         inventory = self.inventory(resource, scope)
@@ -181,6 +283,9 @@ class EvidenceModel:
     def invalidate(self):
         for inventory in self.inventories.values():
             inventory.invalidate()
+        for part in self.closed_items.values():
+            for fact in (part["facts"], *part["authorFacts"].values()):
+                fact["freshness"] = "stale"
 
     def active_sessions(self):
         holders = {a.get("holderKey") for a in self.inventory("assignments").rows.values()
@@ -211,6 +316,7 @@ class EvidenceModel:
             if resource in {"artifacts", "turns"}:
                 versions[resource].append((key, inventory.data_revision))
         assignments = self.inventory("assignments")
+        versions["assignments"].append(("closed-items", self.closed_revision))
         versions["turns"].append((("assignments", None), assignments.data_revision))
         versions["turns"].append((("retired-item-activity", None), self.retired_activity_revision))
         changed = False
@@ -224,6 +330,11 @@ class EvidenceModel:
                 if wid:
                     activity[wid] = latest_time(activity.get(wid), *times)
             if group == "assignments":
+                raw_closed = {row.get("workItemId") for row in assignments.rows.values()
+                              if row.get("state") != "open"}
+                for wid, part in self.closed_items.items():
+                    if wid not in raw_closed or not assignments.complete:
+                        record(wid, part["activity"])
                 for assignment in assignments.rows.values():
                     record(assignment.get("workItemId"), assignment.get("openedAt"),
                            assignment.get("closedAt"),
@@ -231,6 +342,7 @@ class EvidenceModel:
                 # Missing attest scopes are created by summary on first use.
                 revision = [(key, inv.data_revision) for key, inv in self.inventories.items()
                             if key[0] in {"assignments", "attests"}]
+                revision.append(("closed-items", self.closed_revision))
             elif group == "artifacts":
                 for (resource, _scope), inventory in self.inventories.items():
                     if resource == "artifacts":
@@ -313,6 +425,15 @@ class EvidenceModel:
             facts = self.inventory("attests", assignment["id"]).evidence()
             for author in summary["authorIds"]:
                 activity_evidence[author].append(facts)
+        for wid in self.closed_items:
+            closed = self.closed_item(wid, by_item[wid])
+            if closed is None:
+                continue
+            for author, at in closed["summary"]["authors"].items():
+                activity[author] = max(activity.get(author, 0), at)
+                authored_at[author][wid] = max(authored_at[author].get(wid, 0), at)
+            for author, facts in closed["authorFacts"].items():
+                activity_evidence[author].append(facts)
 
         agents = []
         for session in visible:
@@ -351,12 +472,17 @@ class EvidenceModel:
 
         item_turns = defaultdict(dict)
         live_turns = [t for t in turns if t.get("endedAt") is None]
+        live_assignment_ids = {turn.get("assignmentId") for turn in live_turns}
+        self.live_assignment_items = {aid: wid for aid, wid in self.live_assignment_items.items()
+                                      if aid in live_assignment_ids}
         for turn in live_turns:
             holder = ids.get(turn.get("sessionKey"))
             if holder is None:
                 continue
             assignment = assignments.rows.get(turn.get("assignmentId"))
             touched = {assignment["workItemId"]} if assignment else set()
+            if not assignment and turn.get("assignmentId") in self.live_assignment_items:
+                touched.add(self.live_assignment_items[turn["assignmentId"]])
             if not turn.get("assignmentId") and isinstance(turn.get("startedAt"), (int, float)):
                 for wid, at in authored_at[turn["sessionKey"]].items():
                     if at >= turn["startedAt"]:
@@ -369,9 +495,12 @@ class EvidenceModel:
         items = []
         for wid, item in work.rows.items():
             owned = by_item[wid]
+            folded_closed = self.closed_item(wid, owned)
             detail_summary = {"count": 0, "kinds": Counter(), "verdicts": Counter(), "latest": {}}
-            for assignment in owned:
-                part = self.summary("attests", assignment["id"])
+            parts = [self.summary("attests", assignment["id"]) for assignment in owned]
+            if folded_closed:
+                parts.append(folded_closed["summary"])
+            for part in parts:
                 detail_summary["count"] += part["count"]
                 detail_summary["kinds"].update(part["kinds"])
                 detail_summary["verdicts"].update(part["verdicts"])
@@ -379,6 +508,8 @@ class EvidenceModel:
                     detail_summary["latest"][verdict] = max(
                         detail_summary["latest"].get(verdict, 0), timestamp)
             inventory_facts = [self.inventory("attests", a["id"]).evidence() for a in owned]
+            if folded_closed:
+                inventory_facts.append(folded_closed["facts"])
             identity = work.evidence_for(wid)
             item_summary = item if has_work_item_summary(item) else None
             if item_summary is not None:
@@ -437,20 +568,36 @@ class EvidenceModel:
                 stage = evidence_stage(item, owned, (), complete=complete, summary=summary)
                 kinds = sorted(k for k in summary["kinds"] if k is not None)
                 verdicts = sorted(summary["verdicts"])
-            refs, producer_refs = [], []
-            for assignment in owned:
+            ordered_refs = list(folded_closed["refs"]) if folded_closed else []
+            ordered_corrections = list(folded_closed["corrections"]) if folded_closed else []
+            producer_refs = []
+            for index, assignment in enumerate(owned):
+                order = (self.open_assignment_order.get(assignment["id"],
+                         len(self.open_assignment_order) + folded_closed["count"] + index)
+                         if folded_closed else index)
                 corrections = assignment.get("commitRefCorrections") or []
                 found = ((corrections[-1].get("commitRefs") or []) if corrections else
                          self.summary("attests", assignment["id"])["refs"])
-                refs.extend(found)
+                ordered_refs.extend((order, i, ref) for i, ref in enumerate(found))
+                ordered_corrections.extend((order, i, {k: v for k, v in correction.items()
+                                           if k not in {"reason", "note"}})
+                                           for i, correction in enumerate(corrections))
                 if not assignment.get("reviewsAssignmentId"):
                     producer_refs.extend(found)
+            refs = [ref for _order, _index, ref in sorted(ordered_refs, key=lambda entry: entry[:2])]
             if item_summary is not None:
                 refs = list(item_summary["effectiveCommitRefs"])
             refs_complete = (identity["complete"] if item_summary is not None else
                              assignments.complete and all(f["complete"] for f in inventory_facts))
             code = code_state(owned, producer_refs,
                               complete=assignments.complete if item_summary is not None else complete)
+            if folded_closed:
+                if folded_closed["code"]:
+                    code = True
+                elif code is not True:
+                    code = (False if (assignments.complete if item_summary is not None else complete)
+                            and not folded_closed["unknownEffect"]
+                            and all(a.get("effectKind") for a in owned) else None)
             if item_summary is not None:
                 # Effective refs aggregate every assignment, including review
                 # assignments. Without producer attribution, they prevent a
@@ -513,9 +660,11 @@ class EvidenceModel:
             else:
                 holders = list(dict.fromkeys(ids[a["holderKey"]] for a in owned
                                             if a["state"] == "open" and a["holderKey"] in ids))
-                started = (bool(owned) if assignments.complete else None)
+                started = (bool(owned or folded_closed) if assignments.complete else None)
                 summary_facts = dict(assignments.evidence(), status="unknown", complete=False)
             closed = [a["closedAt"] for a in owned if isinstance(a.get("closedAt"), (int, float))]
+            if folded_closed and folded_closed["closedAt"] is not None:
+                closed.append(folded_closed["closedAt"])
             latest_activity = latest_time(item.get("createdAt"), item.get("bodyUpdatedAt"),
                                          item.get("rowVersion"), item_activity.get(wid))
             # Public work-item rows currently expose no terminal-state time.
@@ -544,7 +693,8 @@ class EvidenceModel:
                 "attestKinds": kinds, "verdictKinds": verdicts,
                 "assignments": {
                     "open": sum(a["state"] == "open" for a in owned) if assignments.complete else None,
-                    "terminal": sum(a["state"] != "open" for a in owned) if assignments.complete else None,
+                    "terminal": (sum(a["state"] != "open" for a in owned)
+                                 + (folded_closed["count"] if folded_closed else 0)) if assignments.complete else None,
                 },
                 "evidenceCounts": {
                     "total": summary["count"] if attest_facts["complete"] else None,
@@ -552,9 +702,8 @@ class EvidenceModel:
                     "byVerdict": dict(summary["verdicts"]) if attest_facts["complete"] else None,
                 },
                 "commitRefs": refs, "commitRefsComplete": refs_complete,
-                "commitRefCorrections": [
-                    {k: v for k, v in c.items() if k not in {"reason", "note"}}
-                    for a in owned for c in a.get("commitRefCorrections", [])],
+                "commitRefCorrections": [correction for _order, _index, correction in
+                                         sorted(ordered_corrections, key=lambda entry: entry[:2])],
                 "evidence": {"identity": identity, "stage": stage_facts,
                              "ring": ring_facts, "assignments": assignments.evidence(),
                              "summary": summary_facts,
