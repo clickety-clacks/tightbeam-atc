@@ -144,7 +144,7 @@ class RetiredActivityTest(unittest.TestCase):
                     refs={'sessionKey': 'agent s_author'}, payload={})))
             self.assertEqual([], gateway.calls)
             gateway.rows['turns', 'agent s_author'][0]['endedAt'] = 800000
-            service.change(dict(resource='turns', refs={'sessionKey': 'agent s_author', 'seq': 1},
+            service.change(dict(resource='turns', refs={'sessionKey': 'agent s_author', 'turnSeq': 1},
                                 payload={'sessionKey': 'agent s_author'}))
             self.drain(service)
             service._publish()
@@ -172,3 +172,42 @@ class RetiredActivityTest(unittest.TestCase):
             self.drain(service)
             service._publish()
             self.assertEqual(900000, service.snapshot()['items'][0]['latestActivityAt'])
+
+    def test_retired_discovery_releases_each_page_before_the_next_session(self):
+        import gc
+        import queue
+        import weakref
+        from unittest.mock import Mock
+        from atc_reads import ReadQueue
+        from atc_upstream import Gateway
+
+        class Row(dict):
+            pass
+
+        held, paths = [], []
+        gateway = Gateway('http://example.invalid', Mock())
+        def request(path):
+            gc.collect()
+            self.assertTrue(all(ref() is None for ref in held))
+            paths.append(path)
+            second = 'after=' in path
+            session = 'first' if '/first/' in path else 'second'
+            row = Row(seq=2 if second else 1, assignmentId=session,
+                      endedAt=800000 if second else 700000, prompt='historical text')
+            held.append(weakref.ref(row))
+            return {'schemaVersion': 1, 'items': [row], 'page': {
+                'hasMoreBefore': second, 'hasMoreAfter': not second,
+                'newestCursor': 'next' if not second else 'end'}}
+        gateway.request = request
+        reads = ReadQueue(gateway, queue.Queue(), 1)
+        self.addCleanup(reads.close)
+        result = reads._read(('retired-turns', None, None),
+                             ('marker', ('first', 'second'), {'first': 'work', 'second': 'work'}))
+        self.assertTrue(result.complete, result.error)
+        self.assertEqual(('marker', {'work': 800000}), result.folded)
+        self.assertEqual([], result.rows)
+        self.assertEqual(4, len(paths))
+        self.assertTrue(all('/first/' in p for p in paths[:2]))
+        self.assertTrue(all('/second/' in p for p in paths[2:]))
+        gc.collect()
+        self.assertTrue(all(ref() is None for ref in held))
