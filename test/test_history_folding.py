@@ -207,3 +207,44 @@ class HistoryFoldingTest(unittest.TestCase):
                 service.events.put(('stop', None))
                 worker.join(5)
                 self.assertFalse(worker.is_alive())
+
+    def test_publication_releases_auxiliary_rows_and_preserves_item_activity(self):
+        from atc_service import LiveService
+        from atc_upstream import Read
+        from atc_payloads import PAYLOAD_POLICIES, ARTIFACT_FIELDS
+        from test_service import PublishedReads
+        service = LiveService(PublishedReads())
+        self.addCleanup(service.stop)
+        service.policies = PAYLOAD_POLICIES
+        model = service.model
+        for resource, rows in (
+                ('work-items', [{'id': 'work', 'title': 'Work', 'state': 'open', 'createdAt': 1}]),
+                ('assignments', []), ('sessions', []), ('roles', []),
+                ('decision-requests', [{'id': 'decision', 'question': 'historical text'}]),
+                ('artifacts', [{'artifactId': 'artifact', 'workItemId': 'work',
+                                'updatedAt': 50, 'description': 'historical text'}])):
+            model.accept(resource, None, Read(rows, True, 10, 'fixture'))
+        service._publish()
+        self.assertEqual(50, service.snapshot()['items'][0]['latestActivityAt'])
+        for resource in ('artifacts', 'decision-requests'):
+            inventory = model.inventory(resource)
+            self.assertEqual({}, inventory.rows)
+            self.assertEqual({}, inventory.observations)
+            self.assertTrue(inventory.complete)
+        self.assertEqual({'work': 50}, model.inventory('artifacts').activity)
+        model.accept('artifacts', None, Read([], False, 20, 'fixture'))
+        service._publish()
+        self.assertEqual(50, service.snapshot()['items'][0]['latestActivityAt'])
+        self.assertFalse(model.inventory('artifacts').complete)
+        model.accept('artifacts', None, Read([], True, 30, 'fixture'))
+        service._publish()
+        self.assertEqual(1, service.snapshot()['items'][0]['latestActivityAt'])
+        # An evicted mutable identity cannot silently move a former maximum.
+        row = dict.fromkeys(ARTIFACT_FIELDS) | dict(artifactId='artifact',
+              workItemId='work', updatedAt=80, rowVersion=2)
+        service.change(dict(resource='artifacts', op='upsert',
+                            refs={'artifactId': 'artifact'}, payload=row,
+                            **{'class': 'artifact.recorded'}))
+        self.assertIn(('artifacts', None, None), service.reads.pending)
+        self.assertNotIn(('artifacts', None, 'artifact'), service.reads.pending)
+        self.assertEqual({}, model.inventory('artifacts').rows)

@@ -227,6 +227,47 @@ def merge_value_for_refs(observation, refs, refs_complete=True):
     return None
 
 
+class ArtifactInventory(Inventory):
+    """Artifact history contributes only a per-item activity maximum."""
+
+    def __init__(self):
+        super().__init__("artifactId")
+        self.activity = {}
+        self.released = False
+
+    def refresh_activity(self, *, replace=False):
+        activity = {} if replace else dict(self.activity)
+        for row in self.rows.values():
+            wid = row.get("workItemId")
+            times = [row.get(key) for key in ("createdAt", "updatedAt")]
+            times = [at for at in times if isinstance(at, (int, float))
+                     and not isinstance(at, bool) and 0 < at < float("inf")]
+            if wid and times:
+                activity[wid] = max(activity.get(wid, 0), *times)
+        self.activity = activity
+
+    def read(self, rows, *, complete, at, source):
+        super().read(rows, complete=complete, at=at, source=source)
+        self.refresh_activity(replace=complete)
+        if complete:
+            self.released = False
+
+    def payload(self, row, *, at, source, policy):
+        if self.released:
+            # The old row may have moved to another item or supplied its
+            # maximum. A complete reread resolves that without an ID ledger.
+            return False
+        accepted = super().payload(row, at=at, source=source, policy=policy)
+        if accepted:
+            self.refresh_activity(replace=True)
+        return accepted
+
+    def release_rows(self):
+        self.rows.clear()
+        self.observations.clear()
+        self.released = True
+
+
 class HistoryInventory(Inventory):
     """Current facts plus a short raw window, never the full history corpus."""
 

@@ -498,6 +498,7 @@ class LiveService:
         self._last_publication = time.monotonic()
         if comparison == self._comparison and self.model.details_revision == self._published_details:
             self._release_retired_histories()
+            self.model.release_auxiliary_sources()
             return False
         previous = self.current
         base_revision = self.revision
@@ -525,6 +526,7 @@ class LiveService:
             self._full_event = None
             self.condition.notify_all()
         self._release_retired_histories()
+        self.model.release_auxiliary_sources()
         return True
 
     def _release_retired_histories(self):
@@ -1002,6 +1004,10 @@ class LiveService:
             return False
         if resource == "retired-turns":
             return self._retired_activity_done(job, result)
+        if (resource == "artifacts" and key is not None
+                and self.model.inventory(resource, scope).released):
+            self._refresh(resource, scope)
+            return True
         if (resource in {"turns", "wakes", "messages"} and scope is not None
                 and self.model.inventory("sessions").complete
                 and self.model.inventory("assignments").complete
@@ -1244,6 +1250,8 @@ class LiveService:
         self.metrics["targetedReads"] += 1
         if resource in HISTORIES and scope is not None:
             key = None  # Discarded identities require an authoritative scoped fold.
+        if resource == "artifacts" and self.model.inventory(resource, scope).released:
+            key = None
         self.reads.schedule(resource, scope, key, priority=True)
 
     def change(self, notice):

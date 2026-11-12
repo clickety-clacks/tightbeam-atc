@@ -8,7 +8,7 @@ import json
 from atc_summary import summarize, recent_marks, HistoryFold, HISTORY_KEYS
 
 from atc_evidence import (
-    Inventory, HistoryInventory, agent_id, code_state, combined_evidence, evidence_stage, merge_ring,
+    Inventory, HistoryInventory, ArtifactInventory, agent_id, code_state, combined_evidence, evidence_stage, merge_ring,
     turn_state, merge_value_for_refs,
 )
 from atc_payloads import has_work_item_summary
@@ -51,6 +51,7 @@ class EvidenceModel:
         key = resource, scope
         if key not in self.inventories:
             self.inventories[key] = (HistoryInventory(resource) if resource in HISTORY_KEYS
+                                     else ArtifactInventory() if resource == "artifacts"
                                      else Inventory(KEYS.get(resource, "id")))
         return self.inventories[key]
 
@@ -122,6 +123,15 @@ class EvidenceModel:
         for inventory in self.inventories.values():
             inventory.mark_unconfirmed(at)
 
+    def release_auxiliary_sources(self):
+        for (resource, _scope), inventory in self.inventories.items():
+            if resource == "artifacts":
+                inventory.release_rows()
+            elif resource == "decision-requests":
+                # The board uses scope completeness, not decision source text.
+                inventory.rows.clear()
+                inventory.observations.clear()
+
     def accept(self, resource, scope, result):
         inventory = self.inventory(resource, scope)
         if isinstance(inventory, HistoryInventory):
@@ -163,6 +173,8 @@ class EvidenceModel:
                     "status": "known", "freshness": "live", "observedAt": result.at,
                     "source": result.source, "complete": True,
                 }
+            if isinstance(inventory, ArtifactInventory):
+                inventory.refresh_activity(replace=not inventory.released)
         else:
             inventory.invalidate()
 
@@ -222,8 +234,8 @@ class EvidenceModel:
             elif group == "artifacts":
                 for (resource, _scope), inventory in self.inventories.items():
                     if resource == "artifacts":
-                        for row in inventory.rows.values():
-                            record(row.get("workItemId"), row.get("createdAt"), row.get("updatedAt"))
+                        for wid, at in inventory.activity.items():
+                            record(wid, at)
             else:
                 activity.update(self.retired_item_activity)
                 for resource, scope in self.inventories:
