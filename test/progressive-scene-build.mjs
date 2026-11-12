@@ -6,7 +6,7 @@ import * as THREE from '../web/three.module.js';
 import * as tiers from '../web/work-item-tiers.mjs';
 import {factValue, knownStage, ringMeaning} from '../web/viewer-semantics.mjs';
 import {unknownItemType} from '../web/viewer-unknown-status.mjs';
-import {createSceneLoad} from '../web/progressive-scene.mjs';
+import {createSceneLoad} from '../web/render-loop.mjs';
 register('data:text/javascript,'+encodeURIComponent(`export async function resolve(name,context,next){
   if(name==='three')return {url:${JSON.stringify(new URL('../web/three.module.js',import.meta.url).href)},shortCircuit:true};
   return next(name,context);

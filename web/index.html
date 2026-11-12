@@ -316,9 +316,8 @@
 <div id="selcursor"></div>
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
-import {createSceneLoad} from './progressive-scene.mjs';
 import * as THREE from 'three';
-import { areProgramsValid, createDeferredUpdateGate, createRenderLoop, renderInterval,
+import { areProgramsValid, createDeferredUpdateGate, createRenderLoop, createSceneLoad, renderInterval,
          scheduleVisualChange } from './render-loop.mjs';
 import { unknownItemFacts, unknownItemType, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
 import { agentHintSummary, itemHintSummary } from './viewer-hints.mjs';

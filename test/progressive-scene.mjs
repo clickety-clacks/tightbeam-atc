@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {createSceneLoad} from '../web/progressive-scene.mjs';
+import {createSceneLoad} from '../web/render-loop.mjs';
 import {renderModelStatusElement} from '../web/viewer-semantics.mjs';
 
 const applied = [];
