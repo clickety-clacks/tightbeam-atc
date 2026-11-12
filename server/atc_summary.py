@@ -6,7 +6,8 @@ from collections import Counter
 def summarize(resource, rows):
     result = {"count": 0, "kinds": Counter(), "verdicts": Counter(), "latest": {},
               "authors": {}, "authorIds": set(), "refs": [], "activity": None,
-              "live": [], "marks": [], "recentActivity": None, "assignmentActivity": {}}
+              "live": [], "marks": [], "recentActivity": None, "assignmentActivity": {},
+              "jobRefActivity": {}}
     for row in rows:
         result["count"] += 1
         if resource == "attests":
@@ -40,12 +41,19 @@ def summarize(resource, rows):
             times = []
         recent_times = ([row.get(k) for k in ("endedAt", "startedAt", "createdAt")]
                         if resource == "turns" else times)
-        if resource == "turns" and row.get("assignmentId"):
+        if resource == "turns":
             recorded = [at for at in recent_times if isinstance(at, (int, float))]
             if recorded:
-                aid = row["assignmentId"]
-                result["assignmentActivity"][aid] = max(
-                    result["assignmentActivity"].get(aid, 0), *recorded)
+                if row.get("assignmentId"):
+                    aid = row["assignmentId"]
+                    result["assignmentActivity"][aid] = max(
+                        result["assignmentActivity"].get(aid, 0), *recorded)
+                elif row.get("jobRef"):
+                    # A canonical item link contributes activity without
+                    # implying an assignment or an attached agent.
+                    wid = row["jobRef"]
+                    result["jobRefActivity"][wid] = max(
+                        result["jobRefActivity"].get(wid, 0), *recorded)
         for at in recent_times:
             if isinstance(at, (int, float)):
                 result["recentActivity"] = max(result["recentActivity"] or 0, at)

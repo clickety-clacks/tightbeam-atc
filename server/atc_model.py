@@ -133,8 +133,11 @@ class EvidenceModel:
             else:
                 for resource, scope in self.inventories:
                     if resource == "turns":
-                        for aid, at in self.summary(resource, scope)["assignmentActivity"].items():
+                        turn_summary = self.summary(resource, scope)
+                        for aid, at in turn_summary["assignmentActivity"].items():
                             record(assignments.rows.get(aid, {}).get("workItemId"), at)
+                        for wid, at in turn_summary["jobRefActivity"].items():
+                            record(wid, at)
             self._item_activity_parts[group] = revision, activity
         if changed:
             combined = {}
