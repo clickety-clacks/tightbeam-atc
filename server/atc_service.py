@@ -113,6 +113,8 @@ class LiveService:
         self.rebuild_interval, self.workers = rebuild_interval, workers
         self.events = queue.Queue()
         self.reads = ReadQueue(gateway, self.events, workers, self.model.current_ids)
+        self.retired_activity_marker = None
+        self.retired_activity_pending = False
         self.backstop = ActiveBackstop()
         self.scope_budget = scope_budget
         self.rotation = deque()
@@ -476,6 +478,7 @@ class LiveService:
         self._dirty = False
         self._last_publication = time.monotonic()
         if comparison == self._comparison and self.model.details_revision == self._published_details:
+            self._release_retired_histories()
             return False
         previous = self.current
         base_revision = self.revision
@@ -502,6 +505,74 @@ class LiveService:
             self._published_details = self.model.details_revision
             self._full_event = None
             self.condition.notify_all()
+        self._release_retired_histories()
+        return True
+
+    def _release_retired_histories(self):
+        if not (self.model.inventory("sessions").complete
+                and self.model.inventory("assignments").complete):
+            return
+        visible = {row["sessionKey"] for row in self.current.get("agents", [])}
+        released = self.model.release_session_histories(visible)
+        for key in list(self.reads.pending):
+            if key[:2] in released:
+                del self.reads.pending[key]
+        for key in list(self.reads.epochs):
+            if key in released and key not in self.reads.active:
+                del self.reads.epochs[key]
+        for key in list(self.read_retries):
+            if key[:2] in released:
+                del self.read_retries[key]
+        self.retry_in_flight = {job for job in self.retry_in_flight if job[:2] not in released}
+        self.read_failures.difference_update(released)
+        self.sweep_remaining.difference_update(released)
+        self.rotation = deque(key for key in self.rotation if key not in released)
+        self.backstop.active.difference_update(released)
+        self.backstop.history.difference_update(released)
+        for key in released:
+            self.backstop.attempted.pop(key, None)
+        if self.cycle:
+            self.cycle["pending"].difference_update(released)
+            self.cycle["seen"].difference_update(released)
+        sessions = self.model.inventory("sessions")
+        for key in list(sessions.rows):
+            if key not in visible:
+                del sessions.rows[key]
+                sessions.observations.pop(key, None)
+
+    def _ensure_retired_activity(self):
+        if not all(self.model.inventory(resource).complete
+                   for resource in ("work-items", "assignments", "sessions")):
+            return
+        marker, sessions, _assignments = self.model.retired_activity_plan()
+        if self.retired_activity_pending or marker == self.retired_activity_marker:
+            return
+        if ("retired-turns", None, None) in self.read_retries:
+            return
+        if not sessions:
+            self.model.fold_retired_activity({})
+            self.retired_activity_marker = marker
+            return
+        self.retired_activity_pending = True
+        self.reads.schedule("retired-turns")
+
+    def _retired_activity_done(self, job, result):
+        self.retired_activity_pending = False
+        self.retry_in_flight.discard(job)
+        marker, activity = result.folded if result.folded is not None else (None, {})
+        self.model.fold_retired_activity(activity)
+        if result.complete:
+            self.retired_activity_marker = marker
+            self.read_failures.discard(job[:2])
+            self.read_retries.pop(job, None)
+            self._ensure_retired_activity()
+        else:
+            self.read_failures.add(job[:2])
+            self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, 0)
+            self.last_incomplete_read = self._read_outcome(*job, result)
+            self._incomplete_state("published read incomplete")
+        if self.cycle:
+            self._settle_cycle()
         return True
 
     def _retain_unproven_removals(self, data, at):
@@ -549,10 +620,6 @@ class LiveService:
                     (resource, session["sessionKey"])
                     for session in self.model.active_sessions()
                     for resource in ("turns", "wakes", "messages")]
-        # Previously visible sessions remain in terminal reconciliation after
-        # retirement; losing visibility does not establish historical absence.
-        scopes.extend((resource, scope) for resource, scope in self.model.inventories
-                      if resource in {"turns", "wakes", "messages"} and scope is not None)
         return list(dict.fromkeys(scopes))
 
     def _update_backstop(self, at):
@@ -815,6 +882,7 @@ class LiveService:
         if cycle["expanded"] or any(s in cycle["pending"] for s in BASE_SCOPES):
             return
         cycle["expanded"] = True
+        self._ensure_retired_activity()
         scopes = self._history_scopes()
         if cycle["mode"] != "interval":
             self._cycle_add(scopes, repeat=not cycle.get("resume", False))
@@ -846,7 +914,8 @@ class LiveService:
         # its unfinished scopes. New offline snapshots can still settle and
         # keep the existing periodic-read behavior.
         if ((not self.connected and cycle.get("resume")) or
-                cycle["pending"] or not cycle["expanded"]):
+                cycle["pending"] or not cycle["expanded"] or self.retired_activity_pending
+                or ("retired-turns", None) in self.read_failures):
             return
         # A failing history remains stale until its next successful rotation;
         # a successful unrelated batch never declares the whole map complete.
@@ -910,6 +979,37 @@ class LiveService:
                     "result": "epoch-discarded", "at": now_ms(),
                 }
             return False
+        if resource == "retired-turns":
+            return self._retired_activity_done(job, result)
+        if (resource in {"turns", "wakes", "messages"} and scope is not None
+                and self.model.inventory("sessions").complete
+                and self.model.inventory("assignments").complete
+                and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
+            # A read dispatched before retirement cannot recreate its scope.
+            if resource == "turns":
+                from atc_summary import ItemActivityFold
+                mapping = {row["id"]: row.get("workItemId") for row in
+                           self.model.inventory("assignments").rows.values()}
+                if result.folded is not None:
+                    activity = {}
+                    for aid, at in result.folded.summary["assignmentActivity"].items():
+                        wid = mapping.get(aid)
+                        if wid:
+                            activity[wid] = max(activity.get(wid, 0), at)
+                else:
+                    fold = ItemActivityFold(mapping)
+                    fold.add(result.rows)
+                    activity = fold.activity
+                self.model.fold_retired_activity(activity)
+            self.reads.epochs.pop(job[:2], None)
+            self.read_retries.pop(job, None)
+            self.retry_in_flight.discard(job)
+            self.read_failures.discard(job[:2])
+            if self.cycle:
+                self.cycle["pending"].discard(job[:2])
+                self.cycle["seen"].discard(job[:2])
+                self._settle_cycle()
+            return True
         if resource == "finish-time":
             # Optional enrichment: a missing route uses the labeled activity
             # fallback rather than blocking the core inventory's freshness.
@@ -997,6 +1097,8 @@ class LiveService:
                         self._refresh(nested, holder)
         if resource == "assignments" and result.complete:
             self._reconcile_work_item_attests()
+        if resource in {"work-items", "assignments", "sessions"} and result.complete:
+            self._ensure_retired_activity()
         if self.cycle and key is None:
             if result.complete or self.cycle["mode"] == "interval":
                 self.cycle["pending"].discard(job[:2])

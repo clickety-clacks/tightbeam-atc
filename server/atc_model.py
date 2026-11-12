@@ -3,6 +3,8 @@
 from collections import Counter, defaultdict
 from copy import deepcopy
 from math import isfinite
+import hashlib
+import json
 from atc_summary import summarize, recent_marks, HistoryFold, HISTORY_KEYS
 
 from atc_evidence import (
@@ -32,6 +34,8 @@ class EvidenceModel:
         self.summaries = {}
         self._item_activity_parts = {}
         self._item_activity = {}
+        self.retired_item_activity = {}
+        self.retired_activity_revision = 0
 
     def summary(self, resource, scope):
         inventory = self.inventory(resource, scope)
@@ -51,12 +55,66 @@ class EvidenceModel:
         return self.inventories[key]
 
     def current_ids(self, resource, scope):
+        if resource == "retired-turns":
+            return self.retired_activity_plan()
         if resource == "turns":
             return {str(turn["seq"]) for turn in self.summary("turns", scope)["live"]}
         if resource != "wakes":
             return set()
         return {str(turn["wakeId"]) for turn in self.summary("turns", scope)["live"]
                 if turn.get("wakeId") is not None}
+
+    def retired_activity_plan(self):
+        visible = {row["sessionKey"] for row in self.active_sessions()}
+        work = self.inventory("work-items").rows
+        assignments = self.inventory("assignments").rows
+        linked = {row.get("holderKey") for row in assignments.values()
+                  if row.get("workItemId") in work and row.get("holderKey")}
+        sessions = tuple(sorted(linked - visible))
+        assignment_items = {row["id"]: row["workItemId"] for row in assignments.values()
+                            if row.get("workItemId") in work}
+        marker = hashlib.blake2b(json.dumps((sessions, assignment_items), sort_keys=True).encode(),
+                                 digest_size=16).hexdigest()
+        # Warm instances already read these scopes while the holders were
+        # visible; publication will transfer their maxima before releasing them.
+        unread = tuple(session for session in sessions
+                       if not (self.inventories.get(("turns", session))
+                               and self.inventories["turns", session].complete))
+        return marker, unread, assignment_items
+
+    def fold_retired_activity(self, activity):
+        work = self.inventory("work-items").rows
+        changed = False
+        for wid, at in activity.items():
+            if wid in work and at > self.retired_item_activity.get(wid, 0):
+                self.retired_item_activity[wid] = at
+                changed = True
+        if self.inventory("work-items").complete:
+            for wid in list(self.retired_item_activity):
+                if wid not in work:
+                    del self.retired_item_activity[wid]
+                    changed = True
+        if changed:
+            self.retired_activity_revision += 1
+
+    def release_session_histories(self, visible):
+        assignments = self.inventory("assignments").rows
+        released = {key for key in self.inventories
+                    if key[0] in {"turns", "wakes", "messages"} and key[1] not in visible}
+        activity = {}
+        for resource, session in released:
+            if resource == "turns":
+                for aid, at in self.summary(resource, session)["assignmentActivity"].items():
+                    wid = assignments.get(aid, {}).get("workItemId")
+                    if wid:
+                        activity[wid] = max(activity.get(wid, 0), at)
+        self.fold_retired_activity(activity)
+        for key in released:
+            del self.inventories[key]
+            self.summaries.pop(key, None)
+        if released:
+            self._item_activity_parts.pop("turns", None)
+        return released
 
     def mark_unconfirmed(self, at):
         for inventory in self.inventories.values():
@@ -140,6 +198,7 @@ class EvidenceModel:
                 versions[resource].append((key, inventory.data_revision))
         assignments = self.inventory("assignments")
         versions["turns"].append((("assignments", None), assignments.data_revision))
+        versions["turns"].append((("retired-item-activity", None), self.retired_activity_revision))
         changed = False
         for group, revision in versions.items():
             cached = self._item_activity_parts.get(group)
@@ -164,6 +223,7 @@ class EvidenceModel:
                         for row in inventory.rows.values():
                             record(row.get("workItemId"), row.get("createdAt"), row.get("updatedAt"))
             else:
+                activity.update(self.retired_item_activity)
                 for resource, scope in self.inventories:
                     if resource == "turns":
                         for aid, at in self.summary(resource, scope)["assignmentActivity"].items():

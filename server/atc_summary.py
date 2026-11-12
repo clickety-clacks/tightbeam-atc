@@ -119,3 +119,21 @@ class HistoryFold:
                 self.rows[str(row[key])] = {k: row[k] for k in (
                     "seq", "sessionKey", "assignmentId", "wakeId", "createdAt",
                     "startedAt", "endedAt", "rowVersion") if k in row}
+
+
+class ItemActivityFold:
+    """The item attribution used by turn summaries, without a turn inventory."""
+
+    def __init__(self, assignment_items):
+        self.assignment_items = assignment_items
+        self.activity = {}
+
+    def add(self, rows):
+        for row in rows:
+            wid = self.assignment_items.get(row.get("assignmentId"))
+            if wid is None:
+                continue
+            times = [row.get(key) for key in ("createdAt", "startedAt", "endedAt")]
+            recorded = [at for at in times if isinstance(at, (int, float))]
+            if recorded:
+                self.activity[wid] = max(self.activity.get(wid, 0), *recorded)

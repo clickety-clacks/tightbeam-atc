@@ -169,6 +169,12 @@ class Gateway:
             # Keep partial pages, but never expose response bodies or tokens.
             return Read(rows, False, now_ms(), path, type(error).__name__, page_number, fold)
 
+    def read_item_activity(self, session, assignment_items):
+        from atc_summary import ItemActivityFold
+        # Exactly the same head-to-end paginated route as visible turns.
+        return self.collection("/api/sessions/" + quote(session, safe="") + "/turns",
+                               fold=ItemActivityFold(assignment_items))
+
     def read_current(self, resource, scope=None, *, keep_ids=()):
         from atc_summary import HistoryFold, HISTORY_KEYS
         if resource not in HISTORY_KEYS:

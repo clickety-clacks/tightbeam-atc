@@ -61,6 +61,8 @@ class ReadQueue:
     def _read(self, job, keep_ids=()):
         resource, scope, key = job
         try:
+            if resource == "retired-turns":
+                return self._retired_activity(keep_ids)
             if key is None:
                 if hasattr(self.gateway, "read_current"):
                     return self.gateway.read_current(resource, scope, keep_ids=keep_ids)
@@ -69,6 +71,29 @@ class ReadQueue:
         except Exception as error:
             # Exception bodies may contain credentials or upstream responses.
             return Read([], False, now_ms(), resource, type(error).__name__)
+
+    def _retired_activity(self, plan):
+        from atc_summary import ItemActivityFold
+        marker, sessions, assignment_items = plan
+        activity = {}
+        at = now_ms()
+        for session in sessions:
+            if hasattr(self.gateway, "read_item_activity"):
+                result = self.gateway.read_item_activity(session, assignment_items)
+                folded = result.folded
+            else:
+                result = self.gateway.read("turns", session)
+                folded = ItemActivityFold(assignment_items)
+                folded.add(result.rows)
+            for wid, timestamp in folded.activity.items():
+                activity[wid] = max(activity.get(wid, 0), timestamp)
+            at = result.at
+            if not result.complete:
+                return Read([], False, at, "turns", result.error, result.page,
+                            (marker, activity))
+            # No previous session's rows or page accumulator survive the next read.
+            del result, folded
+        return Read([], True, at, "turns", folded=(marker, activity))
 
     def finish(self, job, epoch):
         inventory = job[:2]
