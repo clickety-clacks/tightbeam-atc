@@ -17,6 +17,13 @@ from atc_payloads import has_work_item_summary
 KEYS = {"sessions": "sessionKey", "roles": "name", "turns": "seq",
         "wakes": "wakeId", "artifacts": "artifactId"}
 
+# Inputs still needed to derive every published item field. Full source detail
+# is read on demand after an older item's row has been folded.
+ITEM_FACT_FIELDS = frozenset("""
+    id title state createdAt bodyUpdatedAt rowVersion closedAt iceboxedAt
+    holders started attestCounts verdictCounts effectiveCommitRefs landings
+""".split())
+
 
 def latest_time(*values):
     return max((value for value in values if isinstance(value, (int, float))
@@ -41,6 +48,66 @@ class EvidenceModel:
         self.open_assignment_order = {}
         self.live_assignment_items = {}
         self.closed_sources_released = False
+        self.older_items = {}
+        self._work_item_order = []
+        self.older_item_sources_released = False
+
+    @staticmethod
+    def item_fingerprint(row):
+        digest = hashlib.blake2b(digest_size=16)
+        for chunk in json.JSONEncoder(sort_keys=True, separators=(",", ":")).iterencode(row):
+            digest.update(chunk.encode())
+        return digest.hexdigest()
+
+    def work_items(self):
+        raw = self.inventory("work-items").rows
+        if not self.older_item_sources_released:
+            return raw
+        # Preserve source order across current rows and folded older items.
+        return {wid: raw[wid] if wid in raw else self.older_items[wid]["fields"]
+                for wid in self._work_item_order if wid in raw or wid in self.older_items}
+
+    def work_item_evidence(self, wid):
+        inventory = self.inventory("work-items")
+        if wid in inventory.rows or wid not in self.older_items:
+            return inventory.evidence_for(wid)
+        status, freshness, observed_at, source, complete = self.older_items[wid]["observation"]
+        if inventory.stale or inventory.budget_stale:
+            freshness = "stale"
+        elif inventory.unconfirmed_since is not None:
+            freshness = "unconfirmed"
+        return dict(status=status, freshness=freshness, observedAt=observed_at,
+                    source=source, complete=complete,
+                    unconfirmedSince=inventory.unconfirmed_since)
+
+    def same_work_item(self, wid, row):
+        inventory = self.inventory("work-items")
+        if wid in inventory.rows or wid not in self.older_items:
+            return inventory.rows.get(wid) == row
+        return self.older_items[wid]["fingerprint"] == self.item_fingerprint(row)
+
+    def fold_older_work_items(self):
+        """Release older source rows while keeping the full board's inputs.
+
+        Service integration must provide on-demand source detail before calling
+        this after publication; a compact item is not a full detail response.
+        """
+        inventory = self.inventory("work-items")
+        if not self.older_item_sources_released:
+            self._work_item_order = list(inventory.rows)
+        for wid, row in list(inventory.rows.items()):
+            if row.get("state") not in {"closed", "iceboxed"}:
+                continue
+            fact = inventory.observations.get(wid, inventory.evidence())
+            self.older_items[wid] = {
+                "fields": {key: value for key, value in row.items() if key in ITEM_FACT_FIELDS},
+                "fingerprint": self.item_fingerprint(row),
+                "observation": tuple(fact.get(key) for key in
+                                     ("status", "freshness", "observedAt", "source", "complete")),
+            }
+            del inventory.rows[wid]
+            inventory.observations.pop(wid, None)
+            self.older_item_sources_released = True
 
     def summary(self, resource, scope):
         inventory = self.inventory(resource, scope)
@@ -72,7 +139,7 @@ class EvidenceModel:
 
     def retired_activity_plan(self):
         visible = {row["sessionKey"] for row in self.active_sessions()}
-        work = self.inventory("work-items").rows
+        work = self.work_items()
         assignments = self.inventory("assignments").rows
         linked = {row.get("holderKey") for row in assignments.values()
                   if row.get("workItemId") in work and row.get("holderKey")}
@@ -91,7 +158,7 @@ class EvidenceModel:
         return marker, unread, assignment_items
 
     def fold_retired_activity(self, activity):
-        work = self.inventory("work-items").rows
+        work = self.work_items()
         changed = False
         for wid, at in activity.items():
             if wid in work and at > self.retired_item_activity.get(wid, 0):
@@ -269,9 +336,22 @@ class EvidenceModel:
             return
         if resource in {"attests", "assignments", "work-items"}:
             incoming = {str(row[inventory.key]): row for row in result.rows}
-            if (any(inventory.rows.get(k) != row for k, row in incoming.items())
-                    or (result.complete and inventory.rows.keys() != incoming.keys())):
+            changed = (any(not self.same_work_item(k, row) for k, row in incoming.items())
+                       if resource == "work-items" else
+                       any(inventory.rows.get(k) != row for k, row in incoming.items()))
+            keys = self.work_items().keys() if resource == "work-items" else inventory.rows.keys()
+            if changed or (result.complete and keys != incoming.keys()):
                 self.details_revision += 1
+            if resource == "work-items":
+                if result.complete:
+                    self.older_items.clear()
+                    self._work_item_order = list(incoming)
+                    self.older_item_sources_released = False
+                else:
+                    self._work_item_order.extend(k for k in incoming
+                                                 if k not in self._work_item_order)
+                    for wid in incoming:
+                        self.older_items.pop(wid, None)
         inventory.read(
             result.rows, complete=result.complete, at=result.at, source=result.source)
         if resource == "assignments" and result.complete:
@@ -296,8 +376,14 @@ class EvidenceModel:
         if result.complete:
             for row in result.rows:
                 key = str(row[inventory.key])
-                if resource in {"attests", "assignments", "work-items"} and inventory.rows.get(key) != row:
+                changed = (not self.same_work_item(key, row) if resource == "work-items"
+                           else inventory.rows.get(key) != row)
+                if resource in {"attests", "assignments", "work-items"} and changed:
                     self.details_revision += 1
+                if resource == "work-items":
+                    self.older_items.pop(key, None)
+                    if key not in self._work_item_order:
+                        self._work_item_order.append(key)
                 inventory.rows[key] = deepcopy(row)
                 inventory.data_revision += 1
                 inventory.observations[key] = {
@@ -319,7 +405,7 @@ class EvidenceModel:
     def active_sessions(self):
         holders = {a.get("holderKey") for a in self.inventory("assignments").rows.values()
                    if a.get("state") == "open"}
-        for item in self.inventory("work-items").rows.values():
+        for item in self.work_items().values():
             if has_work_item_summary(item):
                 holders.update(item["holders"])
         return [s for s in self.inventory("sessions").rows.values()
@@ -539,7 +625,7 @@ class EvidenceModel:
                     item_turns[wid][holder] = state
 
         items = []
-        for wid, item in work.rows.items():
+        for wid, item in self.work_items().items():
             owned = by_item[wid]
             folded_closed = self.closed_item(wid, owned)
             detail_summary = {"count": 0, "kinds": Counter(), "verdicts": Counter(), "latest": {}}
@@ -556,7 +642,7 @@ class EvidenceModel:
             inventory_facts = [self.inventory("attests", a["id"]).evidence() for a in owned]
             if folded_closed:
                 inventory_facts.append(folded_closed["facts"])
-            identity = work.evidence_for(wid)
+            identity = self.work_item_evidence(wid)
             item_summary = item if has_work_item_summary(item) else None
             if item_summary is not None:
                 attest_counts = item_summary["attestCounts"]
