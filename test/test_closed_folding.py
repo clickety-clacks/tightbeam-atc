@@ -75,6 +75,36 @@ class ClosedAssignmentFoldTest(unittest.TestCase):
         self.assertEqual({}, folded.live_assignment_items)
         self.assertEqual(baseline.snapshot(1000), folded.snapshot(1000))
 
+    def test_closed_assignment_live_turn_finish_advances_item_after_source_release(self):
+        for complete in (False, True):
+            with self.subTest(complete=complete):
+                folded = self.model()
+                baseline = deepcopy(folded)
+                folded.fold_closed_assignments()
+                for model in (baseline, folded):
+                    self.read(model, 'turns', [dict(seq=1, sessionKey='author',
+                              assignmentId='first', createdAt=70, startedAt=80,
+                              endedAt=700000)], 'author', complete=complete)
+                self.assertEqual(baseline.snapshot(800000), folded.snapshot(800000))
+                self.assertEqual(700000, folded.item_activity()['work'])
+                self.assertEqual({}, folded.live_assignment_items)
+                self.assertNotIn('first', folded.summary('turns', 'author')['assignmentActivity'])
+                self.assertEqual(baseline.snapshot(800001), folded.snapshot(800001))
+
+    def test_retirement_releases_author_details_and_preserves_item_facts(self):
+        folded = self.model()
+        folded.fold_closed_assignments()
+        self.read(folded, 'sessions', [dict(sessionKey='author', state='active', displayName='author'),
+                                      dict(sessionKey='other', state='retired', displayName='other')])
+        before = folded.snapshot(1000)
+        folded.release_session_histories({'author'})
+        self.assertEqual(before, folded.snapshot(1000))
+        part = folded.closed_items['work']
+        self.assertEqual({'author'}, part['summary']['authorIds'])
+        self.assertNotIn('other', part['summary']['authors'])
+        self.assertNotIn('other', part['authorFacts'])
+        self.assertEqual(90, folded.item_activity()['work'])
+
     def test_closed_review_timing_and_unknown_code_remain_exact(self):
         for tested_at in (30, 400000):
             for effect in (None, 'review'):

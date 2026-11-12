@@ -119,6 +119,15 @@ class EvidenceModel:
         for key in released:
             del self.inventories[key]
             self.summaries.pop(key, None)
+        for part in self.closed_items.values():
+            # Retired authors no longer supply an agent's idle or live-turn
+            # attribution. The item's activity maximum remains in part itself.
+            summary = part["summary"]
+            summary["authors"] = {key: at for key, at in summary["authors"].items()
+                                  if key in visible}
+            summary["authorIds"].intersection_update(visible)
+            part["authorFacts"] = {key: facts for key, facts in part["authorFacts"].items()
+                                   if key in visible}
         if released:
             self._item_activity_parts.pop("turns", None)
         return released
@@ -305,6 +314,23 @@ class EvidenceModel:
         return [ref for attest in attests for ref in (attest.get("commitRefs") or [])]
 
     def item_activity(self):
+        # A closed assignment may still have an unfinished turn. Its small
+        # live lookup survives source disposal until that turn finishes, so
+        # later feed/read updates still advance the item's activity maximum.
+        if self.live_assignment_items:
+            for resource, scope in tuple(self.inventories):
+                if resource != "turns":
+                    continue
+                linked = self.summary(resource, scope)["assignmentActivity"]
+                for aid in tuple(linked):
+                    wid = self.live_assignment_items.get(aid)
+                    closed = self.closed_items.get(wid)
+                    if closed is None:
+                        continue
+                    at = latest_time(closed["activity"], linked.pop(aid))
+                    if at != closed["activity"]:
+                        closed["activity"] = at
+                        self.closed_revision += 1
         # Keep independently changing histories separate: a turn must not make
         # publication rescan all artifacts or assignments. Revision checks also
         # cover direct feed payload updates and complete-inventory removals.
