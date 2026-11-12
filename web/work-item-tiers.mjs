@@ -1,16 +1,16 @@
-import {orphanRadius, itemWindow} from './work-item-window.mjs';
+import {orphanRadius, itemWindow, unacceptedFailure} from './work-item-window.mjs';
 /* Spatial and wording rules for unfinished work. Kept pure so the same
    placement contract can be exercised without a browser or service. */
 const ACTIVE_REASON = "a card holder's agent record is unavailable";
 export const OPEN_WORK_STAGE_QUALIFIER = 'furthest evidence on any of its assignments; the item is still open';
-export const OPEN_WORK_LEGEND = 'open unlanded work without an active holder: orphan ring · distance = age since latest activity, outer edge = 30 days or unknown age · near an agent with a line = carded · ? = attachment unknown · landed/finished visibility is set in days';
+export const OPEN_WORK_LEGEND = 'open unlanded work or unaccepted failure without an active holder: orphan ring · distance = age since latest activity, outer edge = 30 days or unknown age · near an agent with a line = carded · ? = attachment unknown · × on the ring = failed · landed/finished visibility is set in days';
 
 function agentFor(agentsById, id) {
   return agentsById instanceof Map ? agentsById.get(id) : agentsById?.[id];
 }
 
 export function classifyWorkItemPlacement(item, agentsById) {
-  if (item?.state !== 'open' || item.merged === true) return null;
+  if (!unacceptedFailure(item) && (item?.state !== 'open' || item.merged === true)) return null;
 
   const holders = item.holders;
   const activeHolders = Array.isArray(holders)
@@ -162,9 +162,10 @@ function sideAreaShift(points, minimumRadius) {
 
 const idOrder = (left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
 
-// Preserve failed-item and detached-agent coordinates from the prior layout.
+// Preserve detached-agent and unaffected side-area coordinates from the prior layout.
 // These legacy membership facts never place open items in the rendered scene.
 function legacyPlacement(item, agentsById) {
+  if (item?.state !== 'open') return null;
   const placement = classifyWorkItemPlacement({...item, merged:false}, agentsById);
   if (placement?.tier !== 'perimeter' || item.holders?.length) return placement;
   const summaryKnown = typeof item.started === 'boolean'

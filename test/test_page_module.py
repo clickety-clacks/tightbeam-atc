@@ -107,7 +107,7 @@ const context = vm.createContext({
   factListValue: () => 'full list evidence',
   factCountValue: value => value ?? 'unknown',
   knownStage: () => true,
-  windowDescription: () => '',
+  windowDescription: () => '', failureDescription: () => '',
   ringMeaning: () => 'unknown',
   unknownItemFacts: () => ({}),
   accessibleUnknownDetails: () => '',

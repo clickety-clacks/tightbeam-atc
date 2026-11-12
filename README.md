@@ -29,7 +29,12 @@ draw labelled arrows between them.
   main graph for 0, 1, 3, 7 or 30 days, defaulting to 1 on each page load.
   Approximate finish times are labeled in detail; unknown times are outside the
   window. This control never removes or repositions unfinished orphans.
-  Failed items retain their existing placement and are not subject to this window.
+  Unaccepted failures remain visible at every setting, even when merged. With
+  no active holder they join the ring, marked by a geometric **×**; with a holder
+  they keep their attached position, and unknown attachment stays marked `?`.
+  Accepted failures use the finished window. Current records cannot establish
+  failure acceptance, so they remain unaccepted; prose and user attribution do
+  not establish acceptance. Detail explains missing or conflicting evidence.
   Stage, colors and merge rings continue to describe the same evidence.
 - **On the floor, a ring says what happened.** Black means merge proven by Git. Green means an explicit ready-to-merge verdict.
   Light gray means durably non-code. Yellow means code with unknown merge status.

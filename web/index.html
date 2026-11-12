@@ -321,7 +321,7 @@
 <script type="importmap">{ "imports": { "three": "./three.module.js" } }</script>
 <script type="module">
 import * as THREE from 'three';
-import {itemInWindow, itemWindow, windowDescription, DEFAULT_FINISHED_DAYS} from './work-item-window.mjs';
+import {itemInWindow, itemWindow, windowDescription, failureDescription, DEFAULT_FINISHED_DAYS} from './work-item-window.mjs';
 let finishedDays = DEFAULT_FINISHED_DAYS;
 let renderedItemIds = [];
 let sceneTime = Date.now();
@@ -1695,10 +1695,11 @@ function buildItems(items, tierLayout=null){
     const x = cloud?.x ?? perimeter?.x ?? side?.x ?? anchor.x + sc.x;
     const z = cloud?.z ?? perimeter?.z ?? side?.z ?? anchor.z + sc.z;
     const offset = (idx%3)*.8;
-    const y = landed ? 1.05 : placement
+    const altitudePlacement = w.state==='failed' && placement?.tier==='carded' ? null : placement;
+    const y = landed ? 1.05 : altitudePlacement
       ? workPlacementAltitude(placement, stage, offset, cloud?.texture || 0)
       : stage === null ? 27 + offset : 6 + (4 - Math.min(stage, 4))*4.2 + offset;
-    const pos = new THREE.Vector3(x, y, landed ? z + 3.2 : z);
+    const pos = new THREE.Vector3(x, y, landed && placement?.tier!=='perimeter' ? z + 3.2 : z);
     const igeo = new THREE.IcosahedronGeometry(landed ? .475 : .525, 0);
     const mesh = diagramMesh(igeo, col);
     mesh.position.copy(pos);
@@ -1709,7 +1710,7 @@ function buildItems(items, tierLayout=null){
        merge lookups, or ready-to-merge fields in the browser. */
     const ring = ringMeaning(w.ring, w.evidence?.ring?.status, w.evidence?.ring?.complete);
     const dcol = ({black:T.discBlack, green:T.discG, 'light-gray':T.discN, yellow:T.discY})[ring];
-    if (unknownItemType(w) || (unfinished && (stage === null || placement?.tier === 'unknown'))){
+    if (unknownItemType(w) || placement?.tier === 'unknown' || (unfinished && stage === null)){
       const marker = labelSprite('?');
       marker.scale.multiplyScalar(.72);
       marker.position.set(0, 1.35, 0);
@@ -1724,7 +1725,7 @@ function buildItems(items, tierLayout=null){
         color: dcol, side: THREE.DoubleSide, transparent: true, opacity: .5 }));
       disc.userData.baseFill = disc.material.color.clone();   /* so ghosting shades it */
       disc.position.set(pos.x,.06,pos.z);
-      Object.assign(disc.userData, {type:'item', w, isDisc:true});
+      Object.assign(disc.userData, {type:'item', w, placement, isDisc:true});
       itemGroup.add(disc); itemMeshes.push(disc);
     }
     const turnsKnown = w.evidence?.turns?.status === 'known' && w.turns != null;
@@ -1770,6 +1771,18 @@ function buildItems(items, tierLayout=null){
                                      transparent:true, opacity:.55, depthWrite:false}));
       ring.userData = {orphanRing:true};
       mesh.add(ring);
+      if (w.state==='failed') {
+        // A geometric cross remains visible when text annotations are off.
+        const marker = new THREE.Group();
+        marker.userData.failedMarker = true;
+        for (const angle of [Math.PI/4, -Math.PI/4]) {
+          const stroke = new THREE.Mesh(new THREE.BoxGeometry(.13, 1.2, .06),
+            new THREE.MeshBasicMaterial({color:T.orphan, transparent:true, opacity:.9}));
+          stroke.rotation.z = angle; marker.add(stroke);
+        }
+        marker.position.y = 1.35;
+        mesh.add(marker);
+      }
     }
   });
 }
@@ -2927,7 +2940,7 @@ function evidenceNotesMarkup(itemId){
 function nodeHintContent(u){
   if (u.type === 'item'){
     const hint = itemHintSummary(u.w);
-    const placement = u.unfinished ? workPlacementText(u.placement, byId) : '';
+    const placement = u.placement ? workPlacementText(u.placement, byId) : '';
     return '<span class="t">' + esc(hint.identity) + '</span>'
       + '<div>' + esc(hint.title) + '</div>'
       + '<span class="seg">' + esc(hint.summary) + '</span>'
@@ -2979,7 +2992,7 @@ function nodeContent(u, compact){
     const noHolder = w.state!=='open' ? '' : holders===null ? ' · holder unknown'
       : holders.some(id=>byId[id]&&!byId[id].retired) ? '' : ' · no live holder';
     const verdict = w.readyToMerge===true ? ' · ready-to-merge verdict filed' : '';
-    const placementLine = u.unfinished ? workPlacementText(u.placement, byId) : '';
+    const placementLine = u.placement ? workPlacementText(u.placement, byId) : '';
     const stageQualifier = u.unfinished ? ' · ' + OPEN_WORK_STAGE_QUALIFIER : '';
     const landingRecords = Array.isArray(w.landings) && w.landings.length
       ? w.landings.map(landing => `${landing.repository}#${landing.pullRequest} · ${landing.branch}`
@@ -2993,6 +3006,7 @@ function nodeContent(u, compact){
       + '<div>' + esc(w.title || 'title unknown') + '</div>'
       + '<span class="k">state</span>' + esc(w.state || 'unknown') + ' · stage ' + stage + stageQualifier
       + ' · ' + merged + ' · ' + code + ' · ring ' + esc(ringLabels[ring]) + verdict + noHolder
+      + (failureDescription(w) ? '<span class="k">failure</span>' + esc(failureDescription(w)) : '')
       + (windowDescription(w) ? '<span class="k">visibility</span>' + esc(windowDescription(w)) : '')
       + (u.placement?.tier==='perimeter' && !w.latestActivityAt ? '<span class="k">age</span>unknown · outer edge' : '')
       + (placementLine ? '<span class="k">placement</span><span class="seg">' + esc(placementLine) + '</span>' : '')
@@ -4574,6 +4588,7 @@ function tickFrame(){
       ch.visible = nodeLayerOn(m);
       if (ch.userData.pulse){ ch.lookAt(camera.position); ch.material.opacity=.7 * (u.dim ?? 1); ch.scale.setScalar(1.08); }
       if (ch.userData.act==='run'){ ch.material.opacity = .13 * (u.dim ?? 1); }
+      if (ch.userData.failedMarker){ ch.lookAt(camera.position); ch.children.forEach(stroke=>stroke.material.opacity=.9*(u.dim ?? 1)); }
       if (ch.userData.orphanRing){ ch.lookAt(camera.position); ch.material.opacity = .55 * (u.dim ?? 1); }
     });
   });

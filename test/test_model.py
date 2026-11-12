@@ -52,6 +52,15 @@ class ModelTest(unittest.TestCase):
         self.read("work-items", [{"id": "work", "title": "Work", "state": "failed"}])
         self.assertIsNone(self.model.snapshot(20)["items"][0]["finishedAt"])
 
+    def test_current_failure_records_never_invent_acceptance(self):
+        self.read("work-items", [{"id":"work", "title":"Work", "state":"failed",
+                                  "failReason":"The operator accepted this; see a decision in prose",
+                                  "byUser":"operator", "rowVersion":100}])
+        item = self.model.snapshot(200)["items"][0]
+        self.assertEqual("failed", item["state"])
+        self.assertIsNone(item.get("failureAcceptance"))
+        self.assertIsNone(item["finishedAt"])
+
     def test_trace_finish_time_is_exact_and_never_applies_to_a_different_state(self):
         self.read("work-items", [{"id":"work", "title":"Work", "state":"iceboxed", "rowVersion":100}])
         self.read("finish-time", [{"id":"work", "state":"iceboxed", "finishedAt":50}], "work")

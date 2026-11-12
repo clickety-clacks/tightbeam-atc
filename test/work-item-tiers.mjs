@@ -76,7 +76,7 @@ assert.equal(unresolvedListedHolder.tier, 'unknown');
 assert.equal(unresolvedListedHolder.reason, "a card holder's agent record is unavailable");
 
 assert.equal(classifyWorkItemPlacement({id: 'closed', state: 'closed'}, agents), null,
-  'closed, iceboxed, and failed items keep their existing treatment');
+  'closed items are not orphans');
 
 const openStageFive = openItem('open-stage-five', {terminal: 12, stage: 5, closedAt: 123});
 const openDisplay = workItemDisplay(openStageFive, 5);
