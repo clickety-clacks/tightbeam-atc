@@ -59,7 +59,11 @@ class ActiveBackstopTest(unittest.TestCase):
         self.model.detail(*scope, Read([{"id": "third"}], True, 300, "detail"))
         self.accept(*scope, [{"id": "fourth"}], at=400, complete=False)
         self.assertEqual(100, inventory.confirmed_at)
-        self.assertEqual(4, len(inventory.rows))
+        self.assertEqual({}, inventory.rows)
+        self.assertEqual({}, inventory.observations)
+        # Untimestamped payload/detail rows cannot be deduplicated after raw
+        # eviction. Neither they nor a partial read certify a new total.
+        self.assertEqual(1, inventory.folded["count"])
         self.backstop.classify(self.model, [scope], 100 + ACTIVE_BUDGET_MS)
         self.assertTrue(inventory.budget_stale)
         self.assertEqual("stale", inventory.evidence()["freshness"])
@@ -69,6 +73,7 @@ class ActiveBackstopTest(unittest.TestCase):
         self.backstop.classify(self.model, [scope], 500 + ACTIVE_BUDGET_MS)
         self.assertFalse(inventory.budget_stale)
         self.assertEqual("live", inventory.evidence()["freshness"])
+        self.assertEqual(0, inventory.folded["count"])
 
     def test_active_refresh_is_bounded_and_does_not_wait_for_terminal_rotation(self):
         assignments = [{"id": "active" + str(i), "state": "open"} for i in range(100)]
