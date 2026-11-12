@@ -186,7 +186,8 @@ class HttpTest(unittest.TestCase):
 
     def test_folded_closed_details_keep_order_notes_pins_and_partial_evidence(self):
         from unittest.mock import Mock
-        assignments = [dict(id=scope, workItemId='item', state=state, subject='Detail '+scope)
+        assignments = [dict(id=scope, workItemId='item', state=state, holderKey='author',
+                            subject='Detail '+scope)
                        for scope, state in (('a', 'closed'), ('b', 'open'), ('c', 'closed'))]
         rows = {scope: [dict(id=scope, ts=at, note='Note '+scope)]
                 for scope, at in (('a', 3), ('b', 1), ('c', 2))}

@@ -40,6 +40,7 @@ class EvidenceModel:
         self.closed_revision = 0
         self.open_assignment_order = {}
         self.live_assignment_items = {}
+        self.closed_sources_released = False
 
     def summary(self, resource, scope):
         inventory = self.inventory(resource, scope)
@@ -176,11 +177,14 @@ class EvidenceModel:
                 "code": False, "unknownEffect": False, "refs": [],
                 "corrections": [], "summary": summarize("attests", ()),
                 "facts": [], "authorFacts": {}, "detailFingerprint": DetailFingerprint(),
+                "assignmentFingerprint": DetailFingerprint(), "detailsKnown": True,
             })
             summary = self.summary("attests", aid)
             inventory = self.inventory("attests", aid)
             facts = inventory.evidence()
             part["detailFingerprint"].add(row, inventory.fingerprint, position)
+            part["assignmentFingerprint"].add(row, None, position)
+            part["detailsKnown"] &= inventory.fingerprint is not None
             part["count"] += 1
             close = row.get("closedAt")
             if isinstance(close, (int, float)):
@@ -216,6 +220,14 @@ class EvidenceModel:
         for wid, part in grouped.items():
             part["facts"] = combined_evidence(*part["facts"])
             part["detailFingerprint"] = part["detailFingerprint"].hexdigest()
+            part["assignmentFingerprint"] = part["assignmentFingerprint"].hexdigest()
+            previous = self.closed_items.get(wid)
+            if (not part["detailsKnown"] and previous and
+                    previous["assignmentFingerprint"] == part["assignmentFingerprint"]):
+                # Summary-backed items intentionally omit some attest reads.
+                # An on-demand pin remains valid until another detail read
+                # observes different text; it does not widen source eligibility.
+                part["detailFingerprint"] = previous["detailFingerprint"]
             self.closed_items[wid] = part
         # Finished turn attribution becomes item state before its assignment
         # identity is released; only unfinished turns keep a lookup entry.
@@ -235,6 +247,7 @@ class EvidenceModel:
             self.inventories.pop(("attests", aid), None)
             self.summaries.pop(("attests", aid), None)
         self.closed_revision += 1
+        self.closed_sources_released = True
         self._item_activity_parts.clear()
         return {("attests", aid) for aid in released}
 
@@ -262,6 +275,7 @@ class EvidenceModel:
         inventory.read(
             result.rows, complete=result.complete, at=result.at, source=result.source)
         if resource == "assignments" and result.complete:
+            self.closed_sources_released = False
             closed = {row.get("workItemId") for row in result.rows if row.get("state") != "open"}
             self.closed_items = {wid: part for wid, part in self.closed_items.items() if wid in closed}
             self.live_assignment_items.clear()

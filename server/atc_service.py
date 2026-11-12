@@ -255,14 +255,15 @@ class LiveService:
             from atc_evidence import Inventory
             closed = self.model.closed_item(item_id, owned)
             closed_fingerprint = DetailFingerprint() if closed else None
+            assignment_fingerprint = DetailFingerprint() if closed else None
             assignment_facts = assignments.evidence()
 
-            def reload_details():
+            def reload_details(observed=None):
                 # The old source identities have been released. Reconcile
                 # through existing collection reads instead of reintroducing
                 # a permanent detail cache or returning new text under this pin.
                 self._dirty = True
-                self.events.put(("detail-reload", None))
+                self.events.put(("detail-reload", observed))
                 return 409, {"error": "revision-mismatch", **pin}
 
             if closed:
@@ -286,6 +287,7 @@ class LiveService:
                 fold.add(result.rows)
                 if folded_assignment:
                     closed_fingerprint.add(assignment, fold.fingerprint.hexdigest(), position)
+                    assignment_fingerprint.add(assignment, None, position)
                 elif self.model.inventory("attests", scope).fingerprint != fold.fingerprint.hexdigest():
                     # A reread cannot label changed detail text with the old
                     # publication pin. Commit its compact facts on the model
@@ -303,7 +305,8 @@ class LiveService:
                                  key=lambda row: (row.get("ts") or 0, row["id"]))
                 del result, fold
             if closed and closed_fingerprint.hexdigest() != closed["detailFingerprint"]:
-                return reload_details()
+                return reload_details((item_id, closed["detailFingerprint"],
+                                       closed_fingerprint.hexdigest(), assignment_fingerprint.hexdigest()))
             facts = combined_evidence(work.evidence(), assignment_facts,
                                       *scopes)
             return 200, deepcopy({
@@ -490,6 +493,8 @@ class LiveService:
         # Only the model worker writes. Build the next immutable frame without
         # holding the condition used by subscribers of the committed frame.
         at = now_ms()
+        if self._fold_closed_sources():
+            classified = False
         if not classified:
             self._update_backstop(at)
         data = deepcopy(self.model.snapshot(at))
@@ -561,6 +566,34 @@ class LiveService:
             return
         visible = {row["sessionKey"] for row in self.current.get("agents", [])}
         released = self.model.release_session_histories(visible)
+        self._forget_scopes(released)
+        sessions = self.model.inventory("sessions")
+        for key in list(sessions.rows):
+            if key not in visible:
+                del sessions.rows[key]
+                sessions.observations.pop(key, None)
+
+    def _fold_closed_sources(self):
+        # In-flight reads still need their construction rows. Once the cycle
+        # settles, publish only the per-item facts and current live lookups.
+        if (self.cycle or self.retired_activity_pending
+                or not all(self.model.inventory(*scope).complete for scope in BASE_SCOPES)):
+            return False
+        assignments = self.model.inventory("assignments")
+        if not assignments.complete:
+            return False
+        eligible = set(self._history_scopes())
+        closed = {("attests", row["id"]) for row in assignments.rows.values()
+                  if row.get("state") != "open"}
+        if any(scope in self.reads.active or any(job[:2] == scope for job in self.reads.pending)
+               or (scope in eligible and not self.model.inventory(*scope).complete)
+               for scope in closed):
+            return False
+        released = self.model.fold_closed_assignments()
+        self._forget_scopes(released)
+        return bool(released)
+
+    def _forget_scopes(self, released):
         for key in list(self.reads.pending):
             if key[:2] in released:
                 del self.reads.pending[key]
@@ -581,13 +614,10 @@ class LiveService:
         if self.cycle:
             self.cycle["pending"].difference_update(released)
             self.cycle["seen"].difference_update(released)
-        sessions = self.model.inventory("sessions")
-        for key in list(sessions.rows):
-            if key not in visible:
-                del sessions.rows[key]
-                sessions.observations.pop(key, None)
 
     def _ensure_retired_activity(self):
+        if self.model.closed_sources_released:
+            return
         if not all(self.model.inventory(resource).complete
                    for resource in ("work-items", "assignments", "sessions")):
             return
@@ -754,6 +784,14 @@ class LiveService:
             summary = self.model.summary("attests", row["id"])
             kinds.update({kind: count for kind, count in summary["kinds"].items() if kind is not None})
             verdicts.update(summary["verdicts"])
+        closed = self.model.closed_item(item["id"], owned)
+        if closed:
+            facts = closed["facts"]
+            if not facts["complete"] or (require_fresh and facts["freshness"] != "live"):
+                return False
+            kinds.update({kind: count for kind, count in closed["summary"]["kinds"].items()
+                          if kind is not None})
+            verdicts.update(closed["summary"]["verdicts"])
         return dict(kinds) == item["attestCounts"] and dict(verdicts) == item["verdictCounts"]
 
     def _reconcile_item_attests(self, item):
@@ -777,6 +815,9 @@ class LiveService:
             self.model.inventory("attests", row["id"]).complete for row in owned)
         details_match = self._item_attest_counts_match(item, require_fresh=timing_needed)
         if (not timing_needed and not details_complete) or details_match:
+            return
+        if self.model.closed_item(item["id"], owned):
+            self.rebuild(recovery=True)
             return
         for row in assignments.rows.values():
             if row.get("workItemId") != item["id"]:
@@ -1030,6 +1071,11 @@ class LiveService:
             return False
         if resource == "retired-turns":
             return self._retired_activity_done(job, result)
+        if (self.model.closed_sources_released and
+                ((resource == "assignments" and key is not None)
+                 or (resource == "attests" and scope not in self.model.inventory("assignments").rows))):
+            self.rebuild(recovery=True)
+            return True
         if (resource == "artifacts" and key is not None
                 and self.model.inventory(resource, scope).released):
             self._refresh(resource, scope)
@@ -1295,10 +1341,24 @@ class LiveService:
             scope = payload.get("sessionKey") or refs.get("sessionKey")
         else:
             scope = None
+        if (self.model.closed_sources_released and
+                ((resource == "assignments" and
+                  (key not in self.model.inventory("assignments").rows
+                   or payload.get("state") not in {None, "open"}))
+                 or (resource == "attests" and
+                     scope not in self.model.inventory("assignments").rows))):
+            # An evicted assignment identity must be correlated again from
+            # the existing source collection before its item facts can change.
+            self.reads.touch("assignments", None)
+            self.rebuild(recovery=True)
+            return True
         if (resource in {"turns", "wakes", "messages"} and scope is not None
                 and self.model.inventory("sessions").complete
                 and self.model.inventory("assignments").complete
                 and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
+            if resource == "turns" and self.model.closed_sources_released:
+                self.rebuild(recovery=True)
+                return True
             linked = any(row.get("holderKey") == scope and row.get("workItemId") in
                          self.model.inventory("work-items").rows for row in
                          self.model.inventory("assignments").rows.values())
@@ -1352,6 +1412,9 @@ class LiveService:
                 inventory.invalidate()
                 self._state("stale", "change missing primary reference")
         if resource == "sessions" and applied:
+            if (self.model.closed_sources_released and payload.get("state") == "active"
+                    and (previous is None or previous.get("state") != "active")):
+                self.rebuild(recovery=True)
             self._discover_histories()
         if resource in {"sessions", "assignments", "work-items"} and applied:
             self._ensure_retired_activity()
@@ -1410,11 +1473,21 @@ class LiveService:
             return self._read_done(value)
         elif kind == "detail-history":
             scope, epoch, result = value
-            if epoch == self.reads.epochs["attests", scope]:
+            if (self.model.closed_sources_released
+                    and scope not in self.model.inventory("assignments").rows):
+                self.rebuild(recovery=True)
+            elif epoch == self.reads.epochs["attests", scope]:
                 self.model.accept("attests", scope, result)
             else:
                 self._refresh("attests", scope)
         elif kind == "detail-reload":
+            if value is not None:
+                wid, previous, fingerprint, assignments = value
+                closed = self.model.closed_items.get(wid)
+                if closed and closed["detailFingerprint"] == previous:
+                    closed["detailFingerprint"] = fingerprint
+                    closed["assignmentFingerprint"] = assignments
+                    self.model.details_revision += 1
             self.rebuild(recovery=True)
         elif kind == "change":
             if (isinstance(value, tuple) and len(value) == 2
