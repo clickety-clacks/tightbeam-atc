@@ -1447,7 +1447,9 @@ class LiveService:
             self.version = value
             self.policies = policies_for(value)
             self.payload_warning = payload_policy_warning(value)
-            self.rebuild(resume=self.cycle is not None)
+            # Released assignment identities are no longer a usable discovery
+            # source after an outage. Reload them before resolving missed work.
+            self.rebuild(resume=self.cycle is not None and not self.model.closed_sources_released)
             self._ensure_retired_activity()
         elif kind == "lost":
             was_connected = self.connected
