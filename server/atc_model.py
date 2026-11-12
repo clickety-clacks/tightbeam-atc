@@ -30,6 +30,60 @@ def latest_time(*values):
                 and not isinstance(value, bool) and isfinite(value) and value > 0), default=None)
 
 
+class ClosedAssignmentFold:
+    """Accumulate one item's published closed facts without retaining source rows."""
+
+    def __init__(self):
+        self.part = {
+            "count": 0, "closedAt": None, "activity": None,
+            "code": False, "unknownEffect": False, "refs": [],
+            "corrections": [], "summary": summarize("attests", ()),
+            "facts": None, "authorFacts": {}, "detailFingerprint": DetailFingerprint(),
+            "assignmentFingerprint": DetailFingerprint(), "detailsKnown": True,
+        }
+
+    def add(self, row, inventory, *, order, position):
+        part = self.part
+        summary = inventory.folded
+        facts = inventory.evidence()
+        part["detailFingerprint"].add(row, inventory.fingerprint, position)
+        part["assignmentFingerprint"].add(row, None, position)
+        part["detailsKnown"] &= inventory.fingerprint is not None
+        part["count"] += 1
+        close = row.get("closedAt")
+        if isinstance(close, (int, float)):
+            part["closedAt"] = max(part["closedAt"], close) if part["closedAt"] is not None else close
+        part["activity"] = latest_time(part["activity"], row.get("openedAt"), close, summary["activity"])
+        part["code"] |= row.get("effectKind") in {"code", "release", "live_mutation"}
+        part["unknownEffect"] |= not bool(row.get("effectKind"))
+        corrections = row.get("commitRefCorrections") or []
+        refs = (corrections[-1].get("commitRefs") or []) if corrections else summary["refs"]
+        part["refs"].extend((order, i, ref) for i, ref in enumerate(refs))
+        if not row.get("reviewsAssignmentId"):
+            part["code"] |= bool(refs)
+        part["corrections"].extend((order, i, {k: v for k, v in correction.items()
+                                  if k not in {"reason", "note"}})
+                                  for i, correction in enumerate(corrections))
+        folded = part["summary"]
+        folded["count"] += summary["count"]
+        folded["kinds"].update(summary["kinds"])
+        folded["verdicts"].update(summary["verdicts"])
+        for field in ("latest", "authors"):
+            for key, at in summary[field].items():
+                folded[field][key] = max(folded[field].get(key, 0), at)
+        folded["authorIds"].update(summary["authorIds"])
+        for author in summary["authorIds"]:
+            existing = part["authorFacts"].get(author)
+            part["authorFacts"][author] = combined_evidence(existing, facts) if existing else combined_evidence(facts)
+        part["facts"] = combined_evidence(part["facts"], facts) if part["facts"] else combined_evidence(facts)
+
+    def finish(self):
+        part = self.part
+        part["detailFingerprint"] = part["detailFingerprint"].hexdigest()
+        part["assignmentFingerprint"] = part["assignmentFingerprint"].hexdigest()
+        return part
+
+
 class EvidenceModel:
     def __init__(self):
         self.inventories = {}
@@ -269,55 +323,15 @@ class EvidenceModel:
             if row.get("state") == "open":
                 self.open_assignment_order[aid] = order
                 continue
-            part = grouped.setdefault(wid, {
-                "count": 0, "closedAt": None, "activity": None,
-                "code": False, "unknownEffect": False, "refs": [],
-                "corrections": [], "summary": summarize("attests", ()),
-                "facts": [], "authorFacts": {}, "detailFingerprint": DetailFingerprint(),
-                "assignmentFingerprint": DetailFingerprint(), "detailsKnown": True,
-            })
-            summary = self.summary("attests", aid)
-            inventory = self.inventory("attests", aid)
-            facts = inventory.evidence()
-            part["detailFingerprint"].add(row, inventory.fingerprint, position)
-            part["assignmentFingerprint"].add(row, None, position)
-            part["detailsKnown"] &= inventory.fingerprint is not None
-            part["count"] += 1
-            close = row.get("closedAt")
-            if isinstance(close, (int, float)):
-                part["closedAt"] = max(part["closedAt"], close) if part["closedAt"] is not None else close
-            part["activity"] = latest_time(part["activity"], row.get("openedAt"), close, summary["activity"])
-            part["code"] |= row.get("effectKind") in {"code", "release", "live_mutation"}
-            part["unknownEffect"] |= not bool(row.get("effectKind"))
-            corrections = row.get("commitRefCorrections") or []
-            refs = (corrections[-1].get("commitRefs") or []) if corrections else summary["refs"]
-            part["refs"].extend((order, i, ref) for i, ref in enumerate(refs))
-            if not row.get("reviewsAssignmentId"):
-                part["code"] |= bool(refs)
-            part["corrections"].extend((order, i, {k: v for k, v in correction.items()
-                                      if k not in {"reason", "note"}})
-                                      for i, correction in enumerate(corrections))
-            folded = part["summary"]
-            folded["count"] += summary["count"]
-            folded["kinds"].update(summary["kinds"])
-            folded["verdicts"].update(summary["verdicts"])
-            for field in ("latest", "authors"):
-                for key, at in summary[field].items():
-                    folded[field][key] = max(folded[field].get(key, 0), at)
-            folded["authorIds"].update(summary["authorIds"])
-            for author in summary["authorIds"]:
-                existing = part["authorFacts"].get(author)
-                part["authorFacts"][author] = combined_evidence(existing, facts) if existing else combined_evidence(facts)
-            part["facts"].append(facts)
+            fold = grouped.setdefault(wid, ClosedAssignmentFold())
+            fold.add(row, self.inventory("attests", aid), order=order, position=position)
             if aid in live_ids:
                 self.live_assignment_items[aid] = wid
             released.add(aid)
         if not released:
             return set()
-        for wid, part in grouped.items():
-            part["facts"] = combined_evidence(*part["facts"])
-            part["detailFingerprint"] = part["detailFingerprint"].hexdigest()
-            part["assignmentFingerprint"] = part["assignmentFingerprint"].hexdigest()
+        for wid, fold in grouped.items():
+            part = fold.finish()
             previous = self.closed_items.get(wid)
             if (not part["detailsKnown"] and previous and
                     previous["assignmentFingerprint"] == part["assignmentFingerprint"]):

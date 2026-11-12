@@ -2,8 +2,19 @@
 
 from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 
 from atc_upstream import Read, now_ms
+
+
+@dataclass
+class ItemAssignmentSource:
+    """A complete replacement: current rows and one item's closed facts only."""
+    open_rows: dict = field(default_factory=dict)
+    open_attests: dict = field(default_factory=dict)
+    open_order: dict = field(default_factory=dict)
+    live_items: dict = field(default_factory=dict)
+    closed: dict | None = None
 
 
 class ReadQueue:
@@ -63,6 +74,8 @@ class ReadQueue:
         try:
             if resource == "retired-turns":
                 return self._retired_activity(keep_ids)
+            if resource == "item-assignment-source":
+                return self._item_assignments(scope, keep_ids)
             if key is None:
                 if hasattr(self.gateway, "read_current"):
                     return self.gateway.read_current(resource, scope, keep_ids=keep_ids)
@@ -71,6 +84,56 @@ class ReadQueue:
         except Exception as error:
             # Exception bodies may contain credentials or upstream responses.
             return Read([], False, now_ms(), resource, type(error).__name__)
+
+    def _item_assignments(self, wid, live_ids):
+        from atc_evidence import HistoryInventory
+        from atc_model import ClosedAssignmentFold
+        from atc_summary import HistoryFold
+
+        source = "item-assignment-source"
+        membership = self.gateway.assignment_membership(wid)
+        if not membership.complete:
+            return Read([], False, membership.at, source, membership.error)
+        staged, closed = ItemAssignmentSource(), ClosedAssignmentFold()
+        at = membership.at
+        for position, member in enumerate(membership.rows):
+            aid = member["id"]
+            detail = self.gateway.detail("assignments", aid)
+            if not detail.complete:
+                return Read([], False, detail.at, source, detail.error)
+            if len(detail.rows) != 1:
+                return Read([], False, detail.at, source, "assignment-membership-mismatch")
+            row = detail.rows[0]
+            if (row.get("id") != aid or row.get("workItemId") != wid
+                    or not isinstance(row.get("commitRefCorrections"), list)):
+                return Read([], False, detail.at, source, "assignment-detail-incomplete")
+            if hasattr(self.gateway, "read_current"):
+                result = self.gateway.read_current("attests", aid)
+            else:
+                result = self.gateway.read("attests", aid)
+            if not result.complete:
+                return Read([], False, result.at, source, result.error)
+            fold = result.folded
+            if fold is None:
+                fold = HistoryFold("attests", result.at)
+                fold.add(result.rows)
+            inventory = HistoryInventory("attests")
+            inventory.read_fold(fold, complete=True, at=result.at, source=result.source)
+            at = result.at
+            if row.get("state") == "open":
+                staged.open_rows[aid] = row
+                staged.open_attests[aid] = inventory
+                staged.open_order[aid] = position
+            else:
+                closed.add(row, inventory, order=position, position=position)
+            if aid in live_ids:
+                staged.live_items[aid] = wid
+            # Only current open sources survive the next member. Closed raw
+            # assignment/attest text and temporary page folds are not staged.
+            del row, detail, result, fold, inventory
+        if closed.part["count"]:
+            staged.closed = closed.finish()
+        return Read([], True, at, source, folded=staged)
 
     def _retired_activity(self, plan):
         from atc_summary import ItemActivityFold
