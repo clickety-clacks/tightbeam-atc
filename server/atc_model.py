@@ -5,7 +5,7 @@ from copy import deepcopy
 from math import isfinite
 import hashlib
 import json
-from atc_summary import summarize, recent_marks, HistoryFold, HISTORY_KEYS
+from atc_summary import summarize, recent_marks, HistoryFold, HISTORY_KEYS, DetailFingerprint
 
 from atc_evidence import (
     Inventory, HistoryInventory, ArtifactInventory, agent_id, code_state, combined_evidence, evidence_stage, merge_ring,
@@ -157,6 +157,7 @@ class EvidenceModel:
         if not assignments.complete or not any(row.get("state") != "open" for row in assignments.rows.values()):
             return set()
         grouped = {}
+        item_positions = Counter()
         self.open_assignment_order = {}
         live_ids = {turn.get("assignmentId") for resource, scope in self.inventories
                     if resource == "turns" for turn in self.summary(resource, scope)["live"]}
@@ -164,18 +165,22 @@ class EvidenceModel:
                                       if aid in live_ids}
         released = set()
         for order, (aid, row) in enumerate(assignments.rows.items()):
+            wid = row.get("workItemId")
+            position = item_positions[wid]
+            item_positions[wid] += 1
             if row.get("state") == "open":
                 self.open_assignment_order[aid] = order
                 continue
-            wid = row.get("workItemId")
             part = grouped.setdefault(wid, {
                 "count": 0, "closedAt": None, "activity": None,
                 "code": False, "unknownEffect": False, "refs": [],
                 "corrections": [], "summary": summarize("attests", ()),
-                "facts": [], "authorFacts": {},
+                "facts": [], "authorFacts": {}, "detailFingerprint": DetailFingerprint(),
             })
             summary = self.summary("attests", aid)
-            facts = self.inventory("attests", aid).evidence()
+            inventory = self.inventory("attests", aid)
+            facts = inventory.evidence()
+            part["detailFingerprint"].add(row, inventory.fingerprint, position)
             part["count"] += 1
             close = row.get("closedAt")
             if isinstance(close, (int, float)):
@@ -210,6 +215,7 @@ class EvidenceModel:
             return set()
         for wid, part in grouped.items():
             part["facts"] = combined_evidence(*part["facts"])
+            part["detailFingerprint"] = part["detailFingerprint"].hexdigest()
             self.closed_items[wid] = part
         # Finished turn attribution becomes item state before its assignment
         # identity is released; only unfinished turns keep a lookup entry.

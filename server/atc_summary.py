@@ -5,6 +5,21 @@ import hashlib
 import json
 
 
+class DetailFingerprint:
+    """One per-item pin for released assignment and attest detail text."""
+
+    def __init__(self):
+        self.digest = hashlib.blake2b(digest_size=16)
+
+    def add(self, assignment, attest_fingerprint, position):
+        self.digest.update(json.dumps((position, assignment, attest_fingerprint),
+                                      sort_keys=True, separators=(",", ":")).encode())
+        self.digest.update(b"\n")
+
+    def hexdigest(self):
+        return self.digest.hexdigest()
+
+
 def summarize(resource, rows, *, into=None, now=None):
     """Fold a page into board facts, without retaining history payloads.
 

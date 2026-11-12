@@ -183,3 +183,77 @@ class HttpTest(unittest.TestCase):
             self.assertEqual(b"event: model\n", response.readline())
             model = json.loads(response.readline()[6:])
             self.assertEqual(self.live.snapshot(), model)
+
+    def test_folded_closed_details_keep_order_notes_pins_and_partial_evidence(self):
+        from unittest.mock import Mock
+        assignments = [dict(id=scope, workItemId='item', state=state, subject='Detail '+scope)
+                       for scope, state in (('a', 'closed'), ('b', 'open'), ('c', 'closed'))]
+        rows = {scope: [dict(id=scope, ts=at, note='Note '+scope)]
+                for scope, at in (('a', 3), ('b', 1), ('c', 2))}
+        self.live.model.accept('work-items', None, Read([
+            dict(id='item', title='Visible', state='open')], True, 1, 'test-read'))
+        self.live.model.accept('assignments', None, Read(assignments, True, 1, 'test-read'))
+        for scope, records in rows.items():
+            self.live.model.accept('attests', scope, Read(records, True, 1, 'test-read'))
+        partial = set()
+        self.live.gateway = Mock(read_count=0)
+        self.live.gateway.read.side_effect = lambda resource, scope=None: Read(
+            assignments if resource == 'assignments' else rows[scope],
+            (resource, scope) not in partial, 1, 'test-read')
+        self.live._publish()
+        before = self.request('/api/items/item/evidence?limit=2')
+        self.live.model.fold_closed_assignments()
+        for scope in ('a', 'c'):
+            self.live.reads.epochs.pop(('attests', scope), None)
+        self.assertEqual(before, self.request('/api/items/item/evidence?limit=2'))
+        first = before[1]
+        self.assertEqual(['b', 'c'], [row['id'] for row in first['records']])
+        pin = '&generation=' + first['generation'] + '&revision=' + str(first['revision'])
+        partial.update({('assignments', None), ('attests', 'c')})
+        status, last = self.request('/api/items/item/evidence?offset=2&limit=2'+pin)
+        self.assertEqual(200, status)
+        self.assertFalse(last['complete'])
+        self.assertEqual(['a'], [row['id'] for row in last['records']])
+        self.assertEqual('Note a', last['records'][0]['note'])
+        self.assertEqual({'b'}, set(self.live.model.inventory('assignments').rows))
+        for scope in ('a', 'c'):
+            self.assertNotIn(('attests', scope), self.live.model.inventories)
+            self.assertNotIn(('attests', scope), self.live.reads.epochs)
+
+    def test_changed_folded_detail_reloads_before_serving_a_new_pin(self):
+        from test_service import PublishedReads
+        gateway = PublishedReads()
+        gateway.rows['assignments', None][0]['state'] = 'closed'
+        self.live.gateway = self.live.reads.gateway = gateway
+        self.live.connected = True
+
+        def settle():
+            while self.live.reads.pending or self.live.reads.active:
+                self.live.reads.pump()
+                self.live._handle(*self.live.events.get(timeout=5))
+            self.live._publish()
+
+        self.live.rebuild()
+        settle()
+        self.live.model.fold_closed_assignments()
+        status, first = self.request('/api/items/work/evidence?limit=1')
+        self.assertEqual(200, status)
+        gateway.rows['attests', 'assignment'][0]['note'] = 'Changed detail only'
+        status, mismatch = self.request('/api/items/work/evidence?limit=1')
+        self.assertEqual(409, status)
+        self.assertEqual(first['revision'], mismatch['revision'])
+        event = self.live.events.get_nowait()
+        self.assertEqual('detail-reload', event[0])
+        self.assertNotIn(('attests', 'assignment'), self.live.model.inventories)
+        self.live._handle(*event)
+        settle()
+        self.live.model.fold_closed_assignments()
+        pin = '&generation=' + first['generation'] + '&revision=' + str(first['revision'])
+        self.assertEqual(409, self.request('/api/items/work/evidence?limit=1'+pin)[0])
+        status, fresh = self.request('/api/items/work/evidence?limit=1')
+        self.assertEqual(200, status)
+        self.assertGreater(fresh['revision'], first['revision'])
+        self.assertEqual('Changed detail only', fresh['records'][0]['note'])
+        self.assertNotIn(('attests', 'assignment'), self.live.model.inventories)
+        gateway.rows['assignments', None][0]['subject'] = 'Changed assignment detail only'
+        self.assertEqual(409, self.request('/api/items/work/evidence?limit=1')[0])

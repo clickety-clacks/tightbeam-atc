@@ -251,18 +251,42 @@ class LiveService:
             owned = [a for a in assignments.rows.values() if a.get("workItemId") == item_id]
             from heapq import nsmallest
             from itertools import chain
-            from atc_summary import HistoryFold
+            from atc_summary import HistoryFold, DetailFingerprint
             from atc_evidence import Inventory
+            closed = self.model.closed_item(item_id, owned)
+            closed_fingerprint = DetailFingerprint() if closed else None
+            assignment_facts = assignments.evidence()
+
+            def reload_details():
+                # The old source identities have been released. Reconcile
+                # through existing collection reads instead of reintroducing
+                # a permanent detail cache or returning new text under this pin.
+                self._dirty = True
+                self.events.put(("detail-reload", None))
+                return 409, {"error": "revision-mismatch", **pin}
+
+            if closed:
+                result = self.gateway.read("assignments", None)
+                fresh_owned = [a for a in result.rows if a.get("workItemId") == item_id]
+                if [a for a in fresh_owned if a.get("state") == "open"] != owned:
+                    return reload_details()
+                evidence = Inventory()
+                evidence.read((), complete=result.complete, at=result.at, source=result.source)
+                assignment_facts = combined_evidence(assignment_facts, evidence.evidence())
+                owned = fresh_owned
+                del result, fresh_owned
             scopes, rows, total = [], [], 0
             end = offset + limit
-            for assignment in owned:
+            for position, assignment in enumerate(owned):
                 scope = assignment["id"]
-                epoch = self.reads.epochs["attests", scope]
+                folded_assignment = closed is not None and assignment.get("state") != "open"
+                epoch = None if folded_assignment else self.reads.epochs["attests", scope]
                 result = self.gateway.read("attests", scope)
                 fold = HistoryFold("attests", result.at)
                 fold.add(result.rows)
-                known = self.model.inventory("attests", scope)
-                if known.fingerprint != fold.fingerprint.hexdigest():
+                if folded_assignment:
+                    closed_fingerprint.add(assignment, fold.fingerprint.hexdigest(), position)
+                elif self.model.inventory("attests", scope).fingerprint != fold.fingerprint.hexdigest():
                     # A reread cannot label changed detail text with the old
                     # publication pin. Commit its compact facts on the model
                     # worker, then let the existing mismatch retry get a page.
@@ -278,7 +302,9 @@ class LiveService:
                 rows = nsmallest(end, chain(rows, result.rows),
                                  key=lambda row: (row.get("ts") or 0, row["id"]))
                 del result, fold
-            facts = combined_evidence(work.evidence(), assignments.evidence(),
+            if closed and closed_fingerprint.hexdigest() != closed["detailFingerprint"]:
+                return reload_details()
+            facts = combined_evidence(work.evidence(), assignment_facts,
                                       *scopes)
             return 200, deepcopy({
                 **pin, "itemId": item_id, "item": item, "assignments": owned,
@@ -1388,6 +1414,8 @@ class LiveService:
                 self.model.accept("attests", scope, result)
             else:
                 self._refresh("attests", scope)
+        elif kind == "detail-reload":
+            self.rebuild(recovery=True)
         elif kind == "change":
             if (isinstance(value, tuple) and len(value) == 2
                     and isinstance(value[0], dict)):
