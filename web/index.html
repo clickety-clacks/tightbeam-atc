@@ -4457,6 +4457,20 @@ function activeRenderInterval(controlsChanged){
   return renderInterval({cameraMoving:!!flight || chromeMoving, controlsChanged,
     pulses:pulses.length > 0, messages:msgLines.length > 0});
 }
+function updateTetherEndpoints(geometry, from, to){
+  const start = geometry.attributes.instanceStart;
+  const end = geometry.attributes.instanceEnd;
+  if (start.getX(0) === Math.fround(from.x) && start.getY(0) === Math.fround(from.y) &&
+      start.getZ(0) === Math.fround(from.z) && end.getX(0) === Math.fround(to.x) &&
+      end.getY(0) === Math.fround(to.y) && end.getZ(0) === Math.fround(to.z)) return;
+  // setPositions creates a new interleaved buffer. Replacing it every partial
+  // frame leaves the previous GPU allocation alive until the context ends.
+  start.setXYZ(0, from.x, from.y, from.z);
+  end.setXYZ(0, to.x, to.y, to.z);
+  start.data.needsUpdate = true;
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+}
 function tickFrame(){
   if (renderer.getContext().isContextLost()){
     renderLoop?.pause();
@@ -4634,7 +4648,7 @@ function tickFrame(){
       ? Math.min(hiRelations.has('tether:' + u.itemMesh.userData.w.id + '|' + u.hid) ? 1 : DIM, endpointF)
       : endpointF;
     u.mat.opacity = (u.state==='hold' ? .22 : .4) * tetherLit;
-    u.geo.setPositions([p.x,p.y,p.z, _end.x,_end.y,_end.z]);
+    updateTetherEndpoints(u.geo, p, _end);
   });
   /* Agent links keep a fixed brightness gradient pointing toward the owner. */
   linkGroup.children.forEach(o=>{

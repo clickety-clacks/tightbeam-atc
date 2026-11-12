@@ -56,3 +56,24 @@ while(task.pending){
 }
 assert.equal(done,true);
 assert.deepEqual(JSON.parse(JSON.stringify(scene(partial))),JSON.parse(JSON.stringify(scene(full))));
+
+// Drawing successive partial boards must not allocate a fresh tether buffer
+// for unchanged endpoints. Moving endpoints still updates geometry and bounds.
+const updateCode=page.slice(page.indexOf('function updateTetherEndpoints('),page.indexOf('function tickFrame('));
+vm.runInContext(updateCode,partial);
+const tether=new LineSegmentsGeometry().setPositions([0,0,0,0,0,0]);
+const buffer=tether.attributes.instanceStart.data;
+const from=new THREE.Vector3(1.25,2.5,3.75),to=new THREE.Vector3(4.5,5.25,6.5);
+partial.updateTetherEndpoints(tether,from,to);
+const version=buffer.version;
+for(let i=0;i<200;i++)partial.updateTetherEndpoints(tether,from,to);
+assert.equal(tether.attributes.instanceStart.data,buffer);
+assert.equal(tether.attributes.instanceEnd.data,buffer);
+assert.equal(buffer.version,version,'unchanged frames do not re-upload tethers');
+to.set(-2.25,4.75,9.5);
+partial.updateTetherEndpoints(tether,from,to);
+const expected=new LineSegmentsGeometry().setPositions([...from.toArray(),...to.toArray()]);
+assert.deepEqual([...buffer.array],[...expected.attributes.instanceStart.data.array]);
+assert.ok(tether.boundingBox.equals(expected.boundingBox));
+assert.ok(tether.boundingSphere.equals(expected.boundingSphere));
+assert.equal(tether.attributes.instanceStart.data,buffer,'moving a tether reuses its allocation');
