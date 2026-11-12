@@ -112,7 +112,7 @@ class LiveService:
         self.generation, self.revision = uuid.uuid4().hex, 0
         self.rebuild_interval, self.workers = rebuild_interval, workers
         self.events = queue.Queue()
-        self.reads = ReadQueue(gateway, self.events, workers, self.model.current_ids)
+        self.reads = ReadQueue(gateway, self.events, workers, self._read_plan)
         self.retired_activity_marker = None
         self.retired_activity_pending = False
         self.backstop = ActiveBackstop()
@@ -483,6 +483,8 @@ class LiveService:
         return workers
 
     def _state(self, state, reason=None):
+        if state == "live" and self.model.item_assignment_pending:
+            state, reason = "rebuilding", "reading complete item assignment source"
         if (state in {"live", "rebuilding"} and self.connected and
                 any(self.model.inventory(*s).budget_stale for s in self.backstop.active)):
             state, reason = "stale", "active reconciliation budget exceeded"
@@ -1021,6 +1023,7 @@ class LiveService:
         # keep the existing periodic-read behavior.
         if ((not self.connected and cycle.get("resume")) or
                 cycle["pending"] or not cycle["expanded"] or self.retired_activity_pending
+                or self.model.item_assignment_pending
                 or ("retired-turns", None) in self.read_failures):
             return
         # A failing history remains stale until its next successful rotation;
@@ -1072,6 +1075,55 @@ class LiveService:
         if item.get("state") in {"closed", "iceboxed"} and could_be_visible:
             self.reads.schedule("finish-time", wid)
 
+    def _request_item_assignments(self, wid, *, changed=False):
+        if not self.model.hold_item_assignments(wid):
+            return False
+        job = ("item-assignment-source", wid, None)
+        if changed:
+            self.reads.touch(*job[:2])
+        if job not in self.read_retries:
+            self.reads.schedule(*job, priority=True)
+        self._incomplete_state("reading complete item assignment source")
+        return True
+
+    def _read_plan(self, resource, scope):
+        current = self.model.current_ids(resource, scope)
+        if resource != "item-assignment-source":
+            return current
+        item = self.model.work_items().get(scope, {})
+        return {"liveIds": current,
+                "attests": not (self._summary_contract_active() and has_work_item_summary(item)
+                                 and not self._summary_needs_review_timing(item))}
+
+    def _item_assignments_done(self, job, result):
+        self.retry_in_flight.discard(job)
+        wid = job[1]
+        if wid not in self.model.work_items():
+            self.model.item_assignment_pending.discard(wid)
+            self.model.item_assignment_facts.pop(wid, None)
+            self._forget_scopes({job[:2]})
+            return True
+        if result.complete:
+            released = self.model.replace_item_assignments(wid, result)
+            self._forget_scopes(released | {job[:2]})
+            if not self.connected:
+                self.model.item_assignment_facts[wid]["freshness"] = "stale"
+            self._discover_histories()
+        else:
+            self.read_failures.add(job[:2])
+            self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, 2)
+            self.retry_counters["scheduled"] += 1
+            self.last_incomplete_read = self._read_outcome(*job, result)
+            self._incomplete_state("item assignment source incomplete")
+        if self.cycle:
+            self._settle_cycle()
+        elif self.connected and not self.read_failures and not self.model.item_assignment_pending:
+            required = list(BASE_SCOPES) + self._history_scopes()
+            if all(self.model.inventory(*s).complete and not self.model.inventory(*s).stale
+                   for s in required):
+                self._state("live")
+        return True
+
     def _read_done(self, value):
         job, epoch, result = value
         resource, scope, key = job
@@ -1087,10 +1139,44 @@ class LiveService:
             return False
         if resource == "retired-turns":
             return self._retired_activity_done(job, result)
-        if (self.model.closed_sources_released and
-                ((resource == "assignments" and key is not None)
-                 or (resource == "attests" and scope not in self.model.inventory("assignments").rows))):
-            self.rebuild(recovery=True)
+        if resource == "item-assignment-source":
+            return self._item_assignments_done(job, result)
+        assignments = self.model.inventory("assignments")
+        if resource == "assignments" and key is not None and self.model.closed_sources_released:
+            row = result.rows[0] if result.complete and len(result.rows) == 1 else None
+            wid = (row or assignments.rows.get(key, {})).get("workItemId")
+            if wid and self._request_item_assignments(wid):
+                self.read_retries.pop(job, None)
+                self.retry_in_flight.discard(job)
+            else:
+                # Discarded IDs are correlated through this existing detail
+                # route; an unavailable owner is retried, never globally scanned.
+                self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, priority)
+                self.last_incomplete_read = self._read_outcome(*job, result)
+            return True
+        if resource == "attests" and scope is not None:
+            owner = assignments.rows.get(scope, {}).get("workItemId")
+            if owner and (not result.complete or owner in self.model.item_assignment_pending):
+                self.last_incomplete_read = self._read_outcome(*job, result)
+                self._request_item_assignments(owner)
+                # The complete item read replaces this scope too. Its retry
+                # owns the incompleteness, without retaining the partial rows.
+                self._forget_scopes({job[:2]})
+                return True
+            if self.model.closed_sources_released and owner is None:
+                self._refresh("assignments", key=scope)
+                return True
+        if resource == "assignments" and key is None and not result.complete:
+            affected = set(self.model.work_items())
+            affected.update(row.get("workItemId") for row in result.rows)
+            for wid in affected:
+                self._request_item_assignments(wid)
+            # Record the global failure independently. None of this partial
+            # collection may overwrite an item's last complete source facts.
+            result.rows = []
+        if (resource == "assignments" and key is not None and result.rows
+                and result.rows[0].get("workItemId") in self.model.item_assignment_pending):
+            self._request_item_assignments(result.rows[0]["workItemId"])
             return True
         if (resource == "artifacts" and key is not None
                 and self.model.inventory(resource, scope).released):
@@ -1357,16 +1443,27 @@ class LiveService:
             scope = payload.get("sessionKey") or refs.get("sessionKey")
         else:
             scope = None
+        owner = (payload.get("workItemId") or refs.get("workItemId") or
+                 self.model.inventory("assignments").rows.get(
+                     key if resource == "assignments" else scope, {}).get("workItemId"))
+        if (resource in {"assignments", "attests"}
+                and owner in self.model.item_assignment_pending):
+            self._request_item_assignments(owner, changed=True)
+            return True
         if (self.model.closed_sources_released and
                 ((resource == "assignments" and
                   (key not in self.model.inventory("assignments").rows
                    or payload.get("state") not in {None, "open"}))
                  or (resource == "attests" and
                      scope not in self.model.inventory("assignments").rows))):
-            # An evicted assignment identity must be correlated again from
-            # the existing source collection before its item facts can change.
-            self.reads.touch("assignments", None)
-            self.rebuild(recovery=True)
+            if not self._request_item_assignments(owner, changed=True):
+                aid = key if resource == "assignments" else scope
+                if aid is not None:
+                    self.reads.touch("assignments", None)
+                    self._refresh("assignments", key=aid)
+                elif key is not None:
+                    self.correlation_gaps.add((resource, key))
+                    self._refresh(resource, key=key)
             return True
         if (resource in {"turns", "wakes", "messages"} and scope is not None
                 and self.model.inventory("sessions").complete
@@ -1498,9 +1595,12 @@ class LiveService:
             self._refresh("work-items", key=value)
         elif kind == "detail-history":
             scope, epoch, result = value
+            owner = self.model.inventory("assignments").rows.get(scope, {}).get("workItemId")
             if (self.model.closed_sources_released
                     and scope not in self.model.inventory("assignments").rows):
-                self.rebuild(recovery=True)
+                self._refresh("assignments", key=scope)
+            elif owner and (not result.complete or owner in self.model.item_assignment_pending):
+                self._request_item_assignments(owner, changed=True)
             elif epoch == self.reads.epochs["attests", scope]:
                 self.model.accept("attests", scope, result)
             else:

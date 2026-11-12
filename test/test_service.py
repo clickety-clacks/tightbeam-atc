@@ -69,7 +69,17 @@ class PublishedReads:
         self.calls.append(("detail", resource, scope, key))
         identity = "sessionKey" if resource == "sessions" else "id"
         rows = [r for r in self.rows.get((resource, scope), []) if r.get(identity) == key]
-        return Read(deepcopy(rows), bool(rows), 11, "published-detail")
+        rows = deepcopy(rows)
+        if resource == "assignments":
+            for row in rows:
+                row.setdefault("commitRefCorrections", [])
+        return Read(rows, bool(rows), 11, "published-detail")
+
+    def assignment_membership(self, wid):
+        self.read_count += 1
+        self.calls.append(("membership", wid))
+        return Read([{"id": row["id"]} for row in self.rows['assignments', None]
+                     if row.get("workItemId") == wid], True, 10, "published-membership")
 
 
 class LocalCanonicalGitResolver(GitResolver):

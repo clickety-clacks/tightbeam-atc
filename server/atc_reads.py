@@ -90,6 +90,9 @@ class ReadQueue:
         from atc_model import ClosedAssignmentFold
         from atc_summary import HistoryFold
 
+        read_attests = True
+        if isinstance(live_ids, dict):
+            read_attests, live_ids = live_ids["attests"], live_ids["liveIds"]
         source = "item-assignment-source"
         membership = self.gateway.assignment_membership(wid)
         if not membership.complete:
@@ -107,19 +110,23 @@ class ReadQueue:
             if (row.get("id") != aid or row.get("workItemId") != wid
                     or not isinstance(row.get("commitRefCorrections"), list)):
                 return Read([], False, detail.at, source, "assignment-detail-incomplete")
-            if hasattr(self.gateway, "read_current"):
+            if not read_attests:
+                result = None
+            elif hasattr(self.gateway, "read_current"):
                 result = self.gateway.read_current("attests", aid)
             else:
                 result = self.gateway.read("attests", aid)
-            if not result.complete:
+            if result is not None and not result.complete:
                 return Read([], False, result.at, source, result.error)
-            fold = result.folded
-            if fold is None:
-                fold = HistoryFold("attests", result.at)
-                fold.add(result.rows)
             inventory = HistoryInventory("attests")
-            inventory.read_fold(fold, complete=True, at=result.at, source=result.source)
-            at = result.at
+            fold = None
+            if result is not None:
+                fold = result.folded
+                if fold is None:
+                    fold = HistoryFold("attests", result.at)
+                    fold.add(result.rows)
+                inventory.read_fold(fold, complete=True, at=result.at, source=result.source)
+                at = result.at
             if row.get("state") == "open":
                 staged.open_rows[aid] = row
                 staged.open_attests[aid] = inventory
