@@ -249,23 +249,42 @@ class LiveService:
                 return (404 if work.complete else 503), {"error": "item-unavailable", **pin}
             assignments = self.model.inventory("assignments")
             owned = [a for a in assignments.rows.values() if a.get("workItemId") == item_id]
-            reads = [self.gateway.read("attests", a["id"]) for a in owned]
-            scopes = []
-            for result in reads:
-                from atc_evidence import Inventory
+            from heapq import nsmallest
+            from itertools import chain
+            from atc_summary import HistoryFold
+            from atc_evidence import Inventory
+            scopes, rows, total = [], [], 0
+            end = offset + limit
+            for assignment in owned:
+                scope = assignment["id"]
+                epoch = self.reads.epochs["attests", scope]
+                result = self.gateway.read("attests", scope)
+                fold = HistoryFold("attests", result.at)
+                fold.add(result.rows)
+                known = self.model.inventory("attests", scope)
+                if known.fingerprint != fold.fingerprint.hexdigest():
+                    # A reread cannot label changed detail text with the old
+                    # publication pin. Commit its compact facts on the model
+                    # worker, then let the existing mismatch retry get a page.
+                    self._dirty = True
+                    self.events.put(("detail-history", (scope, epoch, Read(
+                        [], result.complete, result.at, result.source,
+                        result.error, result.page, fold))))
+                    return 409, {"error": "revision-mismatch", **pin}
                 evidence = Inventory()
                 evidence.read((), complete=result.complete, at=result.at, source=result.source)
-                scopes.append(evidence)
+                scopes.append(evidence.evidence())
+                total += len(result.rows)
+                rows = nsmallest(end, chain(rows, result.rows),
+                                 key=lambda row: (row.get("ts") or 0, row["id"]))
+                del result, fold
             facts = combined_evidence(work.evidence(), assignments.evidence(),
-                                      *(scope.evidence() for scope in scopes))
-            rows = sorted((row for result in reads for row in result.rows),
-                          key=lambda row: (row.get("ts") or 0, row["id"]))
-            end = offset + limit
+                                      *scopes)
             return 200, deepcopy({
                 **pin, "itemId": item_id, "item": item, "assignments": owned,
                 "records": [dict(row, bySession=row.get("bySession"), byUser=row.get("byUser"),
                                  note=row.get("note")) for row in rows[offset:end]],
-                "total": len(rows), "nextOffset": end if end < len(rows) else None,
+                "total": total, "nextOffset": end if end < total else None,
                 "complete": facts["complete"], "freshness": facts,
             })
 
@@ -1355,6 +1374,12 @@ class LiveService:
             return changed
         elif kind == "read":
             return self._read_done(value)
+        elif kind == "detail-history":
+            scope, epoch, result = value
+            if epoch == self.reads.epochs["attests", scope]:
+                self.model.accept("attests", scope, result)
+            else:
+                self._refresh("attests", scope)
         elif kind == "change":
             if (isinstance(value, tuple) and len(value) == 2
                     and isinstance(value[0], dict)):

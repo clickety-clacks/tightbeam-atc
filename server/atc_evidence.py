@@ -271,6 +271,9 @@ class HistoryInventory(Inventory):
                 field = "at" if self.resource == "messages" else "firedAt"
                 previous["marks"] = sorted(marks.values(), key=lambda row: row[field], reverse=True)
         self.prune(at, force=True)
+        # Identity of the last source read also pins on-demand detail pages.
+        # Partial completeness remains independent of its text fingerprint.
+        self.fingerprint = fold.fingerprint.hexdigest()
 
     def prune(self, now, *, force=False):
         from atc_summary import HISTORY_TIMES

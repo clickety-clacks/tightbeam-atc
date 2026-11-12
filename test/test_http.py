@@ -133,7 +133,12 @@ class HttpTest(unittest.TestCase):
         self.assertIsNone(last["nextOffset"])
         # Only long detail text changes; the next page must still invalidate.
         rows[0]["note"] = "Changed note"
-        self.live.model.accept("attests", "assignment", Read(rows, True, 1, "test-read"))
+        status, mismatch = self.request("/api/items/item/evidence?offset=2&limit=2" + pin)
+        self.assertEqual(409, status)
+        self.assertEqual(first["revision"], mismatch["revision"])
+        event = self.live.events.get_nowait()
+        self.assertEqual("detail-history", event[0])
+        self.live._handle(*event)
         self.live._publish()
         status, mismatch = self.request("/api/items/item/evidence?offset=2&limit=2" + pin)
         self.assertEqual(409, status)
@@ -146,6 +151,31 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertEqual("Changed note", restarted["records"][0]["note"])
         self.assertNotIn("Changed note", json.dumps(self.request("/api/model")[1]))
+
+    def test_evidence_page_orders_across_assignments_and_reports_partial_reads(self):
+        from unittest.mock import Mock
+        self.live.model.accept("work-items", None, Read([
+            {"id": "item", "title": "Visible", "state": "open"}], True, 1, "test-read"))
+        self.live.model.accept("assignments", None, Read([
+            {"id": scope, "workItemId": "item", "state": "closed"} for scope in ('a', 'b')],
+            True, 1, "test-read"))
+        rows = {'a': [{'id': '1', 'ts': 1}, {'id': '4', 'ts': 4}],
+                'b': [{'id': '2', 'ts': 2}, {'id': '3', 'ts': 3}]}
+        for scope, records in rows.items():
+            self.live.model.accept("attests", scope, Read(records, True, 1, "test-read"))
+        self.live.gateway = Mock(read_count=0)
+        self.live.gateway.read.side_effect = lambda resource, scope: Read(rows[scope], scope == 'a', 1, "test-read")
+        self.live._publish()
+        status, first = self.request('/api/items/item/evidence?limit=2')
+        self.assertEqual(200, status)
+        self.assertEqual(['1', '2'], [row['id'] for row in first['records']])
+        self.assertEqual(4, first['total'])
+        self.assertFalse(first['complete'])
+        pin = '&generation=' + first['generation'] + '&revision=' + str(first['revision'])
+        status, last = self.request('/api/items/item/evidence?offset=2&limit=2' + pin)
+        self.assertEqual(200, status)
+        self.assertEqual(['3', '4'], [row['id'] for row in last['records']])
+        self.assertIsNone(last['nextOffset'])
 
     def test_reconnect_ignores_last_event_id_and_starts_with_current_full_model(self):
         request = Request(self.url + "/api/events", headers={"Last-Event-ID": "old"})
