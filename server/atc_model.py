@@ -313,17 +313,18 @@ class EvidenceModel:
                 inventory.rows.clear()
                 inventory.observations.clear()
 
-    def fold_closed_assignments(self):
+    def fold_closed_assignments(self, *, items=None):
         """Fold a settled assignment read into per-item board facts."""
         assignments = self.inventory("assignments")
-        if not assignments.complete or not any(row.get("state") != "open" for row in assignments.rows.values()):
+        if ((items is None and not assignments.complete)
+                or not any(row.get("state") != "open" for row in assignments.rows.values())):
             return set()
         grouped = {}
         item_positions = Counter()
         previous_order = self.open_assignment_order
         raw_closed_items = {row.get("workItemId") for row in assignments.rows.values()
                             if row.get("state") != "open"}
-        self.open_assignment_order = {}
+        self.open_assignment_order = ({} if items is None else dict(previous_order))
         live_ids = {turn.get("assignmentId") for resource, scope in self.inventories
                     if resource == "turns" for turn in self.summary(resource, scope)["live"]}
         self.live_assignment_items = {aid: wid for aid, wid in self.live_assignment_items.items()
@@ -333,6 +334,8 @@ class EvidenceModel:
             wid = row.get("workItemId")
             position = item_positions[wid]
             item_positions[wid] += 1
+            if items is not None and wid not in items:
+                continue
             if row.get("state") == "open":
                 self.open_assignment_order[aid] = (order if wid in raw_closed_items else
                                                     previous_order.get(aid, order))
@@ -401,7 +404,7 @@ class EvidenceModel:
         old = {aid for aid, row in assignments.rows.items() if row.get("workItemId") == wid}
         released = {("attests", aid) for aid in old - staged.open_rows.keys()}
         previous = self.closed_items.get(wid)
-        turn_at = previous.get("turnActivity") if previous else None
+        turn_at = latest_time(previous.get("turnActivity") if previous else None, staged.activity)
         # Preserve turn contributions independently of corrected assignment
         # times. Retaining the old combined maximum would hide a correction.
         for resource, scope in tuple(self.inventories):

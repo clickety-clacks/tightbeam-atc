@@ -1081,6 +1081,9 @@ class LiveService:
     def _request_item_assignments(self, wid, *, changed=False):
         if not self.model.hold_item_assignments(wid):
             return False
+        # The held values are current facts, not a license to keep old closed
+        # source text throughout repeated failures of the replacement read.
+        self._forget_scopes(self.model.fold_closed_assignments(items={wid}))
         job = ("item-assignment-source", wid, None)
         if changed:
             self.reads.touch(*job[:2])
@@ -1095,6 +1098,7 @@ class LiveService:
             return current
         item = self.model.work_items().get(scope, {})
         return {"liveIds": current,
+                "visibleSessions": {row["sessionKey"] for row in self.model.active_sessions()},
                 "attests": not (self._summary_contract_active() and has_work_item_summary(item)
                                  and not self._summary_needs_review_timing(item))}
 
@@ -1111,6 +1115,10 @@ class LiveService:
             self._forget_scopes(released | {job[:2]})
             if not self.connected:
                 self.model.item_assignment_facts[wid]["freshness"] = "stale"
+            sessions = self.model.inventory("sessions").rows
+            for row in result.folded.open_rows.values():
+                if row.get("holderKey") and row["holderKey"] not in sessions:
+                    self._refresh("sessions", key=row["holderKey"])
             self._discover_histories()
         else:
             self.read_failures.add(job[:2])
@@ -1162,7 +1170,8 @@ class LiveService:
             if owner and (not result.complete or owner in self.model.item_assignment_pending):
                 self.last_incomplete_read = self._read_outcome(*job, result)
                 self._request_item_assignments(owner, changed=True)
-                self.model.inventory(resource, scope).invalidate()
+                if (resource, scope) in self.model.inventories:
+                    self.model.inventories[resource, scope].invalidate()
                 # The complete item read replaces this scope too. Its retry
                 # owns the incompleteness, without retaining the partial rows.
                 self._forget_scopes({job[:2]})

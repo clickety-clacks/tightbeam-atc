@@ -15,6 +15,7 @@ class ItemAssignmentSource:
     open_order: dict = field(default_factory=dict)
     live_items: dict = field(default_factory=dict)
     closed: dict | None = None
+    activity: int | float | None = None
 
 
 class ReadQueue:
@@ -90,14 +91,16 @@ class ReadQueue:
         from atc_model import ClosedAssignmentFold
         from atc_summary import HistoryFold
 
-        read_attests = True
+        read_attests, visible = True, None
         if isinstance(live_ids, dict):
+            visible = live_ids.get("visibleSessions")
             read_attests, live_ids = live_ids["attests"], live_ids["liveIds"]
         source = "item-assignment-source"
         membership = self.gateway.assignment_membership(wid)
         if not membership.complete:
             return Read([], False, membership.at, source, membership.error)
         staged, closed = ItemAssignmentSource(), ClosedAssignmentFold()
+        retired = {}
         at = membership.at
         for position, member in enumerate(membership.rows):
             aid = member["id"]
@@ -110,6 +113,9 @@ class ReadQueue:
             if (row.get("id") != aid or row.get("workItemId") != wid
                     or not isinstance(row.get("commitRefCorrections"), list)):
                 return Read([], False, detail.at, source, "assignment-detail-incomplete")
+            holder = row.get("holderKey")
+            if visible is not None and holder and holder not in visible:
+                retired.setdefault(holder, {})[aid] = wid
             if not read_attests:
                 result = None
             elif hasattr(self.gateway, "read_current"):
@@ -138,6 +144,24 @@ class ReadQueue:
             # Only current open sources survive the next member. Closed raw
             # assignment/attest text and temporary page folds are not staged.
             del row, detail, result, fold, inventory
+        # The same existing warm-path turn history used by fresh full loads.
+        # Only holders discovered in this item's complete membership qualify.
+        from atc_summary import ItemActivityFold
+        for session, mapping in retired.items():
+            if hasattr(self.gateway, "read_item_activity"):
+                result = self.gateway.read_item_activity(session, mapping)
+                fold = result.folded
+            else:
+                result = self.gateway.read("turns", session)
+                fold = ItemActivityFold(mapping)
+                fold.add(result.rows)
+            if not result.complete:
+                return Read([], False, result.at, source, result.error)
+            value = fold.activity.get(wid)
+            if value is not None:
+                staged.activity = max(staged.activity or 0, value)
+            at = result.at
+            del result, fold
         if closed.part["count"]:
             staged.closed = closed.finish()
         return Read([], True, at, source, folded=staged)

@@ -160,3 +160,20 @@ class ItemAssignmentRetryTest(unittest.TestCase):
         item = next(row for row in model.snapshot(1000)['items'] if row['id'] == 'work')
         self.assertEqual(expected, item['commitRefs'])
 
+    def test_targeted_replacement_keeps_retired_holder_activity_in_full_board(self):
+        gateway = ItemReads()
+        for session in gateway.rows['sessions', None]:
+            if session['sessionKey'] == 'other':
+                session['state'] = 'retired'
+        gateway.rows['turns', 'other'] = [dict(seq=3, sessionKey='other',
+                                             assignmentId='last', endedAt=700000)]
+        service = self.service(gateway)
+        gateway.rows['turns', 'other'][0]['endedAt'] = 800000
+        self.partial(service, {'last'})
+        self.settle(service)
+        fresh = self.fresh(service)
+        self.assertEqual(800000, self.facts(service)[0]['latestActivityAt'])
+        for name in ('agents', 'items', 'links', 'wakes', 'messages'):
+            self.assertEqual(fresh.current[name], service.current[name], name)
+        self.assertNotIn(('turns', 'other'), service.model.inventories)
+
