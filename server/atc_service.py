@@ -270,7 +270,10 @@ class LiveService:
             closed = self.model.closed_item(item_id, owned)
             closed_fingerprint = DetailFingerprint() if closed else None
             assignment_fingerprint = DetailFingerprint() if closed else None
-            assignment_facts = assignments.evidence()
+            assignment_facts = self.model.assignment_evidence(item_id)
+            if item_id in self.model.item_assignment_pending:
+                assignment_facts = dict(assignment_facts, status="unknown", complete=False,
+                                        freshness="stale")
 
             def reload_details(observed=None):
                 # The old source identities have been released. Reconcile
@@ -509,6 +512,12 @@ class LiveService:
         # Only the model worker writes. Build the next immutable frame without
         # holding the condition used by subscribers of the committed frame.
         at = now_ms()
+        removed = self.model.item_assignment_pending - self.model.work_items().keys()
+        self._forget_scopes({("item-assignment-source", wid) for wid in removed})
+        for wid in removed:
+            self.model.item_assignment_pending.discard(wid)
+            self.model.item_assignment_facts.pop(wid, None)
+            self.model.item_assignment_summary.pop(wid, None)
         if self._fold_closed_sources():
             classified = False
         if not classified:
@@ -817,6 +826,8 @@ class LiveService:
 
     def _reconcile_item_attests(self, item):
         self._schedule_finish_time(item)
+        if item["id"] in self.model.item_assignment_pending:
+            return
         if not self._summary_contract_active() or not has_work_item_summary(item):
             return
         assignments = self.model.inventory("assignments")
@@ -1108,6 +1119,7 @@ class LiveService:
         if wid not in self.model.work_items():
             self.model.item_assignment_pending.discard(wid)
             self.model.item_assignment_facts.pop(wid, None)
+            self.model.item_assignment_summary.pop(wid, None)
             self._forget_scopes({job[:2]})
             return True
         if result.complete:
@@ -1157,6 +1169,11 @@ class LiveService:
             row = result.rows[0] if result.complete and len(result.rows) == 1 else None
             wid = (row or assignments.rows.get(key, {})).get("workItemId")
             if wid and self._request_item_assignments(wid, changed=True):
+                self.read_retries.pop(job, None)
+                self.retry_in_flight.discard(job)
+            elif wid and self.model.inventory("work-items").complete:
+                # A successfully correlated assignment outside the current
+                # server item set has no pending item source to repair.
                 self.read_retries.pop(job, None)
                 self.retry_in_flight.discard(job)
             else:
@@ -1278,6 +1295,9 @@ class LiveService:
             if self.model.current_ids("wakes", scope) - wakes.rows.keys():
                 self._refresh("wakes", scope)
         if resource == "work-items" and result.complete:
+            for row in result.rows:
+                if row.get("id") in self.model.item_assignment_pending:
+                    self._request_item_assignments(row["id"], changed=True)
             if key is None:
                 for row in result.rows:
                     self._reconcile_item_attests(row)
@@ -1527,6 +1547,8 @@ class LiveService:
                 if resource == "attests" and previous != inventory.rows.get(str(row[inventory.key])):
                     self.model.details_revision += 1
                 if resource == "work-items":
+                    if str(row["id"]) in self.model.item_assignment_pending:
+                        self._request_item_assignments(str(row["id"]), changed=True)
                     self._reconcile_item_attests(self.model.work_items()[str(row[inventory.key])])
         if not applied:
             if resource == "roles":

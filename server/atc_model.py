@@ -104,6 +104,7 @@ class EvidenceModel:
         self.closed_sources_released = False
         self.item_assignment_facts = {}
         self.item_assignment_pending = set()
+        self.item_assignment_summary = {}
         self.older_items = {}
         self._work_item_order = []
         self.older_item_sources_released = False
@@ -386,9 +387,16 @@ class EvidenceModel:
         return self.closed_items.get(wid) if not any(a.get("state") != "open" for a in owned) else None
 
     def hold_item_assignments(self, wid):
-        if wid not in self.work_items():
+        item = self.work_items().get(wid)
+        if item is None:
             return False
         self.item_assignment_facts.setdefault(wid, self.inventory("assignments").evidence())
+        if wid not in self.item_assignment_pending:
+            # Only currently published assignment-derived summary values are
+            # held. Titles, state and independent landing evidence stay live.
+            self.item_assignment_summary[wid] = ({key: item[key] for key in (
+                "holders", "started", "attestCounts", "verdictCounts", "effectiveCommitRefs")}
+                if has_work_item_summary(item) else None)
         self.item_assignment_pending.add(wid)
         return True
 
@@ -439,6 +447,7 @@ class EvidenceModel:
         else:
             self.closed_items.pop(wid, None)
         self.item_assignment_pending.discard(wid)
+        self.item_assignment_summary.pop(wid, None)
         self.closed_sources_released = True
         self.closed_revision += 1
         self.details_revision += 1
@@ -546,8 +555,10 @@ class EvidenceModel:
         holders = {a.get("holderKey") for a in self.inventory("assignments").rows.values()
                    if a.get("state") == "open"}
         for item in self.work_items().values():
-            if has_work_item_summary(item):
-                holders.update(item["holders"])
+            summary = (self.item_assignment_summary.get(item["id"])
+                       if item["id"] in self.item_assignment_pending else item)
+            if summary is not None and "holders" in summary:
+                holders.update(summary["holders"])
         return [s for s in self.inventory("sessions").rows.values()
                 if s.get("state") == "active" or s["sessionKey"] in holders]
 
@@ -650,6 +661,8 @@ class EvidenceModel:
         self.recent_expiries = {key: at for key, at in self.recent_expiries.items() if at > now}
         published = self.work_items().keys()
         self.item_assignment_pending.intersection_update(published)
+        self.item_assignment_summary = {wid: summary for wid, summary in self.item_assignment_summary.items()
+                                        if wid in self.item_assignment_pending}
         self.item_assignment_facts = {wid: fact for wid, fact in self.item_assignment_facts.items()
                                       if wid in published}
         work = self.inventory("work-items")
@@ -773,6 +786,9 @@ class EvidenceModel:
         items = []
         for wid, item in self.work_items().items():
             assignment_facts = self.assignment_evidence(wid)
+            held_summary = self.item_assignment_summary.get(wid)
+            if held_summary is not None:
+                item = dict(item, **held_summary)
             owned = by_item[wid]
             folded_closed = self.closed_item(wid, owned)
             detail_summary = {"count": 0, "kinds": Counter(), "verdicts": Counter(), "latest": {}}
@@ -791,6 +807,8 @@ class EvidenceModel:
                 inventory_facts.append(folded_closed["facts"])
             identity = self.work_item_evidence(wid)
             item_summary = item if has_work_item_summary(item) else None
+            if wid in self.item_assignment_pending and held_summary is None:
+                item_summary = None
             if item_summary is not None:
                 attest_counts = item_summary["attestCounts"]
                 verdict_counts = item_summary["verdictCounts"]

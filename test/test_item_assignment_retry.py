@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_service import LiveService
 from atc_upstream import Read
 from test_closed_folding import ClosedAssignmentFoldTest
-from test_service import PublishedReads
+from test_service import PublishedReads, summarized_work
 
 
 class ItemReads(PublishedReads):
@@ -176,4 +176,69 @@ class ItemAssignmentRetryTest(unittest.TestCase):
         for name in ('agents', 'items', 'links', 'wakes', 'messages'):
             self.assertEqual(fresh.current[name], service.current[name], name)
         self.assertNotIn(('turns', 'other'), service.model.inventories)
+
+    def test_detail_completeness_tracks_item_retry_and_preserves_pin(self):
+        service = self.service(PublishedReads())
+        status, before = service.evidence_page('work')
+        self.assertEqual(200, status)
+        self.assertTrue(before['complete'])
+        service._request_item_assignments('work')
+        service._publish()
+        status, pending = service.evidence_page('work')
+        self.assertEqual(200, status)
+        self.assertFalse(pending['complete'])
+        self.assertEqual(before['records'], pending['records'])
+        self.assertTrue(service.model.inventory('assignments').complete)
+        self.assertEqual(409, service.evidence_page('work', generation=before['generation'],
+                                                  revision=before['revision'])[0])
+        self.settle(service)
+        status, complete = service.evidence_page('work')
+        self.assertEqual(200, status)
+        self.assertTrue(complete['complete'])
+        self.assertEqual(before['records'], complete['records'])
+
+    def test_summary_update_keeps_title_live_and_assignment_values_held_until_retry(self):
+        gateway = ItemReads()
+        gateway.rows['work-items', None] = [summarized_work(holders=['author'],
+            refs=[{'commit': 'old'}], attest_counts={'progress': 3})]
+        service = self.service(gateway)
+        before = deepcopy(service.current['items'][0])
+        gateway.fail_member = 'last'
+        self.partial(service, {'first'})
+        self.settle(service)
+        epoch = service.reads.epochs['item-assignment-source', 'work']
+        gateway.rows['work-items', None] = [summarized_work('New title', 2, holders=['other'],
+            refs=[{'commit': 'new'}], attest_counts={'progress': 4})]
+        service._refresh('work-items', key='work')
+        self.settle(service)
+        held = service.current['items'][0]
+        self.assertEqual('New title', held['title'])
+        for key in ('commitRefs', 'commitRefCorrections', 'stage', 'assignments', 'closedAt'):
+            self.assertEqual(before[key], held[key], key)
+        self.assertFalse(held['evidence']['assignments']['complete'])
+        self.assertGreater(service.reads.epochs['item-assignment-source', 'work'], epoch)
+        gateway.fail_member = None
+        job = ('item-assignment-source', 'work', None)
+        service.read_retries[job] = (0, 2)
+        service._retry_incomplete_reads()
+        self.settle(service)
+        fresh = self.fresh(service)
+        for name in ('agents', 'items', 'links', 'wakes', 'messages'):
+            self.assertEqual(fresh.current[name], service.current[name], name)
+        self.assertEqual({}, service.model.item_assignment_summary)
+
+    def test_item_removal_discards_failed_retry_and_held_facts(self):
+        service = self.service()
+        service.gateway.fail_member = 'last'
+        self.partial(service, {'first'})
+        self.settle(service)
+        self.assertIn('work', service.model.item_assignment_pending)
+        service.gateway.rows['work-items', None] = []
+        service._refresh('work-items')
+        self.settle(service)
+        self.assertEqual([], service.current['items'])
+        self.assertNotIn('work', service.model.item_assignment_pending)
+        self.assertNotIn('work', service.model.item_assignment_facts)
+        self.assertNotIn('work', service.model.item_assignment_summary)
+        self.assertNotIn(('item-assignment-source', 'work', None), service.read_retries)
 
