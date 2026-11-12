@@ -38,6 +38,22 @@ class ReadCompletionTest(unittest.TestCase):
         self.gateway.cli.read.side_effect = ValueError("unavailable")
         self.assertFalse(self.gateway.read("finish-time", "work").complete)
 
+    def test_item_assignment_membership_keeps_order_without_historical_rows(self):
+        self.gateway.cli.read.return_value = {
+            "workItem": {"id": "work", "body": "large item detail"},
+            "assignments": [{"id": "last", "workItemId": "work", "note": "detail"},
+                            {"id": "first", "workItemId": "work"}]}
+        result = self.gateway.assignment_membership("work")
+        self.assertTrue(result.complete)
+        self.assertEqual([{"id": "last"}, {"id": "first"}], result.rows)
+        self.gateway.cli.read.assert_called_once_with("work-item-get", work_item_id="work")
+        self.gateway.cli.read.return_value["assignments"] = []
+        self.assertTrue(self.gateway.assignment_membership("work").complete)
+        self.gateway.cli.read.return_value["assignments"] = [{"id": "foreign", "workItemId": "other"}]
+        self.assertFalse(self.gateway.assignment_membership("work").complete)
+        self.gateway.cli.read.side_effect = ValueError("unavailable")
+        self.assertFalse(self.gateway.assignment_membership("work").complete)
+
     def test_walks_every_page_before_claiming_complete(self):
         self.gateway.request = Mock(side_effect=[
             page([{"id": "a"}], True, "cursor"), page([{"id": "b"}])])
@@ -115,6 +131,7 @@ class PackagedCLITest(unittest.TestCase):
             ("assignment-get", {"assignment_id": "assignment"}, ["assignment-get", "assignment"]),
             ("role-list", {}, ["list"]),
             ("work-item-trace", {"work_item_id":"work"}, ["work-item-trace","work"]),
+            ("work-item-get", {"work_item_id":"work"}, ["work-item-get","work"]),
             ("artifacts", {}, ["artifacts"]),
         ]
         with patch.dict("os.environ", {"TIGHTBEAM_URL": "wrong-endpoint",

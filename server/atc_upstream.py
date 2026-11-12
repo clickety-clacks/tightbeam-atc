@@ -65,7 +65,7 @@ class PackagedCLI:
             if not isinstance(key, str) or not key or key.startswith("-"):
                 raise ValueError("read requires an assignment identity")
             args = [verb, key]
-        elif verb == "work-item-trace" and set(params) == {"work_item_id"}:
+        elif verb in {"work-item-trace", "work-item-get"} and set(params) == {"work_item_id"}:
             key = params["work_item_id"]
             if not isinstance(key, str) or not key or key.startswith("-"):
                 raise ValueError("read requires a work-item identity")
@@ -126,11 +126,39 @@ class Gateway:
     def command(self, verb, **params):
         # This closed set is the adapter's read interface, not a generic
         # command proxy available to viewers.
-        if verb not in {"assignments", "attests", "role-list", "assignment-get", "artifacts", "work-item-trace"}:
+        if verb not in {"assignments", "attests", "role-list", "assignment-get", "artifacts", "work-item-trace", "work-item-get"}:
             raise ValueError("unsupported read")
         with self.count_lock:
             self.read_count += 1
         return self.cli.read(verb, **params)
+
+    def assignment_membership(self, work_item_id):
+        """Existing per-item complete membership, in canonical source order.
+
+        Membership omits reference corrections. Callers must read each member
+        through assignment-get and its attest source before publishing facts.
+        Return identities only; the item body and membership rows are temporary.
+        """
+        source = "cli:work-item-get " + work_item_id
+        try:
+            result = self.command("work-item-get", work_item_id=work_item_id)
+            if result.get("workItem", {}).get("id") != work_item_id:
+                raise ValueError("item membership mismatch")
+            assignments = result["assignments"]
+            if not isinstance(assignments, list):
+                raise ValueError("invalid assignment membership")
+            identities = []
+            seen = set()
+            for row in assignments:
+                if (not isinstance(row, dict) or row.get("workItemId") != work_item_id
+                        or not isinstance(row.get("id"), str) or not row["id"]
+                        or row["id"] in seen):
+                    raise ValueError("invalid assignment member")
+                seen.add(row["id"])
+                identities.append({"id": row["id"]})
+            return Read(identities, True, now_ms(), source)
+        except Exception as error:
+            return Read([], False, now_ms(), source, type(error).__name__)
 
     def collection(self, path, *, fold=None):
         rows, cursor, seen, page_number = [], None, set(), 0
