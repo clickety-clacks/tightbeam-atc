@@ -52,6 +52,49 @@ class ModelTest(unittest.TestCase):
         self.read("work-items", [{"id": "work", "title": "Work", "state": "failed"}])
         self.assertIsNone(self.model.snapshot(20)["items"][0]["finishedAt"])
 
+    def test_item_activity_cache_tracks_reads_payloads_and_removals(self):
+        first = self.model.item_activity()
+        self.read("roles", [{"name": "other", "boundSessionKey": "elsewhere"}])
+        self.model.invalidate()
+        self.assertIs(first, self.model.item_activity(), "freshness alone cannot change activity")
+        self.read("artifacts", [{"artifactId": "new", "workItemId": "work", "updatedAt": 50}])
+        self.assertEqual(50, self.model.item_activity()["work"])
+        self.read("artifacts", [], complete=False)
+        self.assertEqual(50, self.model.item_activity()["work"], "partial reads retain known rows")
+        self.read("artifacts", [])
+        self.assertEqual(10, self.model.item_activity()["work"], "complete removal invalidates the maximum")
+        self.model.inventory("attests", "assignment").payload(
+            {"id": "later", "ts": 60, "kind": "progress"}, at=60, source="feed", policy="immutable")
+        self.assertEqual(60, self.model.item_activity()["work"])
+        self.model.detail("assignments", None, Read([{"id": "assignment", "workItemId": "moved",
+            "openedAt": 3}], True, 70, "detail"))
+        self.assertNotIn("work", self.model.item_activity())
+        self.assertEqual(60, self.model.item_activity()["moved"])
+        self.read("turns", [{"seq": 2, "assignmentId": "assignment", "endedAt": 80}], "other")
+        self.assertEqual(80, self.model.item_activity()["moved"])
+
+    def test_unchanged_activity_does_not_visit_historical_rows(self):
+        class CountedRows(dict):
+            visits = 0
+            def values(self):
+                for row in super().values():
+                    self.visits += 1
+                    yield row
+        self.read("artifacts", [{"artifactId": str(n), "workItemId": "work", "updatedAt": n+1}
+                                for n in range(10000)])
+        artifacts = self.model.inventory("artifacts")
+        artifacts.rows = CountedRows(artifacts.rows)
+        assignments = self.model.inventory("assignments")
+        assignments.rows = CountedRows(assignments.rows)
+        cached = self.model.item_activity()
+        self.assertEqual(10000, cached["work"])
+        visited = (artifacts.rows.visits, assignments.rows.visits)
+        for _ in range(20):
+            self.assertIs(cached, self.model.item_activity())
+        self.assertEqual(visited, (artifacts.rows.visits, assignments.rows.visits))
+        self.assertEqual(10000, self.model.snapshot(20000)["items"][0]["latestActivityAt"])
+        self.assertEqual(visited[0], artifacts.rows.visits, "publication reuses artifact activity")
+
     def test_current_failure_records_never_invent_acceptance(self):
         self.read("work-items", [{"id":"work", "title":"Work", "state":"failed",
                                   "failReason":"The operator accepted this; see a decision in prose",

@@ -29,6 +29,8 @@ class EvidenceModel:
         self.details_revision = 0
         self.recent_expiries = {}
         self.summaries = {}
+        self._item_activity_versions = None
+        self._item_activity = {}
 
     def summary(self, resource, scope):
         inventory = self.inventory(resource, scope)
@@ -92,17 +94,17 @@ class EvidenceModel:
             return corrections[-1].get("commitRefs") or []
         return [ref for attest in attests for ref in (attest.get("commitRefs") or [])]
 
-    def snapshot(self, now):
-        self.next_expiry = None
-        self.recent_expiries = {key: at for key, at in self.recent_expiries.items() if at > now}
-        work = self.inventory("work-items")
-        assignments = self.inventory("assignments")
-        sessions = self.inventory("sessions")
-        roles = self.inventory("roles")
-        by_item = defaultdict(list)
-        for assignment in assignments.rows.values():
-            by_item[assignment.get("workItemId")].append(assignment)
+    def item_activity(self):
+        # Revision keys include scoped inventories and feed payload mutations.
+        # Cache only the per-item maximum, not copies of historical rows.
+        def versions():
+            return tuple((key, inventory.data_revision)
+                         for key, inventory in self.inventories.items()
+                         if key[0] in {"assignments", "attests", "artifacts", "turns"})
 
+        if self._item_activity_versions == versions():
+            return self._item_activity
+        assignments = self.inventory("assignments")
         item_activity = {}
         def record_activity(wid, *times):
             if wid:
@@ -119,6 +121,24 @@ class EvidenceModel:
             elif resource == "turns":
                 for aid, at in self.summary(resource, _scope)["assignmentActivity"].items():
                     record_activity(assignments.rows.get(aid, {}).get("workItemId"), at)
+
+        self._item_activity = item_activity
+        # Summarizing an assignment can create its initially empty attest scope.
+        self._item_activity_versions = versions()
+        return item_activity
+
+    def snapshot(self, now):
+        self.next_expiry = None
+        self.recent_expiries = {key: at for key, at in self.recent_expiries.items() if at > now}
+        work = self.inventory("work-items")
+        assignments = self.inventory("assignments")
+        sessions = self.inventory("sessions")
+        roles = self.inventory("roles")
+        by_item = defaultdict(list)
+        for assignment in assignments.rows.values():
+            by_item[assignment.get("workItemId")].append(assignment)
+
+        item_activity = self.item_activity()
 
         visible = self.active_sessions()
         ids = {s["sessionKey"]: agent_id(s["sessionKey"]) for s in visible}

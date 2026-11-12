@@ -169,6 +169,12 @@ ATC requests that optional read for closed/iceboxed items when their recorded
 version changes. The latest matching disposition supplies an exact finish time.
 A missing, unavailable or mismatching transition uses the latest recorded item,
 assignment, attributed turn, attest or artifact activity, explicitly approximate.
+Trace reads are limited to items whose `rowVersion` could fall within the maximum
+30-day window: every disposition advances that version, so an older version is a
+safe upper bound. Missing or invalid versions remain eligible. Activity maxima
+are cached by assignment, attest, artifact and turn inventory revisions; unchanged
+publications do not rescan those historical rows. Changed reads or feed payloads
+recompute the maxima, including removals and reassignment.
 A trace failure does not block the core inventory. No trace is read for failed
 placement. The audit is source evidence, not a new live-Gateway observation.
 

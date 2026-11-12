@@ -33,7 +33,8 @@ class MergeRecheckTest(unittest.TestCase):
         self.service._handle("merged", ("work", self.refs, None, 300000, None))
         self.assertEqual(120000, self.service.model.merges["work"]["landingAt"])
 
-    def test_finish_trace_is_optional_coalesced_and_invalidated_on_item_change(self):
+    @patch("atc_service.now_ms", return_value=40)
+    def test_finish_trace_is_optional_coalesced_and_invalidated_on_item_change(self, _clock):
         item = {"id":"finished", "state":"closed", "rowVersion":10}
         self.service._schedule_finish_time(item)
         job = ("finish-time", "finished", None)
@@ -50,6 +51,24 @@ class MergeRecheckTest(unittest.TestCase):
         self.assertIn(job, self.service.reads.pending)
         self.service._schedule_finish_time({"id":"failed", "state":"failed","rowVersion":40})
         self.assertNotIn(("finish-time","failed",None), self.service.reads.pending)
+
+    def test_finish_traces_skip_only_proven_out_of_window_items(self):
+        at = 100 * 86_400_000
+        cutoff = at - 30 * 86_400_000
+        with patch("atc_service.now_ms", return_value=at):
+            for wid, state, version in [
+                ("old", "closed", cutoff-1), ("old-icebox", "iceboxed", cutoff-1),
+                ("edge", "closed", cutoff), ("recent", "iceboxed", at),
+                ("unknown", "closed", None), ("invalid", "closed", True),
+                ("nonfinite", "closed", float("nan")), ("failed", "failed", at),
+            ]:
+                self.service._schedule_finish_time({"id": wid, "state": state, "rowVersion": version})
+            scheduled = {scope for resource, scope, _key in self.service.reads.pending
+                         if resource == "finish-time"}
+            self.assertEqual({"edge", "recent", "unknown", "invalid", "nonfinite"}, scheduled)
+            self.service._schedule_finish_time({"id": "old", "state": "closed", "rowVersion": at})
+            self.assertIn(("finish-time", "old", None), self.service.reads.pending,
+                          "a later disposition or edit reopens the eligibility bound")
 
     def run_maintenance(self, at):
         self.service._next_maintenance = 0

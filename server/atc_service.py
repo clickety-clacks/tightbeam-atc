@@ -13,7 +13,7 @@ import time
 import uuid
 
 from atc_git import GitResolver, reference_digest
-from atc_model import EvidenceModel
+from atc_model import EvidenceModel, latest_time
 from atc_evidence import combined_evidence, merge_value_for_refs
 from atc_reads import ReadQueue
 from atc_reconciliation import ActiveBackstop, RETRY_MS
@@ -883,7 +883,12 @@ class LiveService:
         self.finish_trace_versions[wid] = marker
         self.reads.touch("finish-time", wid)
         self.model.inventory("finish-time", wid).rows.clear()
-        if item.get("state") in {"closed", "iceboxed"}:
+        # A disposition advances rowVersion. An older version cannot hide a
+        # finish inside the selector's largest (30-day) window. Unknown bounds
+        # remain eligible; unrelated recent edits may conservatively over-read.
+        version_at = latest_time(item.get("rowVersion"))
+        could_be_visible = version_at is None or version_at >= now_ms() - 30 * 86_400_000
+        if item.get("state") in {"closed", "iceboxed"} and could_be_visible:
             self.reads.schedule("finish-time", wid)
 
     def _read_done(self, value):
