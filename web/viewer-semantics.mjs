@@ -619,11 +619,12 @@ function durationLabel(milliseconds) {
 /* This writes the same user-facing fields that the HUD displays. Keeping the
    presentation at a small DOM seam lets mock models verify visible wording. */
 export function renderModelStatusElement(element,
-  {model, streamState, streamError, startupWarning}, now = Date.now()) {
+  {model, streamState, streamError, startupWarning, loading = false}, now = Date.now()) {
   if (!model) {
     element.textContent = startupWarning
       ? `Warning: ${startupWarning}`
       : streamState === 'stale' ? 'stale · live model unavailable' : 'connecting to live model…';
+    if (loading) element.textContent += ' · loading board (incomplete)';
     element.className = streamState === 'stale' ? 'stale' : 'sample';
     element.title = startupWarning || streamError || 'Waiting for the service model event stream.';
     return element;
@@ -650,7 +651,8 @@ export function renderModelStatusElement(element,
     ? `${pendingCount} scopes pending${pendingResources ? ` (${pendingResources})` : ''}`
     : null;
   element.textContent = `${state}${pendingSummary ? ` · ${pendingSummary}` : ''} · `
-    + `${model.agents.length} agents · ${model.items.length} items · `
+    + (loading ? 'loading board (incomplete) · ' : `${model.agents.length} agents · ${model.items.length} items · `)
+    + (loading ? 'model evidence: ' : '')
     + `${counts.stale} stale · ${counts.rebuilding} rebuilding · ${counts.unknown} unknown · snapshot age ${age}`
     + (warnings.length ? ` · ${warnings.join(' · ')}` : '');
   element.className = state === 'live' ? 'live' : state === 'stale' ? 'stale'
