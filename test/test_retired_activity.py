@@ -6,12 +6,15 @@ import sys
 import threading
 import time
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_service import LiveService
 from test_service import PublishedReads
+from test_assignment_source_failure import publication
+from atc_upstream import Read
 
 
 class RetiredActivityTest(unittest.TestCase):
@@ -162,6 +165,73 @@ class RetiredActivityTest(unittest.TestCase):
             fresh = self.load(gateway)
             self.assertEqual(fresh.snapshot()['items'], service.snapshot()['items'])
             self.assertEqual(fresh.snapshot()['agents'], service.snapshot()['agents'])
+
+    def test_retired_turn_correlates_only_its_item_and_preserves_full_publication(self):
+        for with_assignment in (False, True):
+            with self.subTest(with_assignment=with_assignment), patch('atc_service.now_ms', return_value=1000000):
+                gateway = self.gateway(True)
+                other = dict(gateway.rows['work-items', None][0], id='unrelated')
+                gateway.rows['work-items', None].append(other)
+                gateway.rows['assignments', None].append(dict(
+                    id='other-assignment', workItemId='unrelated', holderKey='other-retired',
+                    state='closed', effectKind='code', closedAt=20))
+                gateway.rows['sessions', None].append(dict(sessionKey='other-retired', state='retired'))
+                gateway.rows['turns', 'other-retired'] = [dict(seq=2,
+                    sessionKey='other-retired', assignmentId='other-assignment', endedAt=600000)]
+                service = self.load(gateway)
+                gateway.rows['turns', 'agent s_author'][0]['endedAt'] = 800000
+                payload = {'sessionKey': 'agent s_author'}
+                if with_assignment:
+                    payload['assignmentId'] = 'assignment'
+                gateway.calls.clear()
+                with patch.object(service, 'rebuild', side_effect=AssertionError('unrelated recovery')):
+                    service.change(dict(resource='turns',
+                        refs={'sessionKey': 'agent s_author', 'turnSeq': 1}, payload=payload))
+                    self.drain(service)
+                    service._publish()
+                self.assertEqual([('membership', 'work')],
+                                 [c for c in gateway.calls if c[0] == 'membership'])
+                self.assertNotIn(('read', 'turns', 'other-retired'), gateway.calls)
+                self.assertNotIn(('read', 'assignments', None), gateway.calls)
+                self.assertNotIn(('read', 'sessions', None), gateway.calls)
+                fresh_gateway = self.gateway(True)
+                fresh_gateway.rows = deepcopy(gateway.rows)
+                fresh = self.load(fresh_gateway)
+                self.assertEqual(publication(fresh.current), publication(service.current))
+                self.assertNotIn(('turns', 'agent s_author'), service.model.inventories)
+
+    def test_retired_turn_detail_failure_retries_without_global_recovery(self):
+        with patch('atc_service.now_ms', return_value=1000000):
+            gateway = self.gateway(True)
+            service = self.load(gateway)
+            before = publication(service.current)
+            original = gateway.detail
+            def failed(resource, key, scope=None):
+                if resource == 'turns':
+                    return Read([], False, 10, 'published-detail', 'TimeoutError')
+                return original(resource, key, scope=scope)
+            with patch.object(gateway, 'detail', side_effect=failed), patch.object(
+                    service, 'rebuild', side_effect=AssertionError('unrelated recovery')):
+                service.change(dict(resource='turns',
+                    refs={'sessionKey': 'agent s_author', 'turnSeq': 1},
+                    payload={'sessionKey': 'agent s_author'}))
+                self.drain(service)
+                service._publish()
+            self.assertEqual(before['items'], publication(service.current)['items'])
+            job = ('turns', 'agent s_author', 1)
+            self.assertIn(job, service.read_retries)
+            self.assertNotIn(('turns', 'agent s_author'), service.model.inventories)
+            gateway.rows['turns', 'agent s_author'][0]['endedAt'] = 800000
+            service.read_retries[job] = (0, 2)
+            service._retry_incomplete_reads()
+            self.drain(service)
+            service._publish()
+            self.assertNotIn(job, service.read_retries)
+            self.assertEqual(800000, service.current['items'][0]['latestActivityAt'])
+            fresh_gateway = self.gateway(True)
+            fresh_gateway.rows = deepcopy(gateway.rows)
+            fresh = self.load(fresh_gateway)
+            self.assertEqual(publication(fresh.current), publication(service.current))
 
     def test_reconnect_catches_retired_activity_missed_during_outage(self):
         with patch('atc_service.now_ms', return_value=1000000):

@@ -1122,6 +1122,11 @@ class LiveService:
         return True
 
     def _read_plan(self, resource, scope):
+        if (resource == "turns" and self.model.closed_sources_released
+                and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
+            # Correlation needs no retained turn inventory. Creating one here
+            # would also let retirement cleanup discard a failed detail retry.
+            return ()
         current = self.model.current_ids(resource, scope)
         if resource != "item-assignment-source":
             return current
@@ -1257,6 +1262,24 @@ class LiveService:
                 and self.model.inventory("assignments").complete
                 and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
             # A read dispatched before retirement cannot recreate its scope.
+            if resource == "turns" and key is not None and self.model.closed_sources_released:
+                if not result.complete:
+                    self.read_failures.add(job[:2])
+                    self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, priority)
+                    self.last_incomplete_read = self._read_outcome(*job, result)
+                    self._incomplete_state("retired turn correlation incomplete")
+                    return True
+                # The turn detail carries the assignment identity even after
+                # its raw assignment row was released. Resolve only that
+                # assignment, then use the owning item's complete read path.
+                for row in result.rows:
+                    if row.get("assignmentId"):
+                        self._refresh("assignments", key=row["assignmentId"])
+                self.read_retries.pop(job, None)
+                self.retry_in_flight.discard(job)
+                self.read_failures.discard(job[:2])
+                self.reads.epochs.pop(job[:2], None)
+                return True
             if resource == "turns":
                 from atc_summary import ItemActivityFold
                 mapping = {row["id"]: row.get("workItemId") for row in
@@ -1553,7 +1576,16 @@ class LiveService:
                 and self.model.inventory("assignments").complete
                 and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
             if resource == "turns" and self.model.closed_sources_released:
-                self.rebuild(recovery=True)
+                if payload.get("assignmentId"):
+                    self._refresh("assignments", key=payload["assignmentId"])
+                elif key is not None:
+                    # A detail read establishes assignment ownership; reading
+                    # the whole session cannot recover released identities.
+                    self.reads.touch(normalized, scope)
+                    self.reads.schedule(normalized, scope, key, priority=True)
+                else:
+                    self.correlation_gaps.add((normalized, key))
+                    self._state("stale", "uncorrelated turns change")
                 return True
             linked = any(row.get("holderKey") == scope and row.get("workItemId") in
                          self.model.work_items() for row in

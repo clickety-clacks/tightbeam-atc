@@ -67,7 +67,7 @@ class PublishedReads:
     def detail(self, resource, key, scope=None):
         self.read_count += 1
         self.calls.append(("detail", resource, scope, key))
-        identity = "sessionKey" if resource == "sessions" else "id"
+        identity = "sessionKey" if resource == "sessions" else "seq" if resource == "turns" else "id"
         rows = [r for r in self.rows.get((resource, scope), []) if r.get(identity) == key]
         rows = deepcopy(rows)
         if resource == "assignments":
