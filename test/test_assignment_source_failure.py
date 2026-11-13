@@ -9,6 +9,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_service import LiveService
 from atc_reconciliation import RETRY_MS
 from test_item_assignment_retry import ItemReads
+from test_service import summarized_work
+
+
+def publication(value, path=()):
+    if isinstance(value, list):
+        return [publication(row, path + (str(i),)) for i, row in enumerate(value)]
+    if not isinstance(value, dict):
+        return value
+    omit = set()
+    if not path:
+        omit.update(('revision', 'generation', 'generatedAt', 'metrics'))
+    if path == ('freshness',):
+        omit.update(('since', 'lastCompleteAt'))
+    if path == ('freshness', 'reconciliation'):
+        omit.add('readDiagnostics')
+    if len(path) == 2 and path[0] == 'agents':
+        omit.add('idleFor')
+    if 'evidence' in path:
+        omit.update(('observedAt', 'confirmedAt', 'unconfirmedSince'))
+    return {k: publication(v, path + (k,)) for k, v in value.items() if k not in omit}
 
 
 class UnavailableAssignments(ItemReads):
@@ -101,7 +121,8 @@ class AssignmentSourceFailureTest(unittest.TestCase):
         self.assertFalse(any(call[0] == 'membership' for call in self.gateway.calls))
         fresh_gateway = UnavailableAssignments()
         fresh_gateway.rows = deepcopy(self.gateway.rows)
-        self.assertEqual(self.data(self.load(fresh_gateway)), self.data(service))
+        fresh = self.load(fresh_gateway)
+        self.assertEqual(publication(fresh.current), publication(service.current))
 
     def test_successful_empty_recovery_uses_normal_complete_empty_path(self):
         reference_gateway = UnavailableAssignments()
@@ -117,6 +138,7 @@ class AssignmentSourceFailureTest(unittest.TestCase):
         reference._refresh('assignments')
         self.settle(reference)
         self.assertEqual(self.data(reference), self.data(self.service))
+        self.assertEqual(publication(reference.current), publication(self.service.current))
         self.assertTrue(self.service.model.inventory('assignments').complete)
         self.assertFalse(self.service.assignment_source_unavailable)
         self.assertEqual(set(), self.service.model.item_assignment_pending)
@@ -137,3 +159,26 @@ class AssignmentSourceFailureTest(unittest.TestCase):
         self.assertEqual([('membership', 'work')], [c for c in self.gateway.calls if c[0] == 'membership'])
         self.assertFalse(self.service.model.inventory('assignments').complete)
         self.assertTrue(self.service.model.assignment_evidence('untouched')['complete'])
+
+    def test_whole_source_failure_during_recovery_keeps_review_stage_and_ring(self):
+        gateway = UnavailableAssignments()
+        gateway.rows['work-items', None] = [summarized_work(holders=[],
+            attest_counts={'completion': 1, 'verdict': 2},
+            verdict_counts={'reviewed-clean': 1, 'tests-passed': 1})]
+        gateway.rows['assignments', None] = [dict(id='reviewed', workItemId='work',
+            holderKey='author', state='closed', effectKind='code')]
+        gateway.rows['attests', 'reviewed'] = [
+            dict(id='done', assignmentId='reviewed', kind='completion', ts=10),
+            dict(id='tested', assignmentId='reviewed', kind='verdict',
+                 verdictKind='tests-passed', ts=20),
+            dict(id='review', assignmentId='reviewed', kind='verdict',
+                 verdictKind='reviewed-clean', ts=30)]
+        service = self.load(gateway)
+        self.assertEqual(5, service.current['items'][0]['stage'])
+        before = self.data(service)
+        gateway.error = TimeoutError
+        with self.assertLogs('atc.recovery', level='WARNING'):
+            service.rebuild(recovery=True)
+            self.settle(service)
+        self.assertEqual(before, self.data(service))
+        self.assertEqual(set(), service.model.item_assignment_pending)
