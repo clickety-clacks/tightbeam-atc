@@ -40,11 +40,11 @@ class ReturningReads(PublishedReads):
         self.active_attests += 1
         self.max_active_attests = max(self.max_active_attests, self.active_attests)
         try:
+            result = super().read(resource, scope)
             if self.block:
                 self.entered.set()
                 if not self.release.wait(5):
                     raise TimeoutError('test did not release attest read')
-            result = super().read(resource, scope)
             if self.fail:
                 result.complete = False
                 result.error = 'TimeoutError'
@@ -207,3 +207,27 @@ class ReturningAuthorTest(unittest.TestCase):
         part = service.model.closed_items['work']
         self.assertEqual({}, part['summary']['authors'])
         self.assertEqual({}, part['authorFacts'])
+
+    def test_complete_source_read_invalidates_an_inflight_author_pass(self):
+        gateway = ReturningReads()
+        service = self.load(gateway)
+        gateway.block = True
+        self.returns(service, {'guest-one'})
+        service.reads.pump()
+        self.assertTrue(gateway.entered.wait(2))
+        gateway.rows['attests', 'assignment'][0]['ts'] = 950000
+        # An independent reconciliation observes the source after the pass
+        # captured its old rows, without requiring a feed notice.
+        service._refresh('work-items')
+        service.reads.pump()
+        while ('work-items', None) in service.reads.active:
+            service._handle(*service.events.get(timeout=5))
+            service.reads.pump()
+        service._publish()
+        self.assertIsNone(service.current['agents'][0]['idleSince'])
+        gateway.block = False
+        gateway.release.set()
+        self.drain(service)
+        self.assertGreater(service.reads.epoch_discards_by_resource['returning-authors'], 0)
+        self.assertEqual(950000, service.current['agents'][0]['idleSince'])
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))

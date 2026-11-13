@@ -1141,6 +1141,15 @@ class LiveService:
             self.reads.schedule(*job, priority=True)
         self._incomplete_state("recovering returning session activity")
 
+    def _invalidate_returning_authors(self):
+        if not self.returning_authors:
+            return
+        job = ("returning-authors", None, None)
+        self.returning_authors_ready.clear()
+        self.reads.touch(*job[:2])
+        if job not in self.read_retries:
+            self.reads.schedule(*job, priority=True)
+
     def _returning_authors_done(self, job, result):
         self.retry_in_flight.discard(job)
         if not result.complete:
@@ -1164,8 +1173,8 @@ class LiveService:
         return True
 
     def _request_item_assignments(self, wid, *, changed=False):
-        if changed and self.returning_authors:
-            self.reads.touch("returning-authors", None)
+        if changed:
+            self._invalidate_returning_authors()
         if not self.model.hold_item_assignments(wid):
             return False
         # The held values are current facts, not a license to keep old closed
@@ -1219,6 +1228,7 @@ class LiveService:
             self._forget_scopes({job[:2]})
             return True
         if result.complete:
+            self._invalidate_returning_authors()
             released = self.model.replace_item_assignments(wid, result)
             self._forget_scopes(released | {job[:2]})
             if not self.connected:
@@ -1259,6 +1269,10 @@ class LiveService:
             return self._item_assignments_done(job, result)
         if resource == "returning-authors":
             return self._returning_authors_done(job, result)
+        if resource in {"work-items", "assignments", "attests"} and result.complete:
+            # Reconciliation reads can observe changes without a feed notice.
+            # Their source state supersedes any pass already in flight too.
+            self._invalidate_returning_authors()
         assignments = self.model.inventory("assignments")
         if resource == "assignments" and key is None:
             if not result.complete and not result.rows:
@@ -1629,7 +1643,7 @@ class LiveService:
             # Observational events do not imply that every inventory changed.
             return False
         if resource in {"assignments", "attests", "work-items"} and self.returning_authors:
-            self.reads.touch("returning-authors", None)
+            self._invalidate_returning_authors()
         payload, refs = notice.get("payload") or {}, notice.get("refs") or {}
         key = refs.get(RESOURCE_REFS[resource])
         normalized = "decision-requests" if resource == "decision requests" else resource
