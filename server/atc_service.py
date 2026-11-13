@@ -864,7 +864,10 @@ class LiveService:
         if (not timing_needed and not details_complete) or details_match:
             return
         if self.model.closed_item(item["id"], owned):
-            self.rebuild(recovery=True)
+            # Released assignment identities belong to this item's complete
+            # source read. A changed count does not invalidate other items or
+            # require rediscovering every retired holder's turn history.
+            self._request_item_assignments(item["id"], changed=True)
             return
         for row in assignments.rows.values():
             if row.get("workItemId") != item["id"]:
