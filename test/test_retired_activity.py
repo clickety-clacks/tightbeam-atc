@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -172,6 +173,41 @@ class RetiredActivityTest(unittest.TestCase):
             self.drain(service)
             service._publish()
             self.assertEqual(900000, service.snapshot()['items'][0]['latestActivityAt'])
+
+    def test_recovery_does_not_duplicate_a_pending_session_collection(self):
+        with patch('atc_service.now_ms', return_value=1000000):
+            gateway = self.gateway(True)
+            service = self.load(gateway)
+            gateway.rows['sessions', None][0]['state'] = 'active'
+            gateway.rows['assignments', None][0]['state'] = 'open'
+            entered, release = threading.Event(), threading.Event()
+            original = gateway.read
+            def blocked(resource, scope=None):
+                if resource == 'sessions':
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError('test did not release session collection')
+                return original(resource, scope)
+            gateway.read = blocked
+            gateway.calls.clear()
+            service.rebuild(recovery=True)
+            try:
+                service.reads.pump()
+                self.assertTrue(entered.wait(2))
+                while True:
+                    kind, result = service.events.get(timeout=5)
+                    service._handle(kind, result)
+                    if kind == 'read' and result[0] == ('assignments', None, None):
+                        break
+                    service.reads.pump()
+                self.assertNotIn(('sessions', None, 'agent s_author'), service.reads.pending)
+            finally:
+                release.set()
+            self.drain(service)
+            service._publish()
+            self.assertNotIn(('detail', 'sessions', None, 'agent s_author'), gateway.calls)
+            fresh = self.load(gateway)
+            self.assertEqual(fresh.snapshot()['agents'], service.snapshot()['agents'])
 
     def test_retired_discovery_releases_each_page_before_the_next_session(self):
         import gc

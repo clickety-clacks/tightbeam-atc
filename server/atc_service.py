@@ -296,7 +296,7 @@ class LiveService:
             # Existing per-item membership includes original assignment rows in
             # source order. Do not materialize the all-time global collection.
             result = self.gateway.assignment_membership(item_id, include_rows=True)
-            if not result.complete:
+            if not result.complete and not result.rows:
                 return finish(503, {"error": "item-unavailable", **pin})
             fresh_owned = result.rows
             if [a for a in fresh_owned if a.get("state") == "open"] != owned:
@@ -1136,10 +1136,7 @@ class LiveService:
             self._forget_scopes(released | {job[:2]})
             if not self.connected:
                 self.model.item_assignment_facts[wid]["freshness"] = "stale"
-            sessions = self.model.inventory("sessions").rows
-            for row in result.folded.open_rows.values():
-                if row.get("holderKey") and row["holderKey"] not in sessions:
-                    self._refresh("sessions", key=row["holderKey"])
+            self._discover_assignment_sessions(result.folded.open_rows.values())
             self._discover_histories()
         else:
             self.read_failures.add(job[:2])
@@ -1332,11 +1329,7 @@ class LiveService:
                 self.retry_counters["scheduled"] += 1
         if ((resource == "assignments" and self.model.inventory("sessions").complete)
                 or (resource == "sessions" and key is None and result.complete)):
-            known_sessions = self.model.inventory("sessions").rows
-            for assignment in self.model.inventory("assignments").rows.values():
-                holder = assignment.get("holderKey")
-                if assignment.get("state") == "open" and holder and holder not in known_sessions:
-                    self._refresh("sessions", key=holder)
+            self._discover_assignment_sessions(self.model.inventory("assignments").rows.values())
         if resource in {"assignments", "sessions"} and (
                 not self.cycle or self.cycle["expanded"]):
             # Assignment creation or a newly active session can introduce
@@ -1363,6 +1356,20 @@ class LiveService:
                    for s in required):
                 self._state("live")
         return True
+
+    def _discover_assignment_sessions(self, assignments):
+        # The pending collection already reads these identities. Its completion
+        # checks missing holders again; queuing details now duplicates the read
+        # and can overwrite collection evidence with an older response.
+        collection = ("sessions", None, None)
+        active = self.reads.active.get(collection[:2])
+        if collection in self.reads.pending or (active and active[0] == collection):
+            return
+        known = self.model.inventory("sessions").rows
+        for assignment in assignments:
+            holder = assignment.get("holderKey")
+            if assignment.get("state") == "open" and holder and holder not in known:
+                self._refresh("sessions", key=holder)
 
     @staticmethod
     def _read_kind(scope, key):
