@@ -220,8 +220,11 @@ class ReturningAuthorTest(unittest.TestCase):
         # captured its old rows, without requiring a feed notice.
         service._refresh('work-items')
         service.reads.pump()
-        while ('work-items', None) in service.reads.active:
-            service._handle(*service.events.get(timeout=5))
+        while True:
+            kind, value = service.events.get(timeout=5)
+            service._handle(kind, value)
+            if kind == 'read' and value[0] == ('work-items', None, None):
+                break
             service.reads.pump()
         service._publish()
         self.assertIsNone(service.current['agents'][0]['idleSince'])
