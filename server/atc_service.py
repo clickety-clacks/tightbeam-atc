@@ -122,6 +122,7 @@ class LiveService:
         self.last_sweep = None
         self.sweep_remaining = set()
         self.read_failures = set()
+        self.assignment_source_unavailable = False
         self.read_retries = {}
         self.retry_in_flight = set()
         self.retry_counters = {"scheduled": 0, "completed": 0, "incomplete": 0,
@@ -495,6 +496,10 @@ class LiveService:
         return workers
 
     def _state(self, state, reason=None):
+        if self.assignment_source_unavailable:
+            state = "stale"
+            confirmed = self.model.inventory("assignments").confirmed_at
+            reason = "assignments unavailable; last complete read: " + str(confirmed)
         if state == "live" and self.model.item_assignment_pending:
             state, reason = "rebuilding", "reading complete item assignment source"
         if (state in {"live", "rebuilding"} and self.connected and
@@ -1171,6 +1176,25 @@ class LiveService:
         if resource == "item-assignment-source":
             return self._item_assignments_done(job, result)
         assignments = self.model.inventory("assignments")
+        if resource == "assignments" and key is None:
+            if not result.complete and not result.rows:
+                # No data identifies an item. Keep the complete source facts
+                # intact and expose availability through existing board health.
+                self.assignment_source_unavailable = True
+                self.read_failures.add(job[:2])
+                self.last_incomplete_read = self._read_outcome(*job, result)
+                self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, priority)
+                self.retry_counters["scheduled"] += 1
+                if retry:
+                    self.retry_in_flight.discard(job)
+                    self.retry_counters["incomplete"] += 1
+                    self.last_retry_outcome = self.last_incomplete_read
+                LOG.warning("assignments source unavailable error=%s", self._error_category(result.error))
+                self._state("stale")
+                return True
+            if result.complete and self.assignment_source_unavailable:
+                self.assignment_source_unavailable = False
+                LOG.info("assignments source recovered")
         if resource == "assignments" and key is not None and self.model.closed_sources_released:
             row = result.rows[0] if result.complete and len(result.rows) == 1 else None
             wid = (row or assignments.rows.get(key, {})).get("workItemId")
@@ -1203,8 +1227,11 @@ class LiveService:
                 self._refresh("assignments", key=scope)
                 return True
         if resource == "assignments" and key is None and not result.complete:
-            affected = set(self.model.work_items())
-            affected.update(row.get("workItemId") for row in result.rows)
+            # Unidentified items retain their last complete current facts; only
+            # the contributors present in this partial response need rereads.
+            for wid in self.model.work_items():
+                self.model.item_assignment_facts.setdefault(wid, assignments.evidence())
+            affected = {row.get("workItemId") for row in result.rows}
             for wid in affected:
                 self._request_item_assignments(wid, changed=True)
             # Record the global failure independently. None of this partial
