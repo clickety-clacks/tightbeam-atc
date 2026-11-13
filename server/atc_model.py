@@ -262,6 +262,23 @@ class EvidenceModel:
         if changed:
             self.retired_activity_revision += 1
 
+    def restore_returning_authors(self, recovered, visible):
+        authors = recovered["authors"].intersection(visible)
+        for wid, part in self.closed_items.items():
+            summary = part["summary"]
+            for author in authors:
+                summary["authors"].pop(author, None)
+                summary["authorIds"].discard(author)
+                part["authorFacts"].pop(author, None)
+            current = recovered["items"].get(wid)
+            if current is None:
+                continue
+            for author in authors.intersection(current["authorIds"]):
+                summary["authorIds"].add(author)
+                if author in current["authors"]:
+                    summary["authors"][author] = current["authors"][author]
+                part["authorFacts"][author] = current["authorFacts"][author]
+
     def release_session_histories(self, visible):
         assignments = self.inventory("assignments").rows
         released = {key for key in self.inventories

@@ -1,0 +1,168 @@
+"""Returning sessions recover attest activity without a global rebuild."""
+from copy import deepcopy
+from pathlib import Path
+import sys
+import threading
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
+from atc_service import LiveService
+from atc_payloads import SESSION_FIELDS, PAYLOAD_POLICIES
+from atc_upstream import Read
+from test_service import PublishedReads
+from test_assignment_source_failure import publication
+
+
+class ReturningReads(PublishedReads):
+    def __init__(self):
+        super().__init__()
+        self.block = False
+        self.fail = False
+        self.entered, self.release = threading.Event(), threading.Event()
+        self.active_attests = self.max_active_attests = 0
+        self.rows['work-items', None][0].update(state='closed', createdAt=1, closedAt=20)
+        self.rows['assignments', None][0].update(state='closed', closedAt=20)
+        self.rows['sessions', None][0]['state'] = 'retired'
+        for key in ('guest-one', 'guest-two'):
+            self.rows['sessions', None].append(dict.fromkeys(SESSION_FIELDS) | dict(
+                sessionKey=key, state='retired', rowVersion=10, displayName=key,
+                archetype='reviewer-code', capabilities={}))
+        self.rows['attests', 'assignment'] = [
+            dict(id='first', assignmentId='assignment', kind='progress',
+                 bySession='guest-one', ts=900000),
+            dict(id='second', assignmentId='assignment', kind='progress',
+                 bySession='guest-two', ts=800000)]
+
+    def read(self, resource, scope=None):
+        if resource != 'attests':
+            return super().read(resource, scope)
+        self.active_attests += 1
+        self.max_active_attests = max(self.max_active_attests, self.active_attests)
+        try:
+            if self.block:
+                self.entered.set()
+                if not self.release.wait(5):
+                    raise TimeoutError('test did not release attest read')
+            result = super().read(resource, scope)
+            if self.fail:
+                result.complete = False
+                result.error = 'TimeoutError'
+            return result
+        finally:
+            self.active_attests -= 1
+
+
+class ReturningAuthorTest(unittest.TestCase):
+    def setUp(self):
+        clock = patch('atc_service.now_ms', return_value=5000000000)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def load(self, gateway):
+        service = LiveService(gateway, workers=4)
+        service.connected = True
+        self.addCleanup(service.stop)
+        self.addCleanup(gateway.release.set)
+        service.rebuild()
+        self.drain(service)
+        return service
+
+    def drain(self, service):
+        while service.reads.pending or service.reads.active:
+            service.reads.pump()
+            service._handle(*service.events.get(timeout=5))
+        service._publish()
+
+    def returns(self, service, keys):
+        for row in service.gateway.rows['sessions', None]:
+            if row['sessionKey'] in keys:
+                row.update(state='active', rowVersion=11)
+        service._refresh('sessions')
+        service.reads.pump()
+        service._handle(*service.events.get(timeout=5))
+        service._publish()
+
+    def fresh(self, service):
+        gateway = ReturningReads()
+        gateway.rows = deepcopy(service.gateway.rows)
+        return self.load(gateway)
+
+    def test_nonholder_authors_coalesce_and_match_fresh_full_publication(self):
+        gateway = ReturningReads()
+        service = self.load(gateway)
+        self.assertEqual({}, service.model.closed_items['work']['summary']['authors'])
+        gateway.calls.clear()
+        with patch.object(service, 'rebuild', side_effect=AssertionError('global recovery')):
+            self.returns(service, {'guest-one', 'guest-two'})
+            self.assertEqual({'guest-one': None, 'guest-two': None}, service.returning_authors)
+            self.assertTrue(all(row['idleSince'] is None for row in service.current['agents']))
+            self.drain(service)
+        self.assertEqual([('membership', 'work')], [c for c in gateway.calls if c[0] == 'membership'])
+        self.assertEqual(1, gateway.calls.count(('read', 'attests', 'assignment')))
+        self.assertNotIn(('read', 'assignments', None), gateway.calls)
+        self.assertNotIn(('read', 'turns', 'agent s_author'), gateway.calls)
+        self.assertEqual({'guest-one': 900000, 'guest-two': 800000},
+                         {a['sessionKey']: a['idleSince'] for a in service.current['agents']})
+        self.assertEqual({}, service.returning_authors)
+        self.assertEqual(1, gateway.max_active_attests)
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+        self.assertNotIn(('attests', 'assignment'), service.model.inventories)
+        self.assertEqual({}, service.model.inventory('assignments').rows)
+
+    def test_partial_recovery_keeps_last_value_then_retries(self):
+        gateway = ReturningReads()
+        service = self.load(gateway)
+        gateway.fail = True
+        self.returns(service, {'guest-one'})
+        self.drain(service)
+        self.assertIsNone(service.current['agents'][0]['idleSince'])
+        self.assertFalse(service.current['agents'][0]['evidence']['idleFor']['complete'])
+        self.assertEqual({}, service.model.closed_items['work']['summary']['authors'])
+        job = ('returning-authors', None, None)
+        self.assertIn(job, service.read_retries)
+        gateway.fail = False
+        service.read_retries[job] = (0, 2)
+        service._retry_incomplete_reads()
+        self.drain(service)
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+        self.assertNotIn(job, service.read_retries)
+
+    def test_return_during_pass_waits_for_its_own_complete_coverage(self):
+        gateway = ReturningReads()
+        service = self.load(gateway)
+        gateway.block = True
+        self.returns(service, {'guest-one'})
+        service.reads.pump()
+        self.assertTrue(gateway.entered.wait(2))
+        # Session payloads continue to publish while the attest read is blocked.
+        returned = next(row for row in gateway.rows['sessions', None] if row['sessionKey'] == 'guest-two')
+        returned.update(state='active', rowVersion=11)
+        service.policies = PAYLOAD_POLICIES
+        service.change(dict(resource='sessions', op='upsert', **{'class': 'session.updated'},
+            refs={'sessionKey': 'guest-two'}, payload=deepcopy(returned)))
+        service._publish()
+        self.assertEqual(2, len(service.current['agents']))
+        self.assertTrue(all(row['idleSince'] is None for row in service.current['agents']))
+        gateway.block = False
+        gateway.release.set()
+        self.drain(service)
+        # Align the session identity observation source with the fresh collection.
+        service._refresh('sessions')
+        self.drain(service)
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+        self.assertEqual(1, gateway.max_active_attests)
+        self.assertEqual(2, gateway.calls.count(('membership', 'work')))
+
+    def test_assignment_outside_published_board_is_excluded(self):
+        gateway = ReturningReads()
+        gateway.rows['assignments', None].append(dict(id='outside', workItemId=None,
+            holderKey='agent s_author', state='closed', effectKind='code'))
+        gateway.rows['attests', 'outside'] = [dict(id='external', assignmentId='outside',
+            kind='progress', bySession='guest-one', ts=950000)]
+        service = self.load(gateway)
+        gateway.calls.clear()
+        self.returns(service, {'guest-one'})
+        self.drain(service)
+        self.assertNotIn(('read', 'attests', 'outside'), gateway.calls)
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))

@@ -3,6 +3,7 @@
 from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+import time
 
 from atc_upstream import Read, now_ms
 
@@ -77,6 +78,8 @@ class ReadQueue:
                 return self._retired_activity(keep_ids)
             if resource == "item-assignment-source":
                 return self._item_assignments(scope, keep_ids)
+            if resource == "returning-authors":
+                return self._returning_authors(keep_ids)
             if key is None:
                 if hasattr(self.gateway, "read_current"):
                     return self.gateway.read_current(resource, scope, keep_ids=keep_ids)
@@ -195,6 +198,54 @@ class ReadQueue:
             # No previous session's rows or page accumulator survive the next read.
             del result, folded
         return Read([], True, at, "turns", folded=(marker, activity))
+
+    def _returning_authors(self, plan):
+        from atc_evidence import HistoryInventory, combined_evidence
+        from atc_summary import HistoryFold
+
+        authors, items = plan
+        staged, count = {}, 0
+        started, at = time.monotonic(), now_ms()
+        for wid, open_ids in items:
+            membership = self.gateway.assignment_membership(wid)
+            if not membership.complete:
+                return Read([], False, membership.at, "returning-authors", membership.error)
+            part = {"authors": {}, "authorIds": set(), "authorFacts": {}}
+            for member in membership.rows:
+                aid = member["id"]
+                if hasattr(self.gateway, "read_current"):
+                    result = self.gateway.read_current("attests", aid)
+                else:
+                    result = self.gateway.read("attests", aid)
+                count += 1
+                if not result.complete:
+                    return Read([], False, result.at, "returning-authors", result.error)
+                at = result.at
+                # Open assignment folds already retain authorship. Only the
+                # released closed sources need these current author facts.
+                if aid not in open_ids:
+                    fold = result.folded
+                    if fold is None:
+                        fold = HistoryFold("attests", at)
+                        fold.add(result.rows)
+                    inventory = HistoryInventory("attests")
+                    inventory.read_fold(fold, complete=True, at=at, source=result.source)
+                    summary, facts = inventory.folded, inventory.evidence()
+                    for author in authors.intersection(summary["authorIds"]):
+                        part["authorIds"].add(author)
+                        if author in summary["authors"]:
+                            part["authors"][author] = max(part["authors"].get(author, 0),
+                                                          summary["authors"][author])
+                        previous = part["authorFacts"].get(author)
+                        part["authorFacts"][author] = (combined_evidence(previous, facts)
+                                                       if previous else combined_evidence(facts))
+                    del fold, inventory, summary, facts
+                del result
+            staged[wid] = part
+            del membership
+        return Read([], True, at, "returning-authors", folded={
+            "authors": authors, "items": staged, "assignments": count,
+            "durationMs": (time.monotonic() - started) * 1000})
 
     def finish(self, job, epoch):
         inventory = job[:2]
