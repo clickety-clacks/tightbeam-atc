@@ -654,7 +654,7 @@ class EvidenceModel:
             self._item_activity = combined
         return self._item_activity
 
-    def snapshot(self, now):
+    def snapshot(self, now, *, assignment_source_unavailable=False):
         self.next_expiry = None
         self.next_raw_expiry = None
         for (resource, scope), inventory in list(self.inventories.items()):
@@ -827,13 +827,15 @@ class EvidenceModel:
                 attest_facts = identity
                 detail_counts_match = (
                     assignment_facts["complete"]
-                    and all(fact["complete"] and fact["freshness"] == "live"
+                    and all(fact["complete"] and (fact["freshness"] == "live"
+                                                 or assignment_source_unavailable)
                             for fact in inventory_facts)
                     and {k: v for k, v in detail_summary["kinds"].items() if k is not None}
                     == attest_counts
                     and dict(detail_summary["verdicts"]) == verdict_counts
                 )
-                review_details_fresh = assignment_facts["freshness"] == "live"
+                review_details_fresh = (assignment_facts["freshness"] == "live"
+                                        or assignment_source_unavailable)
                 stage_facts = identity
                 review_timing_needed = (
                     item["state"] != "closed" and not item_summary["holders"]
@@ -845,6 +847,10 @@ class EvidenceModel:
                     not review_timing_needed
                     or (review_details_fresh and detail_counts_match)
                 )
+                if assignment_source_unavailable and review_timing_needed:
+                    # Unavailable is not new data. Complete retained timing
+                    # still determines the last known stage; health stays stale.
+                    stage_facts = dict(identity, freshness="stale")
                 if not review_timing_known:
                     detail_facts = [assignment_facts, *inventory_facts]
                     freshness = identity["freshness"]

@@ -536,7 +536,8 @@ class LiveService:
             classified = False
         if not classified:
             self._update_backstop(at)
-        data = deepcopy(self.model.snapshot(at))
+        data = deepcopy(self.model.snapshot(
+            at, assignment_source_unavailable=self.assignment_source_unavailable))
         self._retain_unproven_removals(data, at)
         old_agents = {row["id"]: row for row in self.current.get("agents", [])}
         for agent in data["agents"]:
