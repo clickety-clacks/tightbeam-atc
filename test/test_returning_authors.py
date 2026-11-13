@@ -298,12 +298,15 @@ class ReturningAuthorTest(unittest.TestCase):
     def test_return_recovery_replaces_changed_open_attests_without_second_scan(self):
         gateway = ReturningReads()
         gateway.rows['assignments', None][0].update(state='open', closedAt=None)
+        gateway.rows['assignments', None].append(dict(id='closed-witness', workItemId='work',
+            holderKey='agent s_author', state='closed', closedAt=20, effectKind='code'))
         service = self.load(gateway)
         gateway.rows['attests', 'assignment'][0]['ts'] = 950000
         gateway.calls.clear()
         self.returns(service, {'guest-one'})
         self.drain(service)
-        self.assertEqual(950000, service.current['agents'][0]['idleSince'])
+        self.assertEqual(950000, next(row['idleSince'] for row in service.current['agents']
+                                     if row['sessionKey'] == 'guest-one'))
         self.assertEqual(1, gateway.calls.count(('read', 'attests', 'assignment')))
         self.assertEqual(publication(self.fresh(service).current), publication(service.current))
 
