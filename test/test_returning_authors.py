@@ -139,6 +139,7 @@ class ReturningAuthorTest(unittest.TestCase):
     def test_return_during_pass_waits_for_its_own_complete_coverage(self):
         gateway = ReturningReads()
         service = self.load(gateway)
+        gateway.calls.clear()
         gateway.block = True
         self.returns(service, {'guest-one'})
         service.reads.pump()
