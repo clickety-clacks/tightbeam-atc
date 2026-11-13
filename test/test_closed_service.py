@@ -97,7 +97,7 @@ class ClosedSourceServiceTest(unittest.TestCase):
         item['rowVersion'] = 2
         gateway.calls.clear()
         with patch.object(service, 'rebuild', side_effect=AssertionError('unrelated recovery')):
-            service._refresh('work-items', key='work')
+            service._refresh('work-items')
             self.settle(service)
         self.assertEqual([('membership', 'work')],
                          [call for call in gateway.calls if call[0] == 'membership'])
@@ -120,7 +120,7 @@ class ClosedSourceServiceTest(unittest.TestCase):
         gateway.rows['work-items', None][0]['rowVersion'] = 2
         gateway.calls.clear()
         with patch.object(service, 'rebuild', side_effect=AssertionError('unrelated recovery')):
-            service._refresh('work-items', key='work')
+            service._refresh('work-items')
             self.settle(service)
         self.assertEqual([('membership', 'work')],
                          [call for call in gateway.calls if call[0] == 'membership'])
