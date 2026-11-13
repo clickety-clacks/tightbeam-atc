@@ -94,10 +94,10 @@ class PublicationCostTest(unittest.TestCase):
         entered, release = threading.Event(), threading.Event()
         original = service.model.snapshot
 
-        def slow_snapshot(at):
+        def slow_snapshot(at, **kwargs):
             entered.set()
             self.assertTrue(release.wait(5))
-            return original(at)
+            return original(at, **kwargs)
 
         def publish():
             with service.model_lock:
