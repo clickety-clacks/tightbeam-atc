@@ -117,6 +117,7 @@ class LiveService:
         self.retired_activity_pending = False
         self.returning_authors = {}
         self.returning_authors_ready = set()
+        self.returning_author_items = {}
         self.returning_author_result = None
         self.backstop = ActiveBackstop()
         self.scope_budget = scope_budget
@@ -535,11 +536,16 @@ class LiveService:
         self.returning_authors = {key: value for key, value in self.returning_authors.items()
                                   if key in visible}
         self.returning_authors_ready.intersection_update(visible)
+        self.returning_author_items = {key: items for key, items in self.returning_author_items.items()
+                                       if key in visible}
         for key in tuple(self.returning_authors_ready):
-            if all(self.model.inventory(resource, key).complete
-                   for resource in ("turns", "wakes", "messages")):
+            if (not self.returning_author_items.get(key, set()).intersection(
+                    self.model.item_assignment_pending)
+                    and all(self.model.inventory(resource, key).complete
+                            for resource in ("turns", "wakes", "messages"))):
                 self.returning_authors.pop(key, None)
                 self.returning_authors_ready.discard(key)
+                self.returning_author_items.pop(key, None)
         if (not self.returning_authors and self.reason == "recovering returning session activity"
                 and self.connected and not self.cycle and not self.read_failures
                 and not self.correlation_gaps):
@@ -1141,13 +1147,15 @@ class LiveService:
             self.reads.schedule(*job, priority=True)
         self._incomplete_state("recovering returning session activity")
 
-    def _invalidate_returning_authors(self):
+    def _invalidate_returning_authors(self, *, preserve_ready=False):
         if not self.returning_authors:
             return
         job = ("returning-authors", None, None)
-        self.returning_authors_ready.clear()
+        if not preserve_ready:
+            self.returning_authors_ready.clear()
         self.reads.touch(*job[:2])
-        if job not in self.read_retries:
+        if (job not in self.read_retries
+                and set(self.returning_authors) - self.returning_authors_ready):
             self.reads.schedule(*job, priority=True)
 
     def _returning_authors_done(self, job, result):
@@ -1159,6 +1167,18 @@ class LiveService:
             self._incomplete_state("recovering returning session activity")
             return True
         visible = {row["sessionKey"] for row in self.model.active_sessions()}
+        changed_items = set()
+        for wid, recovered in result.folded["items"].items():
+            closed = self.model.closed_items.get(wid)
+            if closed is None or wid not in self.model.work_items():
+                continue
+            for author, at in recovered["authors"].items():
+                if author in visible and at > (closed["activity"] or 0):
+                    # The observed attest proves the item's retained source
+                    # is older too. Publish its complete source replacement
+                    # before releasing this author's held idle value.
+                    self.returning_author_items.setdefault(author, set()).add(wid)
+                    changed_items.add(wid)
         self.model.restore_returning_authors(result.folded, visible)
         self.returning_authors_ready.update(result.folded["authors"].intersection(visible))
         self.returning_author_result = {
@@ -1166,6 +1186,9 @@ class LiveService:
             "assignments": result.folded["assignments"], "durationMs": result.folded["durationMs"]}
         self.read_failures.discard(job[:2])
         self.read_retries.pop(job, None)
+        for wid in changed_items:
+            if wid not in self.model.item_assignment_pending:
+                self._request_item_assignments(wid)
         # Returns arriving after this pass started share the next pass. No
         # concurrent scan and no completion credit for unread authors.
         if set(self.returning_authors) - self.returning_authors_ready:
@@ -1228,7 +1251,8 @@ class LiveService:
             self._forget_scopes({job[:2]})
             return True
         if result.complete:
-            self._invalidate_returning_authors()
+            completing_recovery = any(wid in items for items in self.returning_author_items.values())
+            self._invalidate_returning_authors(preserve_ready=completing_recovery)
             released = self.model.replace_item_assignments(wid, result)
             self._forget_scopes(released | {job[:2]})
             if not self.connected:

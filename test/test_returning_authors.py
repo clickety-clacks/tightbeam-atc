@@ -19,6 +19,7 @@ class ReturningReads(PublishedReads):
         super().__init__()
         self.block = False
         self.fail = False
+        self.fail_item = False
         self.entered, self.release = threading.Event(), threading.Event()
         self.active_attests = self.max_active_attests = 0
         self.rows['work-items', None][0].update(state='closed', createdAt=1, closedAt=20)
@@ -33,6 +34,13 @@ class ReturningReads(PublishedReads):
                  bySession='guest-one', ts=900000),
             dict(id='second', assignmentId='assignment', kind='progress',
                  bySession='guest-two', ts=800000)]
+
+    def assignment_membership(self, wid, *, include_rows=False):
+        result = super().assignment_membership(wid, include_rows=include_rows)
+        if include_rows and self.fail_item:
+            result.complete = False
+            result.error = 'TimeoutError'
+        return result
 
     def read(self, resource, scope=None):
         if resource != 'attests':
@@ -234,3 +242,30 @@ class ReturningAuthorTest(unittest.TestCase):
         self.assertGreater(service.reads.epoch_discards_by_resource['returning-authors'], 0)
         self.assertEqual(950000, service.current['agents'][0]['idleSince'])
         self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+
+    def test_new_author_activity_waits_for_complete_item_replacement(self):
+        gateway = ReturningReads()
+        service = self.load(gateway)
+        gateway.rows['attests', 'assignment'][0]['ts'] = 950000
+        gateway.fail_item = True
+        gateway.calls.clear()
+        self.returns(service, {'guest-one'})
+        self.drain(service)
+        self.assertIsNone(service.current['agents'][0]['idleSince'])
+        self.assertEqual(900000, service.current['items'][0]['latestActivityAt'])
+        self.assertFalse(service.current['items'][0]['evidence']['attests']['complete'])
+        job = ('item-assignment-source', 'work', None)
+        self.assertIn(job, service.read_retries)
+        self.assertEqual({'work'}, service.returning_author_items['guest-one'])
+        self.assertEqual(1, gateway.calls.count(('read', 'attests', 'assignment')))
+        gateway.fail_item = False
+        service.read_retries[job] = (0, 2)
+        service._retry_incomplete_reads()
+        self.drain(service)
+        self.assertEqual(950000, service.current['agents'][0]['idleSince'])
+        self.assertEqual(950000, service.current['items'][0]['latestActivityAt'])
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+        self.assertEqual({}, service.returning_author_items)
+        # The complete item read follows the one returning-author pass; it
+        # does not trigger another scan of all returning authors' sources.
+        self.assertEqual(2, gateway.calls.count(('read', 'attests', 'assignment')))
