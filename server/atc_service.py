@@ -1182,14 +1182,18 @@ class LiveService:
     def _read_plan(self, resource, scope):
         if resource == "returning-authors":
             authors = set(self.returning_authors) - self.returning_authors_ready
+            if not authors:
+                return authors, []
             items = []
-            assignments = self.model.inventory("assignments").rows.values()
+            open_by_item = {}
+            for row in self.model.inventory("assignments").rows.values():
+                if row.get("state") == "open":
+                    open_by_item.setdefault(row.get("workItemId"), set()).add(row["id"])
             for wid, item in self.model.work_items().items():
                 if (self._summary_contract_active() and has_work_item_summary(item)
                         and not self._summary_needs_review_timing(item)):
                     continue
-                items.append((wid, {row["id"] for row in assignments
-                                    if row.get("workItemId") == wid and row.get("state") == "open"}))
+                items.append((wid, open_by_item.get(wid, set())))
             return authors, items
         if (resource == "turns" and self.model.closed_sources_released
                 and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):

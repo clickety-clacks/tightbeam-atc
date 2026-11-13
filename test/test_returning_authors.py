@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_service import LiveService
 from atc_payloads import SESSION_FIELDS, PAYLOAD_POLICIES
 from atc_upstream import Read
-from test_service import PublishedReads
+from test_service import PublishedReads, summarized_work
 from test_assignment_source_failure import publication
 
 
@@ -166,3 +166,44 @@ class ReturningAuthorTest(unittest.TestCase):
         self.drain(service)
         self.assertNotIn(('read', 'attests', 'outside'), gateway.calls)
         self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+
+    def test_returning_live_turn_restores_closed_assignment_and_authored_attachment(self):
+        for assignment in ('assignment', None):
+            with self.subTest(assignment=assignment):
+                gateway = ReturningReads()
+                service = self.load(gateway)
+                gateway.rows['turns', 'guest-one'] = [dict(seq=3, sessionKey='guest-one',
+                    assignmentId=assignment, createdAt=700000, startedAt=750000, endedAt=None)]
+                with patch.object(service, 'rebuild', side_effect=AssertionError('global recovery')):
+                    self.returns(service, {'guest-one'})
+                    self.drain(service)
+                fresh = self.fresh(service)
+                self.assertEqual(publication(fresh.current), publication(service.current))
+                self.assertNotIn(('attests', 'assignment'), service.model.inventories)
+
+    def test_summary_ineligible_attests_are_not_added_by_return_recovery(self):
+        gateway = ReturningReads()
+        gateway.rows['work-items', None] = [summarized_work(holders=[])]
+        service = self.load(gateway)
+        gateway.calls.clear()
+        self.returns(service, {'guest-one'})
+        self.drain(service)
+        self.assertNotIn(('membership', 'work'), gateway.calls)
+        self.assertNotIn(('read', 'attests', 'assignment'), gateway.calls)
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+
+    def test_retirement_discards_recovered_author_facts(self):
+        gateway = ReturningReads()
+        service = self.load(gateway)
+        self.returns(service, {'guest-one'})
+        self.drain(service)
+        for row in gateway.rows['sessions', None]:
+            if row['sessionKey'] == 'guest-one':
+                row['state'] = 'retired'
+        service._refresh('sessions')
+        self.drain(service)
+        self.assertEqual({}, service.returning_authors)
+        self.assertEqual(set(), service.returning_authors_ready)
+        part = service.model.closed_items['work']
+        self.assertEqual({}, part['summary']['authors'])
+        self.assertEqual({}, part['authorFacts'])
