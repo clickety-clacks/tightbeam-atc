@@ -106,9 +106,9 @@ class ReturningAuthorTest(unittest.TestCase):
             self.assertEqual({'guest-one': None, 'guest-two': None}, service.returning_authors)
             self.assertTrue(all(row['idleSince'] is None for row in service.current['agents']))
             self.drain(service)
-        self.assertEqual([('membership', 'work')], [c for c in gateway.calls if c[0] == 'membership'])
+        self.assertEqual([], [c for c in gateway.calls if c[0] == 'membership'])
+        self.assertEqual(1, gateway.calls.count(('read', 'assignments', None)))
         self.assertEqual(1, gateway.calls.count(('read', 'attests', 'assignment')))
-        self.assertNotIn(('read', 'assignments', None), gateway.calls)
         self.assertNotIn(('read', 'turns', 'agent s_author'), gateway.calls)
         self.assertEqual({'guest-one': 900000, 'guest-two': 800000},
                          {a['sessionKey']: a['idleSince'] for a in service.current['agents']})
@@ -160,9 +160,9 @@ class ReturningAuthorTest(unittest.TestCase):
         self.drain(service)
         self.assertEqual(publication(self.fresh(service).current), publication(service.current))
         self.assertEqual(1, gateway.max_active_attests)
-        self.assertEqual(2, gateway.calls.count(('membership', 'work')))
+        self.assertEqual(2, gateway.calls.count(('read', 'assignments', None)))
 
-    def test_assignment_outside_published_board_is_excluded(self):
+    def test_null_item_assignment_matches_unchanged_fresh_scope(self):
         gateway = ReturningReads()
         gateway.rows['assignments', None].append(dict(id='outside', workItemId=None,
             holderKey='agent s_author', state='closed', effectKind='code'))
@@ -172,7 +172,9 @@ class ReturningAuthorTest(unittest.TestCase):
         gateway.calls.clear()
         self.returns(service, {'guest-one'})
         self.drain(service)
-        self.assertNotIn(('read', 'attests', 'outside'), gateway.calls)
+        self.assertEqual(1, gateway.calls.count(('read', 'attests', 'outside')))
+        self.assertEqual(950000, service.current['agents'][0]['idleSince'])
+        self.assertEqual(2, service.returning_author_result['assignments'])
         self.assertEqual(publication(self.fresh(service).current), publication(service.current))
 
     def test_returning_live_turn_restores_closed_assignment_and_authored_attachment(self):
@@ -243,22 +245,20 @@ class ReturningAuthorTest(unittest.TestCase):
         self.assertEqual(950000, service.current['agents'][0]['idleSince'])
         self.assertEqual(publication(self.fresh(service).current), publication(service.current))
 
-    def test_new_author_activity_waits_for_complete_item_replacement(self):
+    def test_new_author_activity_and_item_replace_in_one_complete_pass(self):
         gateway = ReturningReads()
         service = self.load(gateway)
         gateway.rows['attests', 'assignment'][0]['ts'] = 950000
-        gateway.fail_item = True
+        gateway.fail = True
         gateway.calls.clear()
         self.returns(service, {'guest-one'})
         self.drain(service)
         self.assertIsNone(service.current['agents'][0]['idleSince'])
         self.assertEqual(900000, service.current['items'][0]['latestActivityAt'])
-        self.assertFalse(service.current['items'][0]['evidence']['attests']['complete'])
-        job = ('item-assignment-source', 'work', None)
+        job = ('returning-authors', None, None)
         self.assertIn(job, service.read_retries)
-        self.assertEqual({'work'}, service.returning_author_items['guest-one'])
         self.assertEqual(1, gateway.calls.count(('read', 'attests', 'assignment')))
-        gateway.fail_item = False
+        gateway.fail = False
         service.read_retries[job] = (0, 2)
         service._retry_incomplete_reads()
         self.drain(service)
@@ -266,6 +266,30 @@ class ReturningAuthorTest(unittest.TestCase):
         self.assertEqual(950000, service.current['items'][0]['latestActivityAt'])
         self.assertEqual(publication(self.fresh(service).current), publication(service.current))
         self.assertEqual({}, service.returning_author_items)
-        # The complete item read follows the one returning-author pass; it
-        # does not trigger another scan of all returning authors' sources.
+        # One failed pass and one successful pass each read the attest once.
+        # Item reconciliation consumes the same fold without an extra read.
         self.assertEqual(2, gateway.calls.count(('read', 'attests', 'assignment')))
+
+    def test_failed_assignment_scope_discovery_reads_no_attests(self):
+        gateway = ReturningReads()
+        service = self.load(gateway)
+        gateway.calls.clear()
+        original = gateway.read
+        def fail_collection(resource, scope=None):
+            result = original(resource, scope)
+            if resource == 'assignments':
+                result.rows = []
+                result.complete = False
+                result.error = 'TimeoutError'
+            return result
+        with patch.object(gateway, 'read', side_effect=fail_collection):
+            self.returns(service, {'guest-one'})
+            self.drain(service)
+        self.assertFalse(any(c[:2] == ('read', 'attests') for c in gateway.calls))
+        self.assertIsNone(service.current['agents'][0]['idleSince'])
+        job = ('returning-authors', None, None)
+        self.assertIn(job, service.read_retries)
+        service.read_retries[job] = (0, 2)
+        service._retry_incomplete_reads()
+        self.drain(service)
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))

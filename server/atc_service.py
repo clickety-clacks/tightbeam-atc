@@ -1167,18 +1167,22 @@ class LiveService:
             self._incomplete_state("recovering returning session activity")
             return True
         visible = {row["sessionKey"] for row in self.model.active_sessions()}
-        changed_items = set()
         for wid, recovered in result.folded["items"].items():
             closed = self.model.closed_items.get(wid)
-            if closed is None or wid not in self.model.work_items():
-                continue
-            for author, at in recovered["authors"].items():
-                if author in visible and at > (closed["activity"] or 0):
-                    # The observed attest proves the item's retained source
-                    # is older too. Publish its complete source replacement
-                    # before releasing this author's held idle value.
+            if wid in self.model.item_assignment_pending:
+                for author in recovered["authorIds"].intersection(visible):
                     self.returning_author_items.setdefault(author, set()).add(wid)
-                    changed_items.add(wid)
+                continue
+            if closed is not None and wid in self.model.work_items() and any(
+                    at > (closed["activity"] or 0)
+                    for author, at in recovered["authors"].items() if author in visible):
+                replacement = Read([], True, result.at, "item-assignment-source",
+                                   folded=result.folded["sources"][wid])
+                self._forget_scopes(self.model.replace_item_assignments(wid, replacement))
+            elif closed is None and wid is None:
+                # A newly observed null-item source still contributes to a
+                # current author's idle value, just as it does in a fresh load.
+                self.model.closed_items[wid] = result.folded["sources"][wid].closed
         self.model.restore_returning_authors(result.folded, visible)
         self.returning_authors_ready.update(result.folded["authors"].intersection(visible))
         self.returning_author_result = {
@@ -1186,9 +1190,6 @@ class LiveService:
             "assignments": result.folded["assignments"], "durationMs": result.folded["durationMs"]}
         self.read_failures.discard(job[:2])
         self.read_retries.pop(job, None)
-        for wid in changed_items:
-            if wid not in self.model.item_assignment_pending:
-                self._request_item_assignments(wid)
         # Returns arriving after this pass started share the next pass. No
         # concurrent scan and no completion credit for unread authors.
         if set(self.returning_authors) - self.returning_authors_ready:
@@ -1215,18 +1216,14 @@ class LiveService:
         if resource == "returning-authors":
             authors = set(self.returning_authors) - self.returning_authors_ready
             if not authors:
-                return authors, []
-            items = []
-            open_by_item = {}
-            for row in self.model.inventory("assignments").rows.values():
-                if row.get("state") == "open":
-                    open_by_item.setdefault(row.get("workItemId"), set()).add(row["id"])
-            for wid, item in self.model.work_items().items():
-                if (self._summary_contract_active() and has_work_item_summary(item)
-                        and not self._summary_needs_review_timing(item)):
-                    continue
-                items.append((wid, open_by_item.get(wid, set())))
-            return authors, items
+                return authors, set(), set()
+            excluded = {wid for wid, item in self.model.work_items().items()
+                        if self._summary_contract_active() and has_work_item_summary(item)
+                        and not self._summary_needs_review_timing(item)}
+            live_ids = {turn.get("assignmentId")
+                        for resource, scope in self.model.inventories if resource == "turns"
+                        for turn in self.model.summary(resource, scope)["live"]}
+            return authors, excluded, live_ids
         if (resource == "turns" and self.model.closed_sources_released
                 and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
             # Correlation needs no retained turn inventory. Creating one here
