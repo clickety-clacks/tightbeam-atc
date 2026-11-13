@@ -208,7 +208,7 @@ class ReadQueue:
         started, at = time.monotonic(), now_ms()
         if not authors:
             return Read([], True, at, "returning-authors", folded={
-                "authors": set(), "items": {}, "sources": {},
+                "authors": set(), "items": {}, "sources": {}, "excludedItems": set(),
                 "assignments": 0, "durationMs": 0})
         # This is the same complete assignment source used to select a fresh
         # load's attest scopes. Per-item membership omits null-item assignments.
@@ -262,7 +262,7 @@ class ReadQueue:
         # Completed item folds can reconcile newer item activity atomically
         # without rereading any attest. No closed assignment rows are retained.
         return Read([], True, at, "returning-authors", folded={
-            "authors": authors, "items": items, "sources": sources,
+            "authors": authors, "items": items, "sources": sources, "excludedItems": excluded_items,
             "assignments": count, "durationMs": (time.monotonic() - started) * 1000})
 
     def finish(self, job, epoch):

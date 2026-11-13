@@ -15,7 +15,7 @@ import uuid
 from atc_git import GitResolver, reference_digest
 from atc_model import EvidenceModel, latest_time
 from atc_evidence import combined_evidence, merge_value_for_refs
-from atc_reads import ReadQueue
+from atc_reads import ReadQueue, ItemAssignmentSource
 from atc_reconciliation import ActiveBackstop, RETRY_MS
 from atc_upstream import ATTEST_FIELDS, Read, attest_row, now_ms
 
@@ -1167,22 +1167,31 @@ class LiveService:
             self._incomplete_state("recovering returning session activity")
             return True
         visible = {row["sessionKey"] for row in self.model.active_sessions()}
-        for wid, recovered in result.folded["items"].items():
-            closed = self.model.closed_items.get(wid)
+        sources = result.folded["sources"]
+        # Complete global membership also establishes empty eligible items.
+        # Reuse the same attest folds for changed item facts and open sources;
+        # a second per-item history scan would exceed the recovery pass bound.
+        for wid in self.model.work_items().keys() - result.folded["excludedItems"]:
+            sources.setdefault(wid, ItemAssignmentSource())
+        owned = {}
+        for aid, row in self.model.inventory("assignments").rows.items():
+            owned.setdefault(row.get("workItemId"), {})[aid] = row
+        for wid, staged in sources.items():
             if wid in self.model.item_assignment_pending:
-                for author in recovered["authorIds"].intersection(visible):
+                for author in result.folded["authors"].intersection(visible):
                     self.returning_author_items.setdefault(author, set()).add(wid)
                 continue
-            if closed is not None and wid in self.model.work_items() and any(
-                    at > (closed["activity"] or 0)
-                    for author, at in recovered["authors"].items() if author in visible):
-                replacement = Read([], True, result.at, "item-assignment-source",
-                                   folded=result.folded["sources"][wid])
+            if wid is not None and wid not in self.model.work_items():
+                continue
+            closed = self.model.closed_items.get(wid)
+            changed = ((closed or {}).get("detailFingerprint") !=
+                       (staged.closed or {}).get("detailFingerprint")
+                       or owned.get(wid, {}) != staged.open_rows
+                       or any(self.model.inventory("attests", aid).fingerprint != inventory.fingerprint
+                              for aid, inventory in staged.open_attests.items()))
+            if changed:
+                replacement = Read([], True, result.at, "item-assignment-source", folded=staged)
                 self._forget_scopes(self.model.replace_item_assignments(wid, replacement))
-            elif closed is None and wid is None:
-                # A newly observed null-item source still contributes to a
-                # current author's idle value, just as it does in a fresh load.
-                self.model.closed_items[wid] = result.folded["sources"][wid].closed
         self.model.restore_returning_authors(result.folded, visible)
         self.returning_authors_ready.update(result.folded["authors"].intersection(visible))
         self.returning_author_result = {

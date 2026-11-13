@@ -294,3 +294,27 @@ class ReturningAuthorTest(unittest.TestCase):
         service._retry_incomplete_reads()
         self.drain(service)
         self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+
+    def test_return_recovery_replaces_changed_open_attests_without_second_scan(self):
+        gateway = ReturningReads()
+        gateway.rows['assignments', None][0].update(state='open', closedAt=None)
+        service = self.load(gateway)
+        gateway.rows['attests', 'assignment'][0]['ts'] = 950000
+        gateway.calls.clear()
+        self.returns(service, {'guest-one'})
+        self.drain(service)
+        self.assertEqual(950000, service.current['agents'][0]['idleSince'])
+        self.assertEqual(1, gateway.calls.count(('read', 'attests', 'assignment')))
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+
+    def test_return_recovery_replaces_corrected_closed_activity_without_second_scan(self):
+        gateway = ReturningReads()
+        service = self.load(gateway)
+        gateway.rows['attests', 'assignment'][0]['ts'] = 700000
+        gateway.calls.clear()
+        self.returns(service, {'guest-one'})
+        self.drain(service)
+        self.assertEqual(700000, service.current['agents'][0]['idleSince'])
+        self.assertEqual(800000, service.current['items'][0]['latestActivityAt'])
+        self.assertEqual(1, gateway.calls.count(('read', 'attests', 'assignment')))
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
