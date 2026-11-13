@@ -96,7 +96,7 @@ class ReadQueue:
             visible = live_ids.get("visibleSessions")
             read_attests, live_ids = live_ids["attests"], live_ids["liveIds"]
         source = "item-assignment-source"
-        membership = self.gateway.assignment_membership(wid)
+        membership = self.gateway.assignment_membership(wid, include_rows=True)
         if not membership.complete:
             return Read([], False, membership.at, source, membership.error)
         staged, closed = ItemAssignmentSource(), ClosedAssignmentFold()
@@ -113,6 +113,12 @@ class ReadQueue:
             if (row.get("id") != aid or row.get("workItemId") != wid
                     or not isinstance(row.get("commitRefCorrections"), list)):
                 return Read([], False, detail.at, source, "assignment-detail-incomplete")
+            # Keep the collection's published shape, including files. The
+            # detail route adds reopenings/cannotProceed but omits files; its
+            # shared fields must still describe the same membership revision.
+            if any(row.get(key) != value for key, value in member.items() if key != "files"):
+                return Read([], False, detail.at, source, "assignment-source-changed")
+            row = member
             holder = row.get("holderKey")
             if visible is not None and holder and holder not in visible:
                 retired.setdefault(holder, {})[aid] = wid
@@ -143,7 +149,8 @@ class ReadQueue:
                 staged.live_items[aid] = wid
             # Only current open sources survive the next member. Closed raw
             # assignment/attest text and temporary page folds are not staged.
-            del row, detail, result, fold, inventory
+            membership.rows[position] = None
+            del row, member, detail, result, fold, inventory
         # The same existing warm-path turn history used by fresh full loads.
         # Only holders discovered in this item's complete membership qualify.
         from atc_summary import ItemActivityFold

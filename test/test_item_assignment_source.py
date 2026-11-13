@@ -10,6 +10,7 @@ import weakref
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_reads import ReadQueue
+from atc_service import LiveService
 from atc_upstream import Gateway
 from test_closed_folding import ClosedAssignmentFoldTest
 
@@ -26,6 +27,7 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         self.assignments = deepcopy(list(self.model.inventory('assignments').rows.values()))
         for row in self.assignments:
             row.setdefault('commitRefCorrections', [])
+            row.setdefault('files', ['src/' + row['id']])
         self.attests = {row['id']: deepcopy(list(self.model.inventory('attests', row['id']).rows.values()))
                         for row in self.assignments}
         self.calls = []
@@ -41,12 +43,17 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         if verb == 'work-item-get':
             # The existing membership route does not supply corrections.
             return dict(workItem={'id': 'work'}, assignments=[
-                {k: v for k, v in row.items() if k != 'commitRefCorrections'}
+                {k: v for k, v in row.items() if k not in ('commitRefCorrections', 'files')}
                 for row in self.assignments])
+        if verb == 'work-item-trace':
+            return dict(workItem={'id': 'work'}, assignments=deepcopy(self.assignments))
         if verb == 'assignments':
             return {'assignments': deepcopy(self.assignments)}
         if verb == 'assignment-get':
-            return deepcopy(next(row for row in self.assignments if row['id'] == params['assignment_id']))
+            row = deepcopy(next(row for row in self.assignments if row['id'] == params['assignment_id']))
+            row.pop('files')
+            row['reopenings'] = []
+            return row
         if verb == 'attests':
             return {'attests': deepcopy(self.attests[params['assignment_id']])}
         raise AssertionError(verb)
@@ -58,7 +65,7 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         result = self.result()
         self.assertTrue(result.complete, result.error)
         self.assertEqual([], result.rows)
-        self.assertEqual(['work-item-get', 'assignment-get', 'attests',
+        self.assertEqual(['work-item-get', 'work-item-trace', 'assignment-get', 'attests',
                           'assignment-get', 'attests', 'assignment-get', 'attests'],
                          [verb for verb, _ in self.calls])
         staged = result.folded
@@ -76,7 +83,8 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         self.assertEqual({'author': 10, 'other': 30}, staged.closed['summary']['authors'])
 
     def test_any_incomplete_member_discards_staging_and_retry_rebuilds_all_members(self):
-        for verb, aid in [('work-item-get', None), ('assignment-get', 'last'), ('attests', 'last')]:
+        for verb, aid in [('work-item-get', None), ('work-item-trace', None),
+                          ('assignment-get', 'last'), ('attests', 'last')]:
             with self.subTest(verb=verb):
                 self.failure = (verb, aid)
                 failed = self.result()
@@ -113,6 +121,44 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         self.assertTrue(result.complete)
         self.assertIsNone(result.folded.closed)
         self.assertEqual({}, result.folded.open_rows)
+
+    def test_detail_page_preserves_collection_fields_before_and_after_targeted_reread(self):
+        self.model.accept('assignments', None, self.gateway.read('assignments'))
+        for row in self.assignments:
+            self.model.accept('attests', row['id'], self.gateway.read_current('attests', row['id']))
+        self.model.fold_closed_assignments()
+        service = LiveService(self.gateway)
+        self.addCleanup(service.stop)
+        service.model = self.model
+        for targeted in (False, True):
+            with self.subTest(targeted=targeted):
+                if targeted:
+                    self.model.hold_item_assignments('work')
+                    result = self.result()
+                    self.assertTrue(result.complete, result.error)
+                    self.model.replace_item_assignments('work', result)
+                service._publish()
+                self.calls.clear()
+                status, body = service.evidence_page('work')
+                self.assertEqual(200, status, body)
+                self.assertEqual(self.assignments, body['assignments'])
+                self.assertNotIn('assignments', [verb for verb, _ in self.calls])
+        self.failure = ('work-item-trace', None)
+        status, body = service.evidence_page('work')
+        self.assertEqual(503, status)
+        self.assertTrue(service.events.empty())
+
+    def test_changed_member_between_membership_and_detail_does_not_publish_mixed_source(self):
+        original = self.gateway.detail
+        def detail(resource, aid, scope=None):
+            result = original(resource, aid, scope)
+            result.rows[0]['closedAt'] = 999
+            return result
+        self.gateway.detail = detail
+        result = self.result()
+        self.assertFalse(result.complete)
+        self.assertEqual('assignment-source-changed', result.error)
+        self.assertIsNone(result.folded)
 
     def test_closed_raw_rows_are_released_between_members(self):
         class Row(dict):

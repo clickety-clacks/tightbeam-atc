@@ -296,6 +296,8 @@ class LiveService:
             # Existing per-item membership includes original assignment rows in
             # source order. Do not materialize the all-time global collection.
             result = self.gateway.assignment_membership(item_id, include_rows=True)
+            if not result.complete:
+                return finish(503, {"error": "item-unavailable", **pin})
             fresh_owned = result.rows
             if [a for a in fresh_owned if a.get("state") == "open"] != owned:
                 return reload_details()

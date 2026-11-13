@@ -66,6 +66,20 @@ class ReadCompletionTest(unittest.TestCase):
         self.assertEqual(["cursor"], second_query["after"])
         self.assertNotIn("tail", second_query)
 
+    def test_full_item_membership_joins_trace_fields_without_adding_linked_reviews(self):
+        member = {"id": "direct", "workItemId": "work", "holderKey": "author", "state": "closed"}
+        trace_member = dict(member, files=["src/file"], commitRefCorrections=[{"id": "correction"}])
+        membership = {"workItem": {"id": "work"}, "assignments": [member]}
+        trace = {"workItem": {"id": "work"}, "assignments": [
+            {"id": "linked-review", "files": []}, trace_member]}
+        self.gateway.cli.read.side_effect = [membership, trace]
+        result = self.gateway.assignment_membership("work", include_rows=True)
+        self.assertTrue(result.complete, result.error)
+        self.assertEqual([trace_member], result.rows)
+        trace["assignments"] = []
+        self.gateway.cli.read.side_effect = [membership, trace]
+        self.assertFalse(self.gateway.assignment_membership("work", include_rows=True).complete)
+
     def test_every_paged_collection_starts_at_head(self):
         resources = (
             "work-items", "sessions", "decision-requests",

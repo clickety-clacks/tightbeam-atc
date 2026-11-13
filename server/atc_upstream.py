@@ -135,10 +135,10 @@ class Gateway:
     def assignment_membership(self, work_item_id, *, include_rows=False):
         """Existing per-item complete membership, in canonical source order.
 
-        Membership omits reference corrections. Callers must read each member
-        through assignment-get and its attest source before publishing facts.
-        Return identities by default; on-demand evidence pages may request the
-        original membership rows. Neither form is a retained history cache.
+        The membership route omits files and corrections. For full rows, join
+        those fields from the existing item trace, preserving direct membership
+        and its order (the trace also includes recursively linked reviews).
+        Neither form is a retained history cache.
         """
         source = "cli:work-item-get " + work_item_id
         try:
@@ -157,6 +157,20 @@ class Gateway:
                     raise ValueError("invalid assignment member")
                 seen.add(row["id"])
                 identities.append(row if include_rows else {"id": row["id"]})
+            if include_rows and identities:
+                trace = self.command("work-item-trace", work_item_id=work_item_id)
+                if trace.get("workItem", {}).get("id") != work_item_id:
+                    raise ValueError("item trace mismatch")
+                members = {row["id"]: row for row in trace["assignments"]}
+                for row in identities:
+                    member = members[row["id"]]
+                    if (not isinstance(member.get("files"), list)
+                            or not isinstance(member.get("commitRefCorrections"), list)
+                            or any(member.get(key) != row.get(key)
+                                   for key in ("holderKey", "state", "reviewsAssignmentId"))):
+                        raise ValueError("item trace member mismatch")
+                    row.update(files=member["files"],
+                               commitRefCorrections=member["commitRefCorrections"])
             return Read(identities, True, now_ms(), source)
         except Exception as error:
             return Read([], False, now_ms(), source, type(error).__name__)
