@@ -441,6 +441,11 @@ class EvidenceModel:
                                       if item != wid}
         self.live_assignment_items.update(staged.live_items)
         if staged.closed:
+            if (not staged.closed["detailsKnown"] and previous and
+                    previous["assignmentFingerprint"] == staged.closed["assignmentFingerprint"]):
+                # Preserve an on-demand detail pin for summary-backed sources,
+                # without making their attest histories background-eligible.
+                staged.closed["detailFingerprint"] = previous["detailFingerprint"]
             staged.closed["turnActivity"] = turn_at
             staged.closed["activity"] = latest_time(staged.closed["activity"], turn_at)
             self.closed_items[wid] = staged.closed

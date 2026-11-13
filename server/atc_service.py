@@ -278,7 +278,7 @@ class LiveService:
 
         def reload_details(observed=None):
             return finish(409, {"error": "revision-mismatch", **pin},
-                          ("detail-reload", observed))
+                          ("detail-reload", (item_id, observed)))
 
         if older_fingerprint is not None:
             result = self.gateway.detail("work-items", item_id)
@@ -332,7 +332,7 @@ class LiveService:
                              key=lambda row: (row.get("ts") or 0, row["id"]))
             del result, fold
         if closed_fingerprint is not None and closed_fingerprint.hexdigest() != expected_closed:
-            return reload_details((item_id, expected_closed, closed_fingerprint.hexdigest(),
+            return reload_details((expected_closed, closed_fingerprint.hexdigest(),
                                    assignment_fingerprint.hexdigest()))
         facts = combined_evidence(work_facts, assignment_facts, *scopes)
         return finish(200, deepcopy({
@@ -1661,14 +1661,15 @@ class LiveService:
             else:
                 self._refresh("attests", scope)
         elif kind == "detail-reload":
-            if value is not None:
-                wid, previous, fingerprint, assignments = value
+            wid, observed = value
+            if observed is not None:
+                previous, fingerprint, assignments = observed
                 closed = self.model.closed_items.get(wid)
                 if closed and closed["detailFingerprint"] == previous:
                     closed["detailFingerprint"] = fingerprint
                     closed["assignmentFingerprint"] = assignments
                     self.model.details_revision += 1
-            self.rebuild(recovery=True)
+            self._request_item_assignments(wid, changed=True)
         elif kind == "change":
             if (isinstance(value, tuple) and len(value) == 2
                     and isinstance(value[0], dict)):

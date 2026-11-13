@@ -244,6 +244,8 @@ class HttpTest(unittest.TestCase):
         self.live.model.fold_closed_assignments()
         status, first = self.request('/api/items/work/evidence?limit=1')
         self.assertEqual(200, status)
+        rebuilds = self.live.metrics['rebuilds']
+        gateway.calls.clear()
         gateway.rows['attests', 'assignment'][0]['note'] = 'Changed detail only'
         status, mismatch = self.request('/api/items/work/evidence?limit=1')
         self.assertEqual(409, status)
@@ -260,6 +262,9 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertGreater(fresh['revision'], first['revision'])
         self.assertEqual('Changed detail only', fresh['records'][0]['note'])
+        self.assertEqual(rebuilds, self.live.metrics['rebuilds'])
+        self.assertNotIn(('read', 'assignments', None), gateway.calls)
+        self.assertIn(('membership', 'work'), gateway.calls)
         self.assertNotIn(('attests', 'assignment'), self.live.model.inventories)
         gateway.rows['assignments', None][0]['subject'] = 'Changed assignment detail only'
         self.assertEqual(409, self.request('/api/items/work/evidence?limit=1')[0])
