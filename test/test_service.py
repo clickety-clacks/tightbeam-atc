@@ -75,10 +75,10 @@ class PublishedReads:
                 row.setdefault("commitRefCorrections", [])
         return Read(rows, bool(rows), 11, "published-detail")
 
-    def assignment_membership(self, wid):
+    def assignment_membership(self, wid, *, include_rows=False):
         self.read_count += 1
         self.calls.append(("membership", wid))
-        return Read([{"id": row["id"]} for row in self.rows['assignments', None]
+        return Read([deepcopy(row) if include_rows else {"id": row["id"]} for row in self.rows['assignments', None]
                      if row.get("workItemId") == wid], True, 10, "published-membership")
 
 

@@ -230,9 +230,13 @@ class LiveService:
         return {k: v for k, v in row.items() if k != "idleFor"} if collection == "agents" else row
 
     def evidence_page(self, item_id, offset=0, limit=100, generation=None, revision=None):
-        # Model work does not hold the lock serving committed SSE/snapshots.
-        # During coalescing, retry instead of labelling newer rows with an old
-        # revision. The next publication makes the page and its pin consistent.
+        from heapq import nsmallest
+        from itertools import chain
+        from atc_summary import HistoryFold, DetailFingerprint
+        from atc_evidence import Inventory
+
+        # Capture only this item's current facts. Network reads must not hold
+        # the model worker's lock; a publication during I/O invalidates the pin.
         with self.model_lock:
             pin = {"generation": self.generation, "revision": self.revision}
             if self._dirty:
@@ -247,92 +251,95 @@ class LiveService:
             item = self.model.work_items().get(item_id)
             if item is None:
                 return (404 if work.complete else 503), {"error": "item-unavailable", **pin}
-            if item_id in self.model.older_items and item_id not in work.rows:
-                result = self.gateway.detail("work-items", item_id)
-                if (not result.complete or len(result.rows) != 1
-                        or result.rows[0].get("id") != item_id):
-                    return 503, {"error": "item-unavailable", **pin}
-                if not self.model.same_work_item(item_id, result.rows[0]):
-                    # Do not publish new source text under an old detail pin or
-                    # leave request-only rows in the model queue. Its existing
-                    # detail read will reconcile before the caller retries.
-                    self._dirty = True
-                    self.events.put(("detail-item-reload", item_id))
-                    return 409, {"error": "revision-mismatch", **pin}
-                item = result.rows[0]
-                del result
-            assignments = self.model.inventory("assignments")
-            owned = [a for a in assignments.rows.values() if a.get("workItemId") == item_id]
-            from heapq import nsmallest
-            from itertools import chain
-            from atc_summary import HistoryFold, DetailFingerprint
-            from atc_evidence import Inventory
+            item = deepcopy(item)
+            work_facts = deepcopy(work.evidence())
+            older = self.model.older_items.get(item_id) if item_id not in work.rows else None
+            older_fingerprint = older["fingerprint"] if older else None
+            owned = deepcopy([a for a in self.model.inventory("assignments").rows.values()
+                              if a.get("workItemId") == item_id])
             closed = self.model.closed_item(item_id, owned)
-            closed_fingerprint = DetailFingerprint() if closed else None
-            assignment_fingerprint = DetailFingerprint() if closed else None
-            assignment_facts = self.model.assignment_evidence(item_id)
+            expected_closed = closed["detailFingerprint"] if closed else None
+            assignment_facts = deepcopy(self.model.assignment_evidence(item_id))
             if item_id in self.model.item_assignment_pending:
-                assignment_facts = dict(assignment_facts, status="unknown", complete=False,
-                                        freshness="stale")
+                assignment_facts.update(status="unknown", complete=False, freshness="stale")
+            attest_pins = {a["id"]: (self.reads.epochs["attests", a["id"]],
+                                    self.model.inventory("attests", a["id"]).fingerprint)
+                           for a in owned}
 
-            def reload_details(observed=None):
-                # The old source identities have been released. Reconcile
-                # through existing collection reads instead of reintroducing
-                # a permanent detail cache or returning new text under this pin.
-                self._dirty = True
-                self.events.put(("detail-reload", observed))
-                return 409, {"error": "revision-mismatch", **pin}
-
-            if closed:
-                result = self.gateway.read("assignments", None)
-                fresh_owned = [a for a in result.rows if a.get("workItemId") == item_id]
-                if [a for a in fresh_owned if a.get("state") == "open"] != owned:
-                    return reload_details()
-                evidence = Inventory()
-                evidence.read((), complete=result.complete, at=result.at, source=result.source)
-                assignment_facts = combined_evidence(assignment_facts, evidence.evidence())
-                owned = fresh_owned
-                del result, fresh_owned
-            scopes, rows, total = [], [], 0
-            end = offset + limit
-            for position, assignment in enumerate(owned):
-                scope = assignment["id"]
-                folded_assignment = closed is not None and assignment.get("state") != "open"
-                epoch = None if folded_assignment else self.reads.epochs["attests", scope]
-                result = self.gateway.read("attests", scope)
-                fold = HistoryFold("attests", result.at)
-                fold.add(result.rows)
-                if folded_assignment:
-                    closed_fingerprint.add(assignment, fold.fingerprint.hexdigest(), position)
-                    assignment_fingerprint.add(assignment, None, position)
-                elif self.model.inventory("attests", scope).fingerprint != fold.fingerprint.hexdigest():
-                    # A reread cannot label changed detail text with the old
-                    # publication pin. Commit its compact facts on the model
-                    # worker, then let the existing mismatch retry get a page.
+        def finish(status, body, event=None):
+            with self.model_lock:
+                current_pin = {"generation": self.generation, "revision": self.revision}
+                if self._dirty or current_pin != pin:
+                    return 409, {"error": "revision-mismatch", **current_pin}
+                if event is not None:
                     self._dirty = True
-                    self.events.put(("detail-history", (scope, epoch, Read(
-                        [], result.complete, result.at, result.source,
-                        result.error, result.page, fold))))
-                    return 409, {"error": "revision-mismatch", **pin}
-                evidence = Inventory()
-                evidence.read((), complete=result.complete, at=result.at, source=result.source)
-                scopes.append(evidence.evidence())
-                total += len(result.rows)
-                rows = nsmallest(end, chain(rows, result.rows),
-                                 key=lambda row: (row.get("ts") or 0, row["id"]))
-                del result, fold
-            if closed and closed_fingerprint.hexdigest() != closed["detailFingerprint"]:
-                return reload_details((item_id, closed["detailFingerprint"],
-                                       closed_fingerprint.hexdigest(), assignment_fingerprint.hexdigest()))
-            facts = combined_evidence(work.evidence(), assignment_facts,
-                                      *scopes)
-            return 200, deepcopy({
-                **pin, "itemId": item_id, "item": item, "assignments": owned,
-                "records": [dict(row, bySession=row.get("bySession"), byUser=row.get("byUser"),
-                                 note=row.get("note")) for row in rows[offset:end]],
-                "total": total, "nextOffset": end if end < total else None,
-                "complete": facts["complete"], "freshness": facts,
-            })
+                    self.events.put(event)
+                return status, body
+
+        def reload_details(observed=None):
+            return finish(409, {"error": "revision-mismatch", **pin},
+                          ("detail-reload", observed))
+
+        if older_fingerprint is not None:
+            result = self.gateway.detail("work-items", item_id)
+            if (not result.complete or len(result.rows) != 1
+                    or result.rows[0].get("id") != item_id):
+                return finish(503, {"error": "item-unavailable", **pin})
+            if self.model.item_fingerprint(result.rows[0]) != older_fingerprint:
+                return finish(409, {"error": "revision-mismatch", **pin},
+                              ("detail-item-reload", item_id))
+            item = result.rows[0]
+            del result
+        closed_fingerprint = DetailFingerprint() if expected_closed is not None else None
+        assignment_fingerprint = DetailFingerprint() if closed_fingerprint else None
+        if closed_fingerprint is not None:
+            # Existing per-item membership includes original assignment rows in
+            # source order. Do not materialize the all-time global collection.
+            result = self.gateway.assignment_membership(item_id, include_rows=True)
+            fresh_owned = result.rows
+            if [a for a in fresh_owned if a.get("state") == "open"] != owned:
+                return reload_details()
+            evidence = Inventory()
+            evidence.read((), complete=result.complete, at=result.at, source=result.source)
+            assignment_facts = combined_evidence(assignment_facts, evidence.evidence())
+            owned = fresh_owned
+            del result, fresh_owned
+        scopes, rows, total = [], [], 0
+        end = offset + limit
+        for position, assignment in enumerate(owned):
+            scope = assignment["id"]
+            folded_assignment = closed_fingerprint is not None and assignment.get("state") != "open"
+            result = self.gateway.read("attests", scope)
+            fold = HistoryFold("attests", result.at)
+            fold.add(result.rows)
+            if folded_assignment:
+                closed_fingerprint.add(assignment, fold.fingerprint.hexdigest(), position)
+                assignment_fingerprint.add(assignment, None, position)
+            else:
+                epoch, fingerprint = attest_pins[scope]
+                if fingerprint != fold.fingerprint.hexdigest():
+                    return finish(409, {"error": "revision-mismatch", **pin},
+                                  ("detail-history", (scope, epoch, Read(
+                                      [], result.complete, result.at, result.source,
+                                      result.error, result.page, fold))))
+            evidence = Inventory()
+            evidence.read((), complete=result.complete, at=result.at, source=result.source)
+            scopes.append(evidence.evidence())
+            total += len(result.rows)
+            rows = nsmallest(end, chain(rows, result.rows),
+                             key=lambda row: (row.get("ts") or 0, row["id"]))
+            del result, fold
+        if closed_fingerprint is not None and closed_fingerprint.hexdigest() != expected_closed:
+            return reload_details((item_id, expected_closed, closed_fingerprint.hexdigest(),
+                                   assignment_fingerprint.hexdigest()))
+        facts = combined_evidence(work_facts, assignment_facts, *scopes)
+        return finish(200, deepcopy({
+            **pin, "itemId": item_id, "item": item, "assignments": owned,
+            "records": [dict(row, bySession=row.get("bySession"), byUser=row.get("byUser"),
+                             note=row.get("note")) for row in rows[offset:end]],
+            "total": total, "nextOffset": end if end < total else None,
+            "complete": facts["complete"], "freshness": facts,
+        }))
 
     def start(self):
         try:

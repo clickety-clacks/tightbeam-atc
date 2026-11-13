@@ -132,12 +132,13 @@ class Gateway:
             self.read_count += 1
         return self.cli.read(verb, **params)
 
-    def assignment_membership(self, work_item_id):
+    def assignment_membership(self, work_item_id, *, include_rows=False):
         """Existing per-item complete membership, in canonical source order.
 
         Membership omits reference corrections. Callers must read each member
         through assignment-get and its attest source before publishing facts.
-        Return identities only; the item body and membership rows are temporary.
+        Return identities by default; on-demand evidence pages may request the
+        original membership rows. Neither form is a retained history cache.
         """
         source = "cli:work-item-get " + work_item_id
         try:
@@ -155,7 +156,7 @@ class Gateway:
                         or row["id"] in seen):
                     raise ValueError("invalid assignment member")
                 seen.add(row["id"])
-                identities.append({"id": row["id"]})
+                identities.append(row if include_rows else {"id": row["id"]})
             return Read(identities, True, now_ms(), source)
         except Exception as error:
             return Read([], False, now_ms(), source, type(error).__name__)

@@ -201,12 +201,17 @@ class HttpTest(unittest.TestCase):
         self.live.gateway.read.side_effect = lambda resource, scope=None: Read(
             assignments if resource == 'assignments' else rows[scope],
             (resource, scope) not in partial, 1, 'test-read')
+        self.live.gateway.assignment_membership.side_effect = lambda wid, **kwargs: Read(
+            assignments, ("assignments", None) not in partial, 1, "test-read")
         self.live._publish()
         before = self.request('/api/items/item/evidence?limit=2')
         self.live.model.fold_closed_assignments()
         for scope in ('a', 'c'):
             self.live.reads.epochs.pop(('attests', scope), None)
         self.assertEqual(before, self.request('/api/items/item/evidence?limit=2'))
+        self.live.gateway.assignment_membership.assert_called_once_with('item', include_rows=True)
+        self.assertFalse(any(call.args[0] == 'assignments'
+                             for call in self.live.gateway.read.call_args_list))
         first = before[1]
         self.assertEqual(['b', 'c'], [row['id'] for row in first['records']])
         pin = '&generation=' + first['generation'] + '&revision=' + str(first['revision'])
