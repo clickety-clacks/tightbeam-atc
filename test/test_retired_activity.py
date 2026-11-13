@@ -211,3 +211,30 @@ class RetiredActivityTest(unittest.TestCase):
         self.assertTrue(all('/second/' in p for p in paths[2:]))
         gc.collect()
         self.assertTrue(all(ref() is None for ref in held))
+
+    def test_new_session_reads_only_its_scopes_without_retired_rescan(self):
+        from atc_payloads import PAYLOAD_POLICIES, SESSION_FIELDS
+        with patch('atc_service.now_ms', return_value=1000000):
+            gateway = self.gateway(True)
+            service = self.load(gateway)
+            service.policies = PAYLOAD_POLICIES
+            marker = service.retired_activity_marker
+            row = dict.fromkeys(SESSION_FIELDS) | dict(
+                sessionKey='agent s_new', state='active', rowVersion=100,
+                displayName='New', archetype='coder', capabilities={})
+            gateway.rows['sessions', None].append(row)
+            for resource in ('turns', 'wakes', 'messages'):
+                gateway.rows[resource, 'agent s_new'] = []
+            gateway.calls.clear()
+            service.change(dict(resource='sessions', op='upsert',
+                                **{'class': 'session.spawned'},
+                                refs={'sessionKey': 'agent s_new'}, payload=row))
+            self.drain(service)
+            service._publish()
+            self.assertEqual(marker, service.retired_activity_marker)
+            self.assertIsNone(service.cycle)
+            self.assertEqual({('read', resource, 'agent s_new')
+                              for resource in ('turns', 'wakes', 'messages')},
+                             set(gateway.calls))
+            self.assertEqual(700000, service.snapshot()['items'][0]['latestActivityAt'])
+            self.assertNotIn(('turns', 'agent s_author'), service.model.inventories)

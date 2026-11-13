@@ -26,7 +26,7 @@ class DetailPublicationTest(unittest.TestCase):
         service.model.accept('work-items', None, Read([
             dict(id='item', title='Before', state='open')], True, 1, 'test-read'))
         service.model.accept('assignments', None, Read([
-            dict(id='assignment', workItemId='item', state='open')], True, 1, 'test-read'))
+            dict(id='assignment', workItemId='item', state='open', holderKey='author')], True, 1, 'test-read'))
         service.model.accept('attests', 'assignment', Read(records, True, 1, 'test-read'))
         service._publish()
         response = []

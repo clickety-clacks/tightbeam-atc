@@ -1575,6 +1575,7 @@ class LiveService:
                 self._state("stale", "change missing primary reference")
         if resource == "sessions" and applied:
             if (self.model.closed_sources_released and payload.get("state") == "active"
+                    and notice.get("class") != "session.spawned"
                     and (previous is None or previous.get("state") != "active")):
                 self.rebuild(recovery=True)
             self._discover_histories()
