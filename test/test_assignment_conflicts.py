@@ -1,12 +1,16 @@
 """R29 equality conflicts and current unresolved publication ownership."""
 from copy import deepcopy
 from pathlib import Path
+import queue
 import sys
+from threading import Event
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
-from atc_assignment_conflicts import AssignmentReadConflicts, AssignmentHolds
+from atc_assignment_conflicts import AssignmentReadConflicts, AssignmentHolds, AssignmentReadRegistry
 from atc_payloads import ASSIGNMENT_FIELDS
+from atc_reads import ReadQueue
+from atc_upstream import Read
 
 
 class AssignmentConflictsTest(unittest.TestCase):
@@ -102,3 +106,142 @@ class AssignmentConflictsTest(unittest.TestCase):
         self.assertEqual({}, restarted.items)
         with self.assertRaises(ValueError):
             holds.hold('new', 'unknown', None, at=300)
+
+    def test_establishing_delivery_cannot_resolve_but_next_queued_notice_can(self):
+        registry = AssignmentReadRegistry()
+        job = ('assignments', None, None)
+        registry.start(job)
+        queued = []
+        close = registry.admit(self.notice(self.row('closed')), queued.append)
+        reopen = registry.admit(self.notice(self.row()), queued.append)
+        holds = AssignmentHolds()
+        published = {'id': 'item', 'closedAt': None}
+
+        def apply(flight):
+            conflicts = flight.conflict_deliveries([self.row()], complete=True)
+            self.assertEqual({'a': close}, conflicts)
+            holds.hold('a', 'item', published, at=300,
+                       after_delivery=conflicts['a'])
+        registry.consume(job, apply)
+        self.assertEqual([close, reopen], queued)
+        self.assertFalse(holds.resolve_notice('a', queued[0]))
+        self.assertIs(published, holds.items['item'])
+        self.assertTrue(holds.resolve_notice('a', queued[1]))
+        self.assertEqual({}, holds.assignments)
+        self.assertEqual({}, registry.flights)
+
+    def test_first_matching_notice_does_not_hide_later_conflict(self):
+        flight = AssignmentReadConflicts()
+        flight.observe(self.notice(self.row('closed')), delivery=10)
+        flight.observe(self.notice(self.row()), delivery=11)
+        flight.observe(self.notice(self.row('closed')), delivery=12)
+        self.assertEqual({'a': 11}, flight.conflict_deliveries(
+            [self.row('closed')], complete=True))
+        self.assertEqual({'a': 10}, flight.conflict_deliveries(
+            [self.row()], complete=True))
+        holds = AssignmentHolds()
+        original = {'id': 'item', 'closedAt': 200}
+        holds.hold('a', 'item', original, at=300, after_delivery=10)
+        self.assertFalse(holds.hold('a', 'item', {'id': 'item'},
+                                    at=500, after_delivery=11))
+        self.assertFalse(holds.resolve_notice('a', 11))
+        self.assertEqual(300, holds.since('item'))
+        self.assertIs(original, holds.items['item'])
+        self.assertTrue(holds.resolve_notice('a', 12))
+
+    def test_read_tracking_excludes_pre_read_notices_and_unrelated_scopes(self):
+        registry = AssignmentReadRegistry()
+        registry.admit(self.notice(self.row('closed')))
+        global_job = ('assignments', None, None)
+        item_job = ('item-assignment-source', 'item', None)
+        other_job = ('item-assignment-source', 'other', None)
+        detail_job = ('assignments', None, 'different')
+        for job in (global_job, item_job, other_job, detail_job):
+            registry.start(job)
+            self.assertEqual({}, registry.flights[job].notices)
+        delivered = registry.admit(self.notice(self.row('closed')))
+        for job in (global_job, item_job):
+            self.assertEqual({'a': delivered}, registry.flights[job].conflict_deliveries(
+                [self.row()], complete=True))
+        for job in (other_job, detail_job):
+            self.assertEqual({}, registry.flights[job].notices)
+        # The retained summary cannot refer back to the caller's mutable row.
+        payload = self.row()
+        registry.admit(self.notice(payload))
+        payload['subject'] = 'changed after admission'
+        self.assertNotIn('changed after admission', repr(registry.flights[item_job].notices))
+        registry.close()
+        self.assertEqual({}, registry.flights)
+
+    def test_queue_insertion_observes_admission_and_failed_consumer_releases_attempt(self):
+        registry = AssignmentReadRegistry()
+        job = ('assignments', None, None)
+        registry.start(job)
+        original = registry.flights[job]
+        deliveries = []
+        def enqueue(delivery):
+            self.assertEqual({'a': delivery}, original.conflict_deliveries(
+                [self.row()], complete=True))
+            deliveries.append(delivery)
+        registry.admit(self.notice(self.row('closed')), enqueue)
+        self.assertEqual(1, len(deliveries))
+        def failed_consumer(flight):
+            self.assertIs(original, flight)
+            self.assertIsNone(flight.conflict_deliveries([], complete=False))
+            raise ValueError('incomplete source is not a hold resolver')
+        with self.assertRaisesRegex(ValueError, 'incomplete source'):
+            registry.consume(job, failed_consumer)
+        self.assertTrue(original.closed)
+        self.assertEqual({}, original.notices)
+        self.assertEqual({}, registry.flights)
+        registry.start(job)
+        self.assertEqual({}, registry.flights[job].notices)
+        # Item exit/cancellation drops protection without retaining an ID ledger.
+        registry.discard(job)
+        self.assertEqual({}, registry.flights)
+
+    def test_assignment_result_queued_before_close_still_tracks_unconsumed_notice(self):
+        started, release = Event(), Event()
+        snapshot = self.row()
+        calls = []
+        class Gateway:
+            def read(self, resource, scope):
+                calls.append((resource, scope))
+                started.set()
+                if not release.wait(5):
+                    raise AssertionError('fixture did not release assignment read')
+                return Read([deepcopy(snapshot)], True, 100, 'assignment-snapshot')
+        events = queue.Queue()
+        reads = ReadQueue(Gateway(), events, 1)
+        self.addCleanup(reads.close)
+        self.addCleanup(release.set)
+        job = ('assignments', None, None)
+        # An earlier delivery is not part of this read's protected interval.
+        reads.assignment_reads.admit(self.notice(self.row('closed')))
+        reads.schedule(*job)
+        reads.pump()
+        self.assertTrue(started.wait(5))
+        flight = reads.assignment_reads.flights[job]
+        self.assertEqual({}, flight.notices)
+        release.set()
+        kind, value = events.get(timeout=5)
+        self.assertEqual('read', kind)
+        self.assertTrue(value[2].complete)
+        # The worker is finished, but its result has not been consumed. The
+        # subsequently queued close must participate in the R29 comparison.
+        notice = self.notice(self.row('closed'))
+        delivery = reads.assignment_reads.admit(notice, lambda ticket:
+            events.put(('change', (notice, ticket))))
+        queued_kind, queued_value = events.get(timeout=5)
+        self.assertEqual('change', queued_kind)
+        self.assertEqual(delivery, queued_value[1])
+        def apply(summary):
+            self.assertTrue(reads.finish(value[0], value[1]))
+            self.assertEqual({'a': delivery}, summary.conflict_deliveries(
+                value[2].rows, complete=value[2].complete))
+        reads.assignment_reads.consume(job, apply)
+        self.assertEqual([('assignments', None)], calls)
+        self.assertEqual({}, reads.assignment_reads.flights)
+        self.assertTrue(flight.closed)
+        self.assertFalse(reads.pending)
+        self.assertEqual(0, reads.epoch_discards)

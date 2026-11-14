@@ -965,7 +965,10 @@ class LiveService:
         with self.feed_lock:
             self.feed_received += 1
             self.feed_queued += 1
-        self.events.put(("change", (message, received_at)))
+        # Registration and queue insertion share the read-consumption boundary.
+        # This ordinal is local delivery identity, never a source row version.
+        self.reads.assignment_reads.admit(message, lambda delivery:
+            self.events.put(("change", (message, received_at, delivery))))
 
     def rebuild(self, *, recovery=True, resume=False):
         """Schedule work, never perform upstream I/O on the model worker.
@@ -1345,6 +1348,13 @@ class LiveService:
         return True
 
     def _read_done(self, value):
+        return self.reads.assignment_reads.consume(value[0],
+            lambda flight: self._consume_read_done(value, flight))
+
+    def _consume_read_done(self, value, assignment_flight=None):
+        # The R29 equality summary survives through this whole consumption,
+        # including queue delay. Its publication merge is integrated here next;
+        # ordinary epoch and failure semantics remain unchanged for now.
         job, epoch, result = value
         resource, scope, key = job
         # Earlier results in the same model-worker batch may have removed a
@@ -1869,7 +1879,11 @@ class LiveService:
         self.metrics["payloads"] += 1
         return True
 
-    def change(self, notice):
+    def change(self, notice, *, assignment_delivery=None):
+        if assignment_delivery is None:
+            # Direct model-owner calls use the same admission as feed delivery.
+            # Queued calls pass their ticket and must not register a second time.
+            assignment_delivery = self.reads.assignment_reads.admit(notice)
         resource = notice.get("resource")
         if resource not in RESOURCE_REFS:
             # Observational events do not imply that every inventory changed.
@@ -2105,11 +2119,11 @@ class LiveService:
                     self.model.details_revision += 1
             self._request_item_assignments(wid, changed=True)
         elif kind == "change":
-            if (isinstance(value, tuple) and len(value) == 2
+            if (isinstance(value, tuple) and len(value) in {2, 3}
                     and isinstance(value[0], dict)):
-                notice, received_at = value
+                notice, received_at = value[:2]
                 self._record_feed_processed(received_at)
-                return self.change(notice)
+                return self.change(notice, assignment_delivery=value[2] if len(value) == 3 else None)
             return self.change(value)
         elif kind == "merged":
             wid, refs, merged, at = value[:4]

@@ -9,6 +9,7 @@ import time
 
 from atc_upstream import Read, now_ms
 from atc_contributions import AssignmentContribution, AttestContribution
+from atc_assignment_conflicts import AssignmentReadRegistry
 
 
 def replay_attest_read(result, notices):
@@ -183,6 +184,7 @@ class ReadQueue:
         # worker boundary. Results queued for application still own a flight.
         self.item_flights = {}
         self.attest_flights = {}
+        self.assignment_reads = AssignmentReadRegistry()
         self.flight_peak_notices = 0
         self.flight_maximum_lifetime = 0.0
         self.flight_maximum_read_duration = 0.0
@@ -228,6 +230,7 @@ class ReadQueue:
             self.active[inventory] = job, epoch
             self.active_priorities[inventory] = priority
             plan = self.current_ids(*job[:2])
+            self.assignment_reads.start(job)
             if job[0] == 'item-assignment-source':
                 flight = AttestReadFlight()
                 self.item_flights[job[1]] = flight
@@ -414,6 +417,7 @@ class ReadQueue:
             # this result; an obsolete epoch must not reschedule an exit.
             return True
         if epoch != self.epochs[job[:2]]:
+            self.assignment_reads.discard(job)
             if job[0] == 'item-assignment-source':
                 self.discard_item_flight(job[1])
             elif job[0] == 'attests':
@@ -425,6 +429,7 @@ class ReadQueue:
         return True
 
     def discard_item_flight(self, wid):
+        self.assignment_reads.discard(('item-assignment-source', wid, None))
         self._discard_flight(self.item_flights.pop(wid, None))
 
     def discard_attest_flight(self, aid):
@@ -441,6 +446,7 @@ class ReadQueue:
 
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
+        self.assignment_reads.close()
         for wid in tuple(self.item_flights):
             self.discard_item_flight(wid)
         for aid in tuple(self.attest_flights):

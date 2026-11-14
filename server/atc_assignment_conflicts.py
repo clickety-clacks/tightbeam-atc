@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from threading import RLock
 from typing import NamedTuple
 
 from atc_payloads import ASSIGNMENT_FIELDS
@@ -23,7 +24,8 @@ def _projection(row):
 class _NoticeState(NamedTuple):
     item: str | None
     first_projection: bytes
-    different_projection_seen: bool = False
+    first_delivery: int
+    different_delivery: int | None = None
 
 
 class AssignmentReadConflicts:
@@ -41,7 +43,7 @@ class AssignmentReadConflicts:
         self.notices = {}
         self.closed = False
 
-    def observe(self, notice):
+    def observe(self, notice, *, delivery=0):
         if self.closed:
             return False
         row, refs = notice.get('payload') or {}, notice.get('refs') or {}
@@ -54,9 +56,9 @@ class AssignmentReadConflicts:
         signature = _projection(row)
         previous = self.notices.get(aid)
         if previous is None:
-            self.notices[aid] = _NoticeState(row['workItemId'], signature)
-        elif signature != previous.first_projection and not previous.different_projection_seen:
-            self.notices[aid] = previous._replace(different_projection_seen=True)
+            self.notices[aid] = _NoticeState(row['workItemId'], signature, delivery)
+        elif signature != previous.first_projection and previous.different_delivery is None:
+            self.notices[aid] = previous._replace(different_delivery=delivery)
         return True
 
     def conflicting_rows(self, rows, *, complete):
@@ -66,17 +68,25 @@ class AssignmentReadConflicts:
         The source consumer owns scope/absence and ordinary creation handling.
         No returned row is mutated, selected or replayed by this comparison.
         """
+        conflicts = self.conflict_deliveries(rows, complete=complete)
+        return None if conflicts is None else set(conflicts)
+
+    def conflict_deliveries(self, rows, *, complete):
+        """Identify the first conflicting local delivery, not a source version."""
         if self.closed:
             raise ValueError('assignment read attempt already disposed')
         if not complete:
             return None
-        conflicts = set()
+        conflicts = {}
         for row in rows:
             aid = str(row['id'])
             notice = self.notices.get(aid)
-            if notice is not None and (notice.different_projection_seen
-                                       or notice.first_projection != _projection(row)):
-                conflicts.add(aid)
+            if notice is None:
+                continue
+            if notice.first_projection != _projection(row):
+                conflicts[aid] = notice.first_delivery
+            elif notice.different_delivery is not None:
+                conflicts[aid] = notice.different_delivery
         return conflicts
 
     def discard(self):
@@ -87,6 +97,7 @@ class AssignmentReadConflicts:
 class _HeldAssignment(NamedTuple):
     item: str
     since: int | float
+    after_delivery: int
 
 
 class AssignmentHolds:
@@ -103,15 +114,19 @@ class AssignmentHolds:
         self.assignments = {}
         self.items = {}
 
-    def hold(self, assignment, item, published_item, *, at):
+    def hold(self, assignment, item, published_item, *, at, after_delivery=0):
         if published_item is None or published_item.get('id') != item:
             raise ValueError('hold requires the actual published item')
         previous = self.assignments.get(assignment)
         if previous is not None:
             if previous.item != item:
                 raise ValueError('unresolved assignment changed item scope')
-            return False  # A repeat conflict cannot renew or confirm the hold.
-        self.assignments[assignment] = _HeldAssignment(item, at)
+            # A repeat conflict preserves the original publication/time, but
+            # its establishing delivery is not a subsequent resolver either.
+            self.assignments[assignment] = previous._replace(
+                after_delivery=max(previous.after_delivery, after_delivery))
+            return False
+        self.assignments[assignment] = _HeldAssignment(item, at, after_delivery)
         self.items.setdefault(item, published_item)
         return True
 
@@ -124,6 +139,12 @@ class AssignmentHolds:
             self.items.pop(previous.item)
         return True
 
+    def resolve_notice(self, assignment, delivery):
+        previous = self.assignments.get(assignment)
+        if previous is None or delivery <= previous.after_delivery:
+            return False
+        return self.resolve(assignment)
+
     def retain_items(self, items):
         for assignment, held in tuple(self.assignments.items()):
             if held.item not in items:
@@ -132,3 +153,72 @@ class AssignmentHolds:
     def since(self, item):
         return min((held.since for held in self.assignments.values() if held.item == item),
                    default=None)
+
+
+class AssignmentReadRegistry:
+    """Dispatch-to-consumption ownership, shared with feed enqueue.
+
+    The local delivery ordinal only distinguishes an establishing notice from
+    the next consumed notice. It cannot order a source snapshot. Admission and
+    queue insertion are one operation; consume holds this lock through the
+    model callback so later deliveries belong to the next application boundary.
+    No upstream operation runs under this lock.
+    """
+    __slots__ = ('lock', 'flights', 'delivery', 'closed')
+
+    def __init__(self):
+        self.lock = RLock()
+        self.flights = {}
+        self.delivery = 0
+        self.closed = False
+
+    def start(self, job):
+        if job[0] not in {'assignments', 'item-assignment-source'}:
+            return
+        with self.lock:
+            if self.closed or job in self.flights:
+                raise ValueError('assignment read outside a new attempt')
+            self.flights[job] = AssignmentReadConflicts()
+
+    def admit(self, notice, enqueue=None):
+        with self.lock:
+            row, refs = notice.get('payload') or {}, notice.get('refs') or {}
+            valid = (not self.closed and notice.get('resource') == 'assignments'
+                and notice.get('op') == 'upsert'
+                and notice.get('class') in {
+                    'assignment.opened', 'assignment.closed', 'assignment.reopened'}
+                and ASSIGNMENT_FIELDS <= row.keys() and row.get('id') is not None
+                and refs.get('assignmentId') == row['id'])
+            delivery = None
+            if valid:
+                self.delivery += 1
+                delivery = self.delivery
+                for (resource, scope, key), flight in self.flights.items():
+                    if ((resource == 'item-assignment-source' and row['workItemId'] != scope)
+                            or (resource == 'assignments' and key is not None
+                                and str(row['id']) != str(key))):
+                        continue
+                    flight.observe(notice, delivery=delivery)
+            if enqueue is not None:
+                enqueue(delivery)
+            return delivery
+
+    def consume(self, job, apply):
+        with self.lock:
+            flight = self.flights.get(job)
+            try:
+                return apply(flight)
+            finally:
+                self.discard(job)
+
+    def discard(self, job):
+        with self.lock:
+            flight = self.flights.pop(job, None)
+            if flight is not None:
+                flight.discard()
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            for job in tuple(self.flights):
+                self.discard(job)
