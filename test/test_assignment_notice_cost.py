@@ -8,6 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_service import LiveService
 from atc_payloads import ASSIGNMENT_FIELDS
+from atc_upstream import ATTEST_FIELDS
 from test_item_assignment_retry import ItemReads
 from publication_assertions import assert_publication_equal, assert_replay_current
 
@@ -106,3 +107,55 @@ class AssignmentNoticeCostTest(unittest.TestCase):
         assert_replay_current(self, service, before, 'b4-reopen-replay')
         self.assertEqual(set(), service.model.item_assignment_pending)
         self.assertEqual({}, service.model.inventory('attests', 'last').rows)
+
+    def test_released_attest_uses_current_ownership_and_zero_reads(self):
+        for explicit_owner in (False, True):
+            with self.subTest(explicit_owner=explicit_owner):
+                gateway = ItemReads()
+                assignment = next(row for row in gateway.rows['assignments', None]
+                                  if row['id'] == 'first')
+                assignment.update(state='open', closedAt=None)
+                service = self.load(gateway)
+                row = dict.fromkeys(ATTEST_FIELDS) | dict(id='later', assignmentId='first',
+                    kind='progress', bySession='author', ts=500, commitRefs=[], note='released notice')
+                gateway.rows['attests', 'first'].append(deepcopy(row))
+                assignment.update(state='closed', closedAt=600)
+                # An independently required assignment observation can learn
+                # the later closure before the earlier attest notice reaches
+                # the model. The progress was filed by its holder while open,
+                # not invented as a new progress write on a closed assignment.
+                released = service.model.apply_assignment_projection(
+                    assignment, at=1000, source='published-detail')
+                self.assertIsNotNone(released)
+                service._forget_scopes(released)
+                service._publish()
+                before = deepcopy(service.current)
+                pin = service.model.closed_items['work']['detailFingerprint']
+                revision = service.model.details_revision
+                refs = {'attestId': row['id'], 'assignmentId': 'first'}
+                if explicit_owner:
+                    refs['workItemId'] = 'work'
+                notice = dict(resource='attests', op='upsert', refs=refs, payload=deepcopy(row),
+                              **{'class': 'attest.filed'})
+                gateway.calls.clear()
+                self.assertTrue(service.change(notice))
+                self.settle(service)
+                self.assertEqual([], gateway.calls)
+                self.assertEqual(set(), service.model.item_assignment_pending)
+                self.assertEqual({}, service.attest_activity_pending)
+                self.assertNotIn(('attests', 'first'), service.model.inventories)
+                self.assertEqual(pin, service.model.closed_items['work']['detailFingerprint'])
+                self.assertEqual(revision + 1, service.model.details_revision)
+                fresh_gateway = ItemReads()
+                fresh_gateway.rows = deepcopy(gateway.rows)
+                fresh = self.load(fresh_gateway)
+                assert_publication_equal(self, fresh.current, service.current,
+                                         'b4-released-attest-' + str(explicit_owner))
+                assert_replay_current(self, service, before,
+                                      'b4-released-attest-replay-' + str(explicit_owner))
+                self.assertTrue(service.change(notice))
+                self.settle(service)
+                self.assertEqual([], gateway.calls)
+                self.assertEqual(revision + 1, service.model.details_revision)
+                assert_publication_equal(self, fresh.current, service.current,
+                                         'b4-released-attest-duplicate-' + str(explicit_owner))

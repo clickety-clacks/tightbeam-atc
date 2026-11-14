@@ -1711,6 +1711,41 @@ class LiveService:
         self._ensure_retired_activity()
         return True
 
+    def _apply_released_attest_notice(self, notice, key, scope, payload):
+        """Update established current provenance without re-reading members."""
+        if (self.cycle or notice.get("op") != "upsert"
+                or notice.get("class") not in CLASSES["attests"]
+                or self.policies.get("attests") != "immutable"
+                or not set(ATTEST_FIELDS) <= payload.keys()
+                or str(payload["id"]) != str(key)
+                or str(payload["assignmentId"]) != str(scope)):
+            return False
+        contribution = self.model.item_contributions.entries.get(str(scope))
+        if contribution is None or contribution.state == "open":
+            return False
+        owner = contribution.item
+        refs = notice.get("refs") or {}
+        if any("workItemId" in value and value["workItemId"] != owner
+               for value in (payload, refs)):
+            return False
+        if (owner in self.model.item_assignment_pending
+                or ("assignments", None) in self.reads.active
+                or ("item-assignment-source", owner) in self.reads.active
+                or ("attests", str(scope)) in self.reads.active
+                or any(job[:2] == ("attests", str(scope))
+                       for job in (*self.reads.pending, *self.read_retries))):
+            return False
+        if not self._attest_activity_eligible(owner):
+            # This source is excluded by the same complete item-summary
+            # contract as fresh load. Its notice cannot make it eligible.
+            return True
+        if contribution.evidence.observed_at is None:
+            return False
+        if not self.model.update_closed_attest_contribution(str(scope), attest_row(payload)):
+            return False
+        self.metrics["payloads"] += 1
+        return True
+
     def change(self, notice):
         resource = notice.get("resource")
         if resource not in RESOURCE_REFS:
@@ -1732,12 +1767,18 @@ class LiveService:
                 and payload.get("kind") and payload.get("bySession")
                 and activity_time(payload.get("ts")) is not None and scope):
             held = self.model.inventory("assignments").rows.get(str(scope))
+            contribution = self.model.item_contributions.entries.get(str(scope))
             if "workItemId" in payload:
                 activity_owner, owner_known = payload["workItemId"], True
             elif "workItemId" in refs:
                 activity_owner, owner_known = refs["workItemId"], True
             elif held is not None and "workItemId" in held:
                 activity_owner, owner_known = held["workItemId"], True
+            elif contribution is not None:
+                # Raw disposal did not discard this current contributor's
+                # established ownership. R20 resolution still handles an ID
+                # absent from both current source forms.
+                activity_owner, owner_known = contribution.item, True
             else:
                 activity_owner, owner_known = None, False
             if not owner_known:
@@ -1749,6 +1790,8 @@ class LiveService:
                          source="cli:attests " + str(scope)), owner=activity_owner)
             if activity_owner is None and held is None:
                 return True
+        if resource == "attests" and self._apply_released_attest_notice(notice, key, scope, payload):
+            return True
         owner = (payload.get("workItemId") or refs.get("workItemId") or
                  self.model.inventory("assignments").rows.get(
                      key if resource == "assignments" else scope, {}).get("workItemId"))
