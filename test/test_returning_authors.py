@@ -12,6 +12,7 @@ from atc_payloads import SESSION_FIELDS, PAYLOAD_POLICIES
 from atc_upstream import Read
 from test_service import PublishedReads, summarized_work, work
 from test_assignment_source_failure import publication
+from publication_assertions import assert_publication_equal
 
 
 class ReturningReads(PublishedReads):
@@ -62,6 +63,8 @@ class ReturningReads(PublishedReads):
 
 
 class ReturningAuthorTest(unittest.TestCase):
+    maxDiff = None
+
     def setUp(self):
         clock = patch('atc_service.now_ms', return_value=5000000000)
         clock.start()
@@ -266,7 +269,8 @@ class ReturningAuthorTest(unittest.TestCase):
                     expected = None if row['rowVersion'] == 2 else 900000
                     self.assertEqual(expected, service.model.session_activity.get('guest-one'))
                     self.assertNotIn(('read', 'assignments', None), gateway.calls)
-                    self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+                    assert_publication_equal(self, self.fresh(service).current, service.current,
+                        "implicit-summary-" + delivery + "-" + state + "-" + str(row['rowVersion']))
 
     def test_retirement_removes_turn_only_activity(self):
         gateway = ReturningReads()
