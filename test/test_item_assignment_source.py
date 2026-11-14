@@ -82,6 +82,18 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         self.assertEqual(60, staged.closed['closedAt'])
         self.assertEqual({'author': 10, 'other': 30}, staged.closed['summary']['authors'])
 
+    def test_complete_membership_reports_only_missing_published_winners(self):
+        plan = dict(liveIds=set(), attests=True, activityWinners={"first", "missing"})
+        result = self.reads._read(('item-assignment-source', 'work', None), plan)
+        self.assertTrue(result.complete, result.error)
+        self.assertEqual({"missing"}, result.folded.absent_activity_winners)
+        self.assertEqual({"first", "missing"}, plan['activityWinners'])
+        self.assertNotIn('assignments', [verb for verb, _ in self.calls])
+        self.failure = ('attests', 'last')
+        failed = self.reads._read(('item-assignment-source', 'work', None), plan)
+        self.assertFalse(failed.complete)
+        self.assertIsNone(failed.folded)
+
     def test_any_incomplete_member_discards_staging_and_retry_rebuilds_all_members(self):
         for verb, aid in [('work-item-get', None), ('work-item-trace', None),
                           ('assignment-get', 'last'), ('attests', 'last')]:

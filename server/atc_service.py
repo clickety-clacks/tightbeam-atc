@@ -630,7 +630,7 @@ class LiveService:
                 and self.model.inventory("assignments").complete):
             return
         visible = {row["sessionKey"] for row in self.current.get("agents", [])}
-        released = self.model.release_session_histories(visible)
+        released = self.model.release_session_histories(visible, at=now_ms())
         self._forget_scopes(released)
         sessions = self.model.inventory("sessions")
         for key in list(sessions.rows):
@@ -1167,7 +1167,10 @@ class LiveService:
         if resource != "item-assignment-source":
             return current
         item = self.model.work_items().get(scope, {})
-        return {"liveIds": current,
+        winners = {source[len("cli:attests "):] for facts in self.model.session_activity_evidence.values()
+                   if facts.get("_owner") == scope for source in facts["source"]
+                   if source.startswith("cli:attests ")}
+        return {"liveIds": current, "activityWinners": winners,
                 "visibleSessions": {row["sessionKey"] for row in self.model.active_sessions()},
                 "attests": not (self._summary_contract_active() and has_work_item_summary(item)
                                  and not self._summary_needs_review_timing(item))}

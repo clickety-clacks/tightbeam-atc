@@ -12,7 +12,8 @@ from atc_payloads import SESSION_FIELDS, PAYLOAD_POLICIES
 from atc_upstream import Read
 from test_service import PublishedReads, summarized_work, work
 from test_assignment_source_failure import publication
-from publication_assertions import assert_publication_equal, assert_winner_exit_publication, assert_replay_current
+from publication_assertions import (assert_publication_equal, assert_winner_exit_publication,
+                                    assert_replay_current, capture_publication, differences)
 
 
 class ReturningReads(PublishedReads):
@@ -166,8 +167,9 @@ class ReturningAuthorTest(unittest.TestCase):
         self.assertEqual(750000, service.model.session_activity['guest-one'])
         gateway.rows['turns','guest-one'] = []
         service._refresh('turns','guest-one');self.drain(service)
-        self.assertNotIn('guest-one',service.model.session_activity)
-        self.assertEqual(publication(self.fresh(service).current),publication(service.current))
+        self.assertEqual(750000,service.model.session_activity['guest-one'])
+        assert_winner_exit_publication(self, self.fresh(service).current, service.current,
+                                      "complete-empty-turn-winner-exit", {"guest-one"})
 
     def test_summary_skip_does_not_add_authored_activity(self):
         gateway=ReturningReads()
@@ -324,7 +326,90 @@ class ReturningAuthorTest(unittest.TestCase):
                 assert_publication_equal(self, self.fresh(service).current, service.current,
                                          'winner-exit-next-activity-' + str(lower))
 
-    def test_retirement_removes_turn_only_activity(self):
+    def test_selected_turn_winner_exit_keeps_record_but_not_visibility(self):
+        for remaining in (900000, 950000, None):
+            for trigger in ('retirement', 'session-removal'):
+                with self.subTest(remaining=remaining, trigger=trigger):
+                    gateway = ReturningReads()
+                    self.outside(gateway)
+                    gateway.rows['attests', 'assignment'] = [row for row in
+                        gateway.rows['attests', 'assignment'] if row['bySession'] != 'guest-one']
+                    gateway.rows['attests', 'outside'] = ([] if remaining is None else [dict(
+                        id='remaining', assignmentId='outside', kind='progress',
+                        bySession='guest-one', ts=remaining)])
+                    for session in gateway.rows['sessions', None]:
+                        if session['sessionKey'] in {'guest-one', 'guest-two'}:
+                            session['state'] = 'active'
+                    gateway.rows['turns', 'guest-one'] = [dict(
+                        seq=3, sessionKey='guest-one', endedAt=1000000)]
+                    service = self.load(gateway)
+                    self.assertEqual(1000000, service.model.session_activity['guest-one'])
+                    before_exit = deepcopy(service.current)
+                    if trigger == 'retirement':
+                        next(row for row in gateway.rows['sessions', None]
+                             if row['sessionKey'] == 'guest-one').update(state='retired', rowVersion=12)
+                    else:
+                        gateway.rows['sessions', None] = [row for row in gateway.rows['sessions', None]
+                                                         if row['sessionKey'] != 'guest-one']
+                    gateway.calls.clear()
+                    service._refresh('sessions'); self.drain(service)
+                    self.assert_no_return_reads(gateway)
+                    self.assertEqual(0, service.reads.attest_owner_attempts)
+                    self.assertFalse(any(row['sessionKey'] == 'guest-one'
+                                         for row in service.current['agents']))
+                    self.assertNotIn(('turns', 'guest-one'), service.model.inventories)
+                    record = service.model.session_activity_evidence['guest-one']
+                    self.assertEqual(1000000, service.model.session_activity['guest-one'])
+                    self.assertIsNotNone(record['_retainedAt'])
+                    expected_source = ['/api/sessions/guest-one/turns', 'turn']
+                    if remaining is not None:
+                        expected_source.insert(1, 'attest')
+                    self.assertEqual(expected_source, record['source'])
+                    fresh = self.fresh(service)
+                    self.assertEqual(remaining, fresh.model.session_activity.get('guest-one'))
+                    if remaining is not None:
+                        self.assertEqual(['attest', 'cli:attests outside'],
+                                         fresh.model.session_activity_evidence['guest-one']['source'])
+                    else:
+                        self.assertNotIn('guest-one', fresh.model.session_activity_evidence)
+                    warm_state = dict(values=deepcopy(service.model.session_activity),
+                                      evidence=deepcopy(service.model.session_activity_evidence))
+                    fresh_state = dict(values=deepcopy(fresh.model.session_activity),
+                                       evidence=deepcopy(fresh.model.session_activity_evidence))
+                    label = 'turn-winner-exit-' + trigger + '-' + str(remaining)
+                    capture_publication(fresh.current, service.current, label,
+                        internalFresh=fresh_state, internalWarm=warm_state,
+                        internalDifferences=differences(fresh_state, warm_state),
+                        exitCalls=gateway.calls, ownerAttempts=service.reads.attest_owner_attempts)
+                    for field in ('values', 'evidence'):
+                        self.assertEqual({k:v for k,v in fresh_state[field].items() if k != 'guest-one'},
+                                         {k:v for k,v in warm_state[field].items() if k != 'guest-one'})
+                    assert_publication_equal(self, fresh.current, service.current, label + '-public')
+                    assert_replay_current(self, service, before_exit, label + '-replay')
+                    restarted = self.fresh(service)
+                    self.assertEqual(fresh.model.session_activity, restarted.model.session_activity)
+                    row = dict(id='next', assignmentId='outside', kind='progress',
+                               bySession='guest-one', ts=1100000)
+                    gateway.rows['attests', 'outside'].append(row)
+                    gateway.calls.clear()
+                    before_next = deepcopy(service.current)
+                    service.change(dict(resource='attests', op='upsert',
+                        refs={'assignmentId':'outside', 'workItemId':None}, payload=deepcopy(row)))
+                    self.drain(service)
+                    self.assertEqual([], gateway.calls)
+                    self.assertEqual(1100000, service.model.session_activity['guest-one'])
+                    self.assertNotIn('_retainedAt', service.model.session_activity_evidence['guest-one'])
+                    self.assertEqual(['attest', 'cli:attests outside'],
+                                     service.model.session_activity_evidence['guest-one']['source'])
+                    self.assertEqual(before_next, service.current)
+                    self.assertIsNone(service.next_event(before_next['revision'], timeout=0))
+                    after_fresh = self.fresh(service)
+                    self.assertEqual(after_fresh.model.session_activity, service.model.session_activity)
+                    self.assertEqual(after_fresh.model.session_activity_evidence,
+                                     service.model.session_activity_evidence)
+                    assert_publication_equal(self, after_fresh.current, service.current, label + '-next')
+
+    def test_retirement_retains_turn_winner_without_publishing_session(self):
         gateway = ReturningReads()
         gateway.rows['attests', 'assignment'] = []
         guest = gateway.rows['sessions', None][-2]
@@ -334,8 +419,12 @@ class ReturningAuthorTest(unittest.TestCase):
         self.assertEqual(950000, service.model.session_activity['guest-one'])
         guest.update(state='retired', rowVersion=12)
         service._refresh('sessions'); self.drain(service)
-        self.assertNotIn('guest-one', service.model.session_activity)
-        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+        self.assertEqual(950000, service.model.session_activity['guest-one'])
+        self.assertIn('_retainedAt', service.model.session_activity_evidence['guest-one'])
+        self.assertFalse(any(row['sessionKey'] == 'guest-one' for row in service.current['agents']))
+        fresh = self.fresh(service)
+        self.assertNotIn('guest-one', fresh.model.session_activity)
+        assert_publication_equal(self, fresh.current, service.current, 'retired-turn-only-publication')
 
     def test_returning_live_turn_keeps_existing_attachment_parity(self):
         for assignment in ('assignment',None):

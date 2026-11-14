@@ -59,6 +59,11 @@ def fold_session_activity_record(values, records, session, timestamp, kind, scop
         previous_source = next((s for s in previous["source"]
                                 if s not in {"attest", "turn"}), None)
         if previous_source is not None and previous_at is not None:
+            if ("_retainedAt" in previous and previous_source.startswith("/api/sessions/")
+                    and kind != "turn" and timestamp >= previous_at):
+                # A session has only its own turn source. Once that winner
+                # exits, a later attest cannot revive the exited turn kind.
+                kinds.discard("turn")
             if previous_at > timestamp:
                 winner = previous_source
                 winner_owner = previous.get("_owner")
@@ -196,27 +201,28 @@ class EvidenceModel:
                 self.fold_session_activity(author, timestamp, "attest", scope, inventory.evidence(),
                                            owner=assignment["workItemId"])
         else:
-            # A complete turn-only replacement has no losing attest value
-            # to reconstruct. Partial reads cannot establish absence.
-            record = self.session_activity_evidence.get(scope)
-            if inventory.complete and record and "attest" not in record["source"]:
-                self.session_activity.pop(scope, None)
-                self.session_activity_evidence.pop(scope, None)
-            if summary["activity"] is not None:
+            if inventory.complete and summary["activity"] is None:
+                self.release_turn_activity(scope, inventory.observed_at)
+            elif summary["activity"] is not None:
                 self.fold_session_activity(scope, summary["activity"], "turn", scope, inventory.evidence())
 
-    def release_turn_activity(self, session):
+    def release_turn_activity(self, session, at):
         record = self.session_activity_evidence.get(session)
         if record is None or "turn" not in record["source"]:
             return
-        if "attest" not in record["source"]:
-            self.session_activity.pop(session, None)
-            self.session_activity_evidence.pop(session, None)
-        elif not any(source.startswith("/api/sessions/") for source in record["source"]):
-            # The surviving attest winner is already exact; remove only the
-            # retired turn kind. A losing attest behind a turn winner needs
-            # source-scope disposition before this branch can be finalized.
+        if any(source.startswith("/api/sessions/") for source in record["source"]):
+            # Scope exit cannot erase the already observed winning activity.
+            # This fixed record is retained even while its session is hidden.
+            record.setdefault("_retainedAt", at)
+        else:
             record["source"].remove("turn")
+
+    def retain_assignment_winner_exits(self, absent, at):
+        for facts in self.session_activity_evidence.values():
+            winner = next((source[len("cli:attests "):] for source in facts["source"]
+                           if source.startswith("cli:attests ")), None)
+            if winner in absent:
+                facts.setdefault("_retainedAt", at)
 
     def retain_exited_activity(self, eligible_items, at):
         for facts in self.session_activity_evidence.values():
@@ -386,14 +392,16 @@ class EvidenceModel:
         if changed:
             self.retired_activity_revision += 1
 
-    def release_session_histories(self, visible):
+    def release_session_histories(self, visible, *, at=None):
+        if at is None:
+            at = self.inventory("sessions").observed_at
         assignments = self.inventory("assignments").rows
         released = {key for key in self.inventories
                     if key[0] in {"turns", "wakes", "messages"} and key[1] not in visible}
         activity = {}
         for resource, session in released:
             if resource == "turns":
-                self.release_turn_activity(session)
+                self.release_turn_activity(session, at)
                 for aid, at in self.summary(resource, session)["assignmentActivity"].items():
                     wid = assignments.get(aid, {}).get("workItemId")
                     if wid:
@@ -535,6 +543,7 @@ class EvidenceModel:
         if not result.complete or result.folded is None:
             raise ValueError("item assignment replacement must be complete")
         staged = result.folded
+        self.retain_assignment_winner_exits(staged.absent_activity_winners, result.at)
         for author, timestamp in staged.session_activity.items():
             facts = staged.session_evidence[author]
             source = next(value for value in facts["source"] if value.startswith("cli:attests "))
@@ -594,6 +603,11 @@ class EvidenceModel:
     def accept(self, resource, scope, result, *, activity_eligible=True):
         inventory = self.inventory(resource, scope)
         held_closed = {}
+        if resource == "assignments" and result.complete:
+            present = {str(row["id"]) for row in result.rows}
+            winners = {source[len("cli:attests "):] for facts in self.session_activity_evidence.values()
+                       for source in facts["source"] if source.startswith("cli:attests ")}
+            self.retain_assignment_winner_exits(winners - present, result.at)
         if resource == "assignments" and result.complete and self.item_assignment_pending:
             # A global read cannot expose an intermediate replacement of an
             # item whose complete source is being assembled separately.

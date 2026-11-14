@@ -20,6 +20,7 @@ class ItemAssignmentSource:
     activity: int | float | None = None
     session_activity: dict = field(default_factory=dict)
     session_evidence: dict = field(default_factory=dict)
+    absent_activity_winners: set = field(default_factory=set)
 
 
 class ReadQueue:
@@ -102,7 +103,9 @@ class ReadQueue:
         from atc_summary import HistoryFold
 
         read_attests, visible = True, None
+        activity_winners = set()
         if isinstance(live_ids, dict):
+            activity_winners = set(live_ids.get("activityWinners", ()))
             visible = live_ids.get("visibleSessions")
             read_attests, live_ids = live_ids["attests"], live_ids["liveIds"]
         source = "item-assignment-source"
@@ -110,10 +113,14 @@ class ReadQueue:
         if not membership.complete:
             return Read([], False, membership.at, source, membership.error)
         staged, closed = ItemAssignmentSource(), ClosedAssignmentFold()
+        # Only already-published winners participate in this temporary check.
+        # Never keep a membership ledger after the complete result is served.
+        staged.absent_activity_winners = activity_winners
         retired = {}
         at = membership.at
         for position, member in enumerate(membership.rows):
             aid = member["id"]
+            staged.absent_activity_winners.discard(aid)
             detail = self.gateway.detail("assignments", aid)
             if not detail.complete:
                 return Read([], False, detail.at, source, detail.error)

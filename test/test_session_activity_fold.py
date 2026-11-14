@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from atc_model import EvidenceModel
+from atc_upstream import Read
 
 
 class SessionActivityFoldTest(unittest.TestCase):
@@ -59,18 +60,40 @@ class SessionActivityFoldTest(unittest.TestCase):
                 self.assertEqual(1100000, model.session_activity["author"])
                 self.assertTrue(model.session_activity_facts("author", self.facts())["complete"])
 
-    def test_turn_only_retirement_removes_record_and_attest_winner_keeps_value(self):
+    def test_turn_winner_retirement_retains_record_and_losing_turn_kind_exits(self):
         model = EvidenceModel()
         model.fold_session_activity("turn-only", 950000, "turn", "turn-only", self.facts())
         model.fold_session_activity("mixed", 900000, "turn", "mixed", self.facts())
         model.fold_session_activity("mixed", 950000, "attest", "winner", self.facts())
-        model.release_turn_activity("turn-only")
-        model.release_turn_activity("mixed")
-        self.assertNotIn("turn-only", model.session_activity)
-        self.assertNotIn("turn-only", model.session_activity_evidence)
+        model.release_turn_activity("turn-only", 1000000)
+        model.release_turn_activity("mixed", 1000000)
+        self.assertEqual(950000, model.session_activity["turn-only"])
+        self.assertEqual(1000000, model.session_activity_evidence["turn-only"]["_retainedAt"])
         self.assertEqual(950000, model.session_activity["mixed"])
         self.assertEqual(["attest", "cli:attests winner"],
                          model.session_activity_evidence["mixed"]["source"])
+
+    def test_new_attest_after_turn_winner_exit_does_not_retain_exited_kind(self):
+        model = EvidenceModel()
+        model.fold_session_activity("author", 950000, "attest", "null", self.facts())
+        model.fold_session_activity("author", 1000000, "turn", "author", self.facts())
+        model.release_turn_activity("author", 1050000)
+        self.assertEqual(["/api/sessions/author/turns", "attest", "turn"],
+                         model.session_activity_evidence["author"]["source"])
+        model.fold_session_activity("author", 1100000, "attest", "null", self.facts())
+        self.assertEqual(["attest", "cli:attests null"],
+                         model.session_activity_evidence["author"]["source"])
+        self.assertNotIn("_retainedAt", model.session_activity_evidence["author"])
+
+    def test_only_complete_assignment_membership_can_establish_winner_exit(self):
+        model = EvidenceModel()
+        model.fold_session_activity("author", 1000000, "attest", "winner", self.facts())
+        model.accept("assignments", None, Read([], False, 1100000, "assignments"))
+        self.assertNotIn("_retainedAt", model.session_activity_evidence["author"])
+        model.accept("assignments", None, Read([], True, 1200000, "assignments"))
+        self.assertEqual(1000000, model.session_activity["author"])
+        self.assertEqual(1200000, model.session_activity_evidence["author"]["_retainedAt"])
+        self.assertEqual(["attest", "cli:attests winner"], model.session_activity_evidence["author"]["source"])
 
     def test_resumed_refresh_does_not_reconfirm_a_pre_outage_record(self):
         model = EvidenceModel()

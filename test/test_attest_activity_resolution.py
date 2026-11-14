@@ -151,6 +151,48 @@ class AttestActivityResolutionTest(unittest.TestCase):
         self.assertEqual("stale", service.model.session_activity_evidence["author"]["freshness"])
         self.assertNotIn(("attest-owner", "released"), service.model.inventories)
 
+    def test_partial_or_unresolved_owner_results_remain_unapplied(self):
+        cases = [
+            (False, lambda aid: [dict(id=aid, workItemId=None)]),
+            (True, lambda aid: [dict(id=aid)]),
+            (True, lambda aid: [dict(id="different", workItemId=None)]),
+            (True, lambda aid: []),
+            (True, lambda aid: [dict(id=aid, workItemId=None), dict(id=aid, workItemId=None)]),
+        ]
+        for index, (complete, rows) in enumerate(cases):
+            aid = "unresolved-" + str(index)
+            result = Read(rows(aid), complete, 30, "cli:assignment-get " + aid)
+            with self.subTest(index=index), patch.object(self.gateway, "detail", return_value=result):
+                self.notice(aid, "author", 950000)
+                self.service.reads.pump()
+                self.finish()
+                self.assertEqual({}, self.service.model.session_activity)
+                self.assertIsNotNone(self.service.attest_activity_pending[aid]["failedAt"])
+                self.assertIn(("attest-owner", aid, None), self.service.read_retries)
+                self.assertEqual([], result.rows)
+                self.assertNotIn(("attest-owner", aid), self.service.model.inventories)
+        self.assertEqual(len(cases), self.service.reads.attest_owner_attempts)
+
+    def test_distinct_assignments_have_distinct_targeted_resolutions(self):
+        entered = threading.Barrier(3)
+        def detail(resource, key, scope=None):
+            self.gateway.calls.append(("detail", resource, scope, key))
+            entered.wait(timeout=5)
+            return Read([dict(id=key, workItemId=None)], True, 30, "cli:assignment-get " + key)
+        with patch.object(self.gateway, "detail", side_effect=detail):
+            self.notice("first-assignment", "first-author", 900000)
+            self.notice("second-assignment", "second-author", 950000)
+            self.service.reads.pump()
+            self.assertEqual({}, self.service.model.session_activity)
+            entered.wait(timeout=5)
+            self.finish(); self.finish()
+        self.assertEqual({"first-author": 900000, "second-author": 950000},
+                         self.service.model.session_activity)
+        self.assertEqual(2, self.service.reads.attest_owner_attempts)
+        self.assertEqual({("detail", "assignments", None, "first-assignment"),
+                          ("detail", "assignments", None, "second-assignment")}, set(self.gateway.calls))
+        self.assertEqual({}, self.service.attest_activity_pending)
+
     def test_explicit_null_and_held_owner_apply_without_resolution(self):
         self.notice("null-assignment", "null-author", 950000, workItemId=None)
         self.service.model.inventory("assignments").rows["held"] = {
