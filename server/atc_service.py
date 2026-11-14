@@ -531,6 +531,7 @@ class LiveService:
         # Only the model worker writes. Build the next immutable frame without
         # holding the condition used by subscribers of the committed frame.
         at = now_ms()
+        self._discard_exited_attest_flights()
         visible = {row["sessionKey"] for row in self.model.active_sessions()}
         removed = self.model.item_assignment_pending - self.model.work_items().keys()
         self._forget_scopes({("item-assignment-source", wid) for wid in removed})
@@ -1176,6 +1177,13 @@ class LiveService:
             # would also let retirement cleanup discard a failed detail retry.
             return ()
         current = self.model.current_ids(resource, scope)
+        if resource == 'attests' and scope is not None:
+            assignment = self.model.inventory('assignments').rows.get(str(scope))
+            contribution = self.model.item_contributions.entries.get(str(scope))
+            owner = ((assignment['workItemId'],) if assignment is not None
+                     and 'workItemId' in assignment else
+                     (contribution.item,) if contribution is not None else ())
+            return {'keepIds': current, 'owner': owner}
         if resource != "item-assignment-source":
             return current
         item = self.model.work_items().get(scope, {})
@@ -1186,6 +1194,28 @@ class LiveService:
                 "visibleSessions": {row["sessionKey"] for row in self.model.active_sessions()},
                 "attests": not (self._summary_contract_active() and has_work_item_summary(item)
                                  and not self._summary_needs_review_timing(item))}
+
+    def _discard_exited_attest_flights(self):
+        if not self.model.closed_sources_released:
+            return
+        assignments = self.model.inventory('assignments').rows
+        items = self.model.work_items()
+        for aid, flight in self.reads.attest_flights.items():
+            if not flight.owner or flight.closed:
+                continue
+            owner, = flight.owner
+            assignment = assignments.get(aid)
+            contribution = self.model.item_contributions.entries.get(aid)
+            current = ((assignment['workItemId'],) if assignment is not None
+                       and 'workItemId' in assignment else
+                       (contribution.item,) if contribution is not None else ())
+            if ((owner is not None and owner not in items)
+                    or current != flight.owner or not self._attest_activity_eligible(owner)):
+                # Keep only the closed flight shell until its active worker or
+                # queued result arrives. It prevents that old result from
+                # recreating a removed scope or triggering an ownership read.
+                flight.discard()
+                self._forget_scopes({('attests', aid)})
 
     def _queue_attest_activity(self, assignment_id, author, timestamp):
         """Stage an already eligible-kind notice until ownership is known."""
@@ -1317,6 +1347,9 @@ class LiveService:
     def _read_done(self, value):
         job, epoch, result = value
         resource, scope, key = job
+        # Earlier results in the same model-worker batch may have removed a
+        # scope before the next publication maintenance pass.
+        self._discard_exited_attest_flights()
         priority = self.reads.active_priorities.get(job[:2], 0)
         retry = job in self.retry_in_flight
         if not self.reads.finish(job, epoch):
@@ -1331,6 +1364,9 @@ class LiveService:
                   if resource == 'attests' and key is None else None)
         if flight is not None:
             try:
+                if flight.closed:
+                    self._forget_scopes({job[:2]})
+                    return True
                 return flight.apply(lambda buffers: self._finished_read(
                     job, result, priority, retry, buffers.get(scope, ())))
             finally:

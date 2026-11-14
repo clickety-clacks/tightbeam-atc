@@ -289,6 +289,78 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 assert_publication_equal(self, fresh.current, service.current, label)
                 assert_replay_current(self, service, baseline, label + '-replay')
 
+    def test_scoped_result_cannot_revive_exited_item_or_contributor(self):
+        for exit_kind in ('item', 'contributor'):
+            for queued in (False, True):
+                with self.subTest(exit_kind=exit_kind, queued=queued):
+                    gateway = ItemReads()
+                    service = self.load(gateway)
+                    baseline = deepcopy(service.current)
+                    replacement = None
+                    if exit_kind == 'contributor':
+                        # Prepare an actual complete membership/detail/fold
+                        # result. Apply its model commit while the independent
+                        # scoped result is delayed; no direct store deletion.
+                        rows = gateway.rows['assignments', None]
+                        gateway.rows['assignments', None] = [row for row in rows if row['id'] != 'first']
+                        replacement = service.reads._item_assignments(
+                            'work', service._read_plan('item-assignment-source', 'work'))
+                        gateway.rows['assignments', None] = rows
+                        self.assertTrue(replacement.complete)
+                    started, release = Event(), Event()
+                    self.addCleanup(release.set)
+                    original = gateway.read
+                    def read(resource, scope=None):
+                        result = original(resource, scope)
+                        if (resource, scope) == ('attests', 'first'):
+                            started.set()
+                            if not release.wait(5):
+                                raise AssertionError('fixture did not release exited scope')
+                        return result
+                    gateway.calls.clear()
+                    with patch.object(gateway, 'read', side_effect=read):
+                        service.reads.schedule('attests', 'first')
+                        service.reads.pump()
+                        self.assertTrue(started.wait(5))
+                        flight = service.reads.attest_flights['first']
+                        self.assertEqual(('work',), flight.owner)
+                        notice = dict.fromkeys(ATTEST_FIELDS) | dict(id='before-exit',
+                            assignmentId='first', kind='progress', bySession='author',
+                            ts=4000, commitRefs=[])
+                        service.change(dict(resource='attests', op='upsert', payload=notice,
+                            refs={'attestId': notice['id'], 'assignmentId': 'first'},
+                            **{'class': 'attest.filed'}))
+                        self.assertEqual(1, flight.notice_count)
+                        event = None
+                        if queued:
+                            release.set()
+                            event = service.events.get(timeout=5)
+                            self.assertFalse(flight.closed)
+                        if exit_kind == 'item':
+                            service.model.accept('work-items', None,
+                                                 Read([], True, 5000, 'published-read'))
+                        else:
+                            service.model.replace_item_assignments('work', replacement)
+                        service._publish()
+                        self.assertTrue(flight.closed)
+                        self.assertEqual({}, flight.buffers)
+                        self.assertEqual({}, flight.opened_at)
+                        self.assertEqual({}, flight.read_completed_at)
+                        self.assertEqual((), flight.owner)
+                        after_exit = deepcopy(service.current)
+                        release.set()
+                        service._handle(*(event if event is not None else service.events.get(timeout=5)))
+                        self.settle(service)
+                    self.assertEqual([('read', 'attests', 'first')], gateway.calls)
+                    self.assertEqual({}, service.reads.attest_flights)
+                    self.assertNotIn('first', service.model.item_contributions.entries)
+                    self.assertNotIn(('attests', 'first'), service.model.inventories)
+                    self.assertNotIn(('attests', 'first', None), service.read_retries)
+                    self.assertEqual(set(), service.model.item_assignment_pending)
+                    label = 'r28-scope-exit-' + exit_kind + '-queued-' + str(queued)
+                    assert_publication_equal(self, after_exit, service.current, label)
+                    assert_replay_current(self, service, baseline, label + '-replay')
+
     def test_item_exit_releases_protection_before_delayed_read_result(self):
         gateway = ItemReads()
         service = self.load(gateway)

@@ -36,8 +36,12 @@ class AttestReadFlight:
     have been folded and discarded. This lock serializes those boundaries;
     no upstream operation runs while it is held.
     """
-    def __init__(self):
+    def __init__(self, owner=()):
         self.lock = Lock()
+        # Dispatch-time ownership only, for dropping a delayed scoped result
+        # after its current contribution leaves. () means not established;
+        # (None,) is a known null-item source. No completed-flight ledger.
+        self.owner = owner
         self.buffers = {}
         self.opened_at = {}
         self.read_completed_at = {}
@@ -95,6 +99,7 @@ class AttestReadFlight:
         self.buffers.clear()
         self.opened_at.clear()
         self.read_completed_at.clear()
+        self.owner = ()
         self.notice_count = 0
         self.closed = True
 
@@ -228,7 +233,10 @@ class ReadQueue:
                 self.item_flights[job[1]] = flight
                 future = self.executor.submit(self._read, job, plan, flight)
             elif job[0] == 'attests' and job[1] is not None and job[2] is None:
-                flight = AttestReadFlight()
+                owner = plan.get('owner', ()) if isinstance(plan, dict) else ()
+                if isinstance(plan, dict):
+                    plan = plan['keepIds']
+                flight = AttestReadFlight(owner)
                 self.attest_flights[job[1]] = flight
                 future = self.executor.submit(self._read, job, plan, flight)
             else:
@@ -400,6 +408,11 @@ class ReadQueue:
         inventory = job[:2]
         self.active.pop(inventory)
         priority = self.active_priorities.pop(inventory)
+        flight = self.attest_flights.get(job[1]) if job[0] == 'attests' else None
+        if flight is not None and flight.closed:
+            # Scope exit already released protection. The consumer discards
+            # this result; an obsolete epoch must not reschedule an exit.
+            return True
         if epoch != self.epochs[job[:2]]:
             if job[0] == 'item-assignment-source':
                 self.discard_item_flight(job[1])
