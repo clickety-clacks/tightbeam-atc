@@ -7,6 +7,7 @@ from threading import Lock
 import time
 
 from atc_upstream import Read, now_ms
+from atc_contributions import AssignmentContribution
 
 
 @dataclass
@@ -21,6 +22,7 @@ class ItemAssignmentSource:
     session_activity: dict = field(default_factory=dict)
     session_evidence: dict = field(default_factory=dict)
     absent_activity_winners: set = field(default_factory=set)
+    contributions: dict = field(default_factory=dict)
 
 
 class ReadQueue:
@@ -159,6 +161,7 @@ class ReadQueue:
                     fold_session_activity_record(staged.session_activity, staged.session_evidence,
                         author, timestamp, "attest", aid, inventory.evidence(), owner=wid)
                 at = result.at
+            staged.contributions[aid] = AssignmentContribution.capture(row, inventory, position)
             if row.get("state") == "open":
                 staged.open_rows[aid] = row
                 staged.open_attests[aid] = inventory

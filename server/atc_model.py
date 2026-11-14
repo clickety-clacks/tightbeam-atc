@@ -13,6 +13,7 @@ from atc_evidence import (
     turn_state, merge_value_for_refs,
 )
 from atc_payloads import has_work_item_summary
+from atc_contributions import AssignmentContribution, ItemContributions
 
 
 KEYS = {"sessions": "sessionKey", "roles": "name", "turns": "seq",
@@ -153,6 +154,7 @@ class EvidenceModel:
         self.activity_refresh = None
         self.retired_activity_revision = 0
         self.closed_items = {}
+        self.item_contributions = ItemContributions()
         self.closed_revision = 0
         self.open_assignment_order = {}
         self.live_assignment_items = {}
@@ -447,6 +449,7 @@ class EvidenceModel:
                     fact["freshness"] = "unconfirmed"
 
     def release_auxiliary_sources(self):
+        self.item_contributions.retain_items(self.work_items())
         for (resource, _scope), inventory in self.inventories.items():
             if resource == "artifacts":
                 inventory.release_rows()
@@ -455,9 +458,23 @@ class EvidenceModel:
                 inventory.rows.clear()
                 inventory.observations.clear()
 
+    def capture_assignment_contributions(self, *, items=None):
+        """Capture current facts before releasing their construction rows."""
+        published = self.work_items()
+        self.item_contributions.retain_items(published)
+        for index, (aid, row) in enumerate(self.inventory("assignments").rows.items()):
+            wid = row.get("workItemId")
+            if (wid not in published or wid in self.item_assignment_pending
+                    or (items is not None and wid not in items)):
+                continue
+            order = self.open_assignment_order.get(aid, index)
+            self.item_contributions.entries[aid] = AssignmentContribution.capture(
+                row, self.inventory("attests", aid), order)
+
     def fold_closed_assignments(self, *, items=None):
         """Fold a settled assignment read into per-item board facts."""
         assignments = self.inventory("assignments")
+        self.capture_assignment_contributions(items=items)
         if ((items is None and not assignments.complete)
                 or not any(row.get("state") != "open" for row in assignments.rows.values())):
             return set()
@@ -553,6 +570,7 @@ class EvidenceModel:
         if not result.complete or result.folded is None:
             raise ValueError("item assignment replacement must be complete")
         staged = result.folded
+        self.item_contributions.replace_item(wid, staged.contributions, complete=True)
         self.retain_assignment_winner_exits(staged.absent_activity_winners, result.at)
         for author, timestamp in staged.session_activity.items():
             facts = staged.session_evidence[author]
@@ -615,6 +633,9 @@ class EvidenceModel:
         held_closed = {}
         if resource == "assignments" and result.complete:
             present = {str(row["id"]) for row in result.rows}
+            for aid, contribution in tuple(self.item_contributions.entries.items()):
+                if aid not in present and contribution.item not in self.item_assignment_pending:
+                    del self.item_contributions.entries[aid]
             winners = {source[len("cli:attests "):] for facts in self.session_activity_evidence.values()
                        for source in facts["source"] if source.startswith("cli:attests ")}
             self.retain_assignment_winner_exits(winners - present, result.at)
@@ -658,6 +679,8 @@ class EvidenceModel:
                         self.older_items.pop(wid, None)
         inventory.read(
             result.rows, complete=result.complete, at=result.at, source=result.source)
+        if resource == "work-items":
+            self.item_contributions.retain_items(self.work_items())
         if resource == "assignments" and result.complete:
             self.closed_sources_released = False
             closed = {row.get("workItemId") for row in result.rows if row.get("state") != "open"}

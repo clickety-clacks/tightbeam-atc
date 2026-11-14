@@ -5,6 +5,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_contributions import AssignmentContribution, ItemContributions
+from atc_upstream import Read
 from test_closed_folding import ClosedAssignmentFoldTest
 
 
@@ -38,3 +39,16 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertNotIn('discard', repr(entries))
         self.assertEqual(60, last.closed_at)
         self.assertEqual('other', last.holder)
+
+    def test_model_disposal_preserves_contributions_and_item_exit_drops_them(self):
+        model = ClosedAssignmentFoldTest().model()
+        before = model.snapshot(1000)
+        model.fold_closed_assignments()
+        self.assertEqual({'first', 'open', 'last'}, set(model.item_contributions.entries))
+        self.assertEqual({'open'}, set(model.inventory('assignments').rows))
+        self.assertEqual(before, model.snapshot(1000))
+        previous = dict(model.item_contributions.entries)
+        model.accept('assignments', None, Read([], False, 1100, 'partial'))
+        self.assertEqual(previous, model.item_contributions.entries)
+        model.accept('work-items', None, Read([], True, 1200, 'complete'))
+        self.assertEqual({}, model.item_contributions.entries)
