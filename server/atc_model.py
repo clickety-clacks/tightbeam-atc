@@ -1,7 +1,7 @@
 """Derive the view from scoped evidence inventories, without viewer state."""
 
 from collections import Counter, defaultdict
-from copy import deepcopy
+from copy import copy, deepcopy
 from math import isfinite
 from urllib.parse import quote
 import hashlib
@@ -904,6 +904,83 @@ class EvidenceModel:
         self.details_revision += 1
         self._item_activity_parts.clear()
         return released
+
+    def accept_assignment_read_preserving(self, result, protected):
+        """Accept a complete collection without choosing conflicted row values.
+
+        The service establishes R29 conflicts and retains actual publication.
+        This seam preserves only their current assignment projections; other
+        rows still get ordinary complete-source absence and replacement rules.
+        A released closed contribution stays compact, never a fabricated raw
+        row or an invented detail fingerprint. All saved references below are
+        transient through this model-worker operation.
+        """
+        if not result.complete:
+            raise ValueError('assignment conflict replacement requires a complete read')
+        protected = set(protected)
+        if not protected:
+            return self.accept('assignments', None, result)
+        assignments = self.inventory('assignments')
+        incoming = {str(row['id']): row for row in result.rows}
+        if not protected <= incoming.keys():
+            raise ValueError('conflict comparison requires present assignment rows')
+        current = self.item_contributions.entries
+        if any(aid not in assignments.rows and aid not in current for aid in protected):
+            raise ValueError('conflict has no established assignment projection')
+        rows = {aid: assignments.rows[aid] for aid in protected if aid in assignments.rows}
+        observations = {aid: assignments.observations[aid] for aid in rows
+                        if aid in assignments.observations}
+        contributions = {aid: current[aid] for aid in protected if aid in current}
+        live_items = {aid: self.live_assignment_items[aid] for aid in protected
+                      if aid in self.live_assignment_items}
+        released_closed = {value.item for aid, value in contributions.items()
+                           if aid not in rows and value.state != 'open'}
+        if any(aid not in rows and value.state == 'open'
+               for aid, value in contributions.items()):
+            raise ValueError('open assignment projection has no current row')
+        closed = {wid: self.closed_items[wid] for wid in released_closed
+                  if wid in self.closed_items}
+        if released_closed != closed.keys():
+            raise ValueError('released contributor has no current closed item fold')
+        positions = {aid: index for index, aid in enumerate(incoming)}
+
+        # Keep the original result intact for diagnostic/source identity. The
+        # ordinary accept path may filter its own list for an R10 item hold.
+        accepted = copy(result)
+        accepted.rows = list(result.rows)
+        self.accept('assignments', None, accepted)
+        for aid in protected:
+            if aid in rows:
+                assignments.rows[aid] = rows[aid]
+                if aid in observations:
+                    assignments.observations[aid] = observations[aid]
+                else:
+                    assignments.observations.pop(aid, None)
+            else:
+                assignments.rows.pop(aid, None)
+                assignments.observations.pop(aid, None)
+        self.item_contributions.entries.update(contributions)
+        self.live_assignment_items.update(live_items)
+        if released_closed:
+            # Raw rows now omit protected closed contributors. Explicit order
+            # positions preserve their place without reconstructing those rows.
+            self.closed_sources_released = True
+            for aid, value in tuple(self.item_contributions.entries.items()):
+                if aid in positions and value.item not in self.item_assignment_pending:
+                    self.item_contributions.entries[aid] = value._replace(order=positions[aid])
+            for aid, row in assignments.rows.items():
+                if aid in positions and row.get('workItemId') not in self.item_assignment_pending:
+                    self.open_assignment_order[aid] = positions[aid]
+            self.capture_assignment_contributions()
+            # A read can reopen/remove every other closed member. Reduce only
+            # current contributions instead of retaining the old combined fold.
+            # Keep actual old source pins; compact state cannot invent a hash.
+            for wid, part in closed.items():
+                if wid not in self.item_assignment_pending:
+                    self._reduce_current_closed_item(wid, part)
+                else:
+                    self.closed_items[wid] = part
+        self._item_activity_parts.clear()
 
     def accept(self, resource, scope, result, *, activity_eligible=True):
         inventory = self.inventory(resource, scope)
