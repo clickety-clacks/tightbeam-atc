@@ -12,7 +12,7 @@ from atc_payloads import SESSION_FIELDS, PAYLOAD_POLICIES
 from atc_upstream import Read
 from test_service import PublishedReads, summarized_work, work
 from test_assignment_source_failure import publication
-from publication_assertions import assert_publication_equal
+from publication_assertions import assert_publication_equal, assert_winner_exit_publication
 
 
 class ReturningReads(PublishedReads):
@@ -197,7 +197,7 @@ class ReturningAuthorTest(unittest.TestCase):
         self.assertEqual(950000,service.current['agents'][0]['idleSince'])
         self.assertEqual(publication(self.fresh(service).current),publication(service.current))
 
-    def test_summary_skip_transition_removes_then_restores_eligible_activity(self):
+    def test_summary_skip_transition_retains_then_restores_eligible_activity(self):
         gateway = ReturningReads()
         service = self.load(gateway)
         self.returns(service, {'guest-one'}); self.drain(service)
@@ -207,10 +207,11 @@ class ReturningAuthorTest(unittest.TestCase):
         gateway.calls.clear()
         with patch.object(service, 'rebuild', side_effect=AssertionError('global rebuild')):
             service._refresh('work-items'); self.drain(service)
-        self.assertNotIn('guest-one', service.model.session_activity)
+        self.assertEqual(900000, service.model.session_activity['guest-one'])
         self.assertNotIn(('read', 'assignments', None), gateway.calls)
         self.assertNotIn(('read', 'attests', 'assignment'), gateway.calls)
-        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+        assert_winner_exit_publication(self, self.fresh(service).current, service.current,
+                                      "summary-skip-winner-exit", {"guest-one"})
         gateway.rows['work-items', None] = [original | dict(rowVersion=3)]
         gateway.calls.clear()
         with patch.object(service, 'rebuild', side_effect=AssertionError('global rebuild')):
@@ -266,12 +267,56 @@ class ReturningAuthorTest(unittest.TestCase):
                                 payload=deepcopy(row)))
                             self.assertEqual(before + 1, service.metrics['payloads'])
                         self.drain(service)
-                    expected = None if row['rowVersion'] == 2 else 900000
-                    self.assertEqual(expected, service.model.session_activity.get('guest-one'))
+                    self.assertEqual(900000, service.model.session_activity.get('guest-one'))
                     self.assertNotIn(('read', 'assignments', None), gateway.calls)
                     self.assertEqual(1, gateway.calls.count(('read', 'work-items', None)))
-                    assert_publication_equal(self, self.fresh(service).current, service.current,
-                        "implicit-summary-" + delivery + "-" + state + "-" + str(row['rowVersion']))
+                    label = "implicit-summary-" + delivery + "-" + state + "-" + str(row['rowVersion'])
+                    fresh = self.fresh(service).current
+                    if row['rowVersion'] == 2:
+                        assert_winner_exit_publication(self, fresh, service.current, label, {"guest-one"})
+                    else:
+                        assert_publication_equal(self, fresh, service.current, label)
+
+    def test_winner_exit_with_remaining_or_null_fresh_value_and_unaffected_session(self):
+        for lower in (950000, None):
+            with self.subTest(lower=lower):
+                gateway = ReturningReads()
+                self.outside(gateway)
+                gateway.rows['attests', 'assignment'] = [dict(id='winner', assignmentId='assignment',
+                    kind='progress', bySession='guest-one', ts=1000000)]
+                gateway.rows['attests', 'outside'] = [dict(id='unaffected', assignmentId='outside',
+                    kind='progress', bySession='guest-two', ts=800000)]
+                if lower is not None:
+                    gateway.rows['attests', 'outside'].append(dict(id='remaining', assignmentId='outside',
+                        kind='progress', bySession='guest-one', ts=lower))
+                service = self.load(gateway)
+                self.returns(service, {'guest-one', 'guest-two'}); self.drain(service)
+                self.assertEqual(1000000, service.model.session_activity['guest-one'])
+                gateway.rows['work-items', None] = [summarized_work(
+                    holders=[], attest_counts={'progress': 1}) | dict(state='closed', closedAt=20)]
+                service._refresh('work-items'); self.drain(service)
+                fresh = self.fresh(service)
+                self.assertEqual(lower, fresh.model.session_activity.get('guest-one'))
+                self.assertEqual(1000000, service.model.session_activity['guest-one'])
+                self.assertEqual(800000, service.model.session_activity['guest-two'])
+                assert_winner_exit_publication(self, fresh.current, service.current,
+                    'winner-exit-' + str(lower), {'guest-one'})
+                # A restart uses only current scope, while the running service
+                # retains its observation until the next eligible activity.
+                restarted = self.fresh(service)
+                assert_publication_equal(self, fresh.current, restarted.current,
+                                         'winner-exit-restart-' + str(lower))
+                row = dict(id='next', assignmentId='outside', kind='progress',
+                           bySession='guest-one', ts=1100000)
+                gateway.rows['attests', 'outside'].append(row)
+                gateway.calls.clear()
+                service.change(dict(resource='attests', op='upsert',
+                    refs={'assignmentId': 'outside', 'workItemId': None}, payload=deepcopy(row)))
+                self.drain(service)
+                self.assertEqual([], gateway.calls)
+                self.assertEqual(1100000, service.model.session_activity['guest-one'])
+                assert_publication_equal(self, self.fresh(service).current, service.current,
+                                         'winner-exit-next-activity-' + str(lower))
 
     def test_retirement_removes_turn_only_activity(self):
         gateway = ReturningReads()
