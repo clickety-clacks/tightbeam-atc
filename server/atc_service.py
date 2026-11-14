@@ -1297,16 +1297,16 @@ class LiveService:
             self._request_item_assignments(owner, changed=True)
         return True
 
-    def _item_assignments_done(self, job, result):
+    def _item_assignments_done(self, job, result, assignment_flight=None):
         try:
-            return self._apply_item_assignments_done(job, result)
+            return self._apply_item_assignments_done(job, result, assignment_flight)
         finally:
             # Failure, item exit and success all end this attempt. Required
             # live notice updates are already in the model; no retry inherits
             # the attempt's notice history.
             self.reads.discard_item_flight(job[1])
 
-    def _apply_item_assignments_done(self, job, result):
+    def _apply_item_assignments_done(self, job, result, assignment_flight=None):
         self.retry_in_flight.discard(job)
         wid = job[1]
         if wid not in self.model.work_items():
@@ -1316,22 +1316,33 @@ class LiveService:
             self._forget_scopes({job[:2]})
             return True
         if result.complete:
+            stage = result.folded
+            conflicts = (assignment_flight.conflict_fingerprints(
+                stage.assignment_fingerprints.items(), complete=True)
+                if assignment_flight is not None else {})
+            def replace(notices):
+                # Validate/replay before creating holds or changing live state.
+                # Closed membership rows have already been released; their
+                # actual read fingerprints, not reconstructed tuples, were
+                # used for the equality comparison above.
+                try:
+                    stage.replay_attests(notices)
+                    stage.preserve_assignments(self.model, conflicts)
+                except ValueError:
+                    return None
+                self._hold_assignment_conflict_deliveries(
+                    conflicts, ((aid, wid) for aid in conflicts), at=now_ms())
+                released = self.model.replace_item_assignments(wid, result)
+                self._resolve_assignment_read_holds(conflicts, item=wid)
+                return released
             flight = self.reads.item_flights.get(wid)
             if flight is not None:
-                def replace(notices):
-                    # Stage validation/replay precedes any live replacement.
-                    # The model worker publishes only after this whole event.
-                    try:
-                        result.folded.replay_attests(notices)
-                    except ValueError:
-                        return None
-                    return self.model.replace_item_assignments(wid, result)
                 released = flight.apply(replace)
-                if released is None:
-                    result = Read([], False, result.at, result.source,
-                                  'invalid-complete-attest-frontier')
             else:
-                released = self.model.replace_item_assignments(wid, result)
+                released = replace({})
+            if released is None:
+                result = Read([], False, result.at, result.source,
+                              'invalid-complete-item-stage')
         if result.complete:
             self._forget_scopes(released | {job[:2]})
             if not self.connected:
@@ -1367,19 +1378,33 @@ class LiveService:
         if flight is None or not complete:
             return set()
         conflicts = flight.conflict_deliveries(rows, complete=True)
+        self._hold_assignment_conflict_deliveries(conflicts,
+            ((str(row['id']), row.get('workItemId')) for row in rows), at=at)
+        return set(conflicts)
+
+    def _hold_assignment_conflict_deliveries(self, conflicts, owners, *, at):
         published = {item['id']: item for item in self.current.get('items', ())}
-        for row in rows:
-            aid, wid = str(row['id']), row.get('workItemId')
+        for aid, wid in owners:
             if aid not in conflicts or wid not in published:
                 continue
             self.assignment_holds.hold(aid, wid, published[wid], at=at,
                 after_delivery=max(conflicts[aid], self.assignment_delivery_consumed))
-        return set(conflicts)
+
+    def _resolve_assignment_read_holds(self, conflicts, *, item=None, excluded_items=()):
+        """Called only after committing a clean complete read of this scope.
+
+        A global read does not commit R10-held item sources; those holds must
+        await their own complete replacement. Complete absence otherwise has
+        the same resolving authority as a present clean assignment row.
+        """
+        for aid, held in tuple(self.assignment_holds.assignments.items()):
+            if (aid not in conflicts and held.item not in excluded_items
+                    and (item is None or held.item == item)):
+                self.assignment_holds.resolve(aid)
 
     def _consume_read_done(self, value, assignment_flight=None):
-        # The R29 equality summary survives through this whole consumption,
-        # including queue delay. Its publication merge is integrated here next;
-        # ordinary epoch and failure semantics remain unchanged for now.
+        # R29 equality summaries survive queue delay and stay locked through
+        # comparison, selective replacement and hold resolution.
         job, epoch, result = value
         resource, scope, key = job
         # Earlier results in the same model-worker batch may have removed a
@@ -1406,9 +1431,11 @@ class LiveService:
                     job, result, priority, retry, buffers.get(scope, ())))
             finally:
                 self.reads.discard_attest_flight(scope)
-        return self._finished_read(job, result, priority, retry)
+        return self._finished_read(job, result, priority, retry,
+                                   assignment_flight=assignment_flight)
 
-    def _finished_read(self, job, result, priority, retry, attest_notices=None):
+    def _finished_read(self, job, result, priority, retry, attest_notices=None,
+                       assignment_flight=None):
         resource, scope, key = job
         accepted_closed_attests = False
         if resource == "retired-turns":
@@ -1416,7 +1443,7 @@ class LiveService:
         if resource == "attest-owner":
             return self._attest_activity_owner_done(job, result)
         if resource == "item-assignment-source":
-            return self._item_assignments_done(job, result)
+            return self._item_assignments_done(job, result, assignment_flight)
         assignments = self.model.inventory("assignments")
         if resource == "assignments" and key is None:
             if not result.complete and not result.rows:
@@ -1609,6 +1636,17 @@ class LiveService:
         summary_was_active = self._summary_contract_active() if resource == "work-items" else None
         if accepted_closed_attests:
             pass
+        elif resource == 'assignments' and key is None and result.complete:
+            conflicts = (assignment_flight.conflict_deliveries(result.rows, complete=True)
+                         if assignment_flight is not None else {})
+            # The model validates the protected current projections before
+            # accepting unaffected rows/absence. Publication is still the last
+            # committed frame throughout this model-worker operation.
+            self.model.accept_assignment_read_preserving(result, conflicts)
+            self._hold_assignment_conflict_deliveries(conflicts,
+                ((str(row['id']), row.get('workItemId')) for row in result.rows), at=now_ms())
+            self._resolve_assignment_read_holds(conflicts,
+                excluded_items=self.model.item_assignment_pending)
         elif key is None:
             activity_eligible = True
             if resource == "attests":
@@ -1928,8 +1966,18 @@ class LiveService:
             scope = payload.get("sessionKey") or refs.get("sessionKey")
         else:
             scope = None
-        if resource == "assignments" and self._apply_assignment_notice(notice, key, payload):
-            return True
+        if resource == 'assignments':
+            held = self.assignment_holds.assignments.get(str(key))
+            if (held is not None and assignment_delivery is not None
+                    and assignment_delivery <= held.after_delivery):
+                # A queued establishing notice is the other side of the
+                # unresolved pair, not an authoritative next input. Do not
+                # apply it or schedule a replacement read from its fallback.
+                return True
+            if self._apply_assignment_notice(notice, key, payload):
+                if assignment_delivery is not None:
+                    self.assignment_holds.resolve_notice(str(key), assignment_delivery)
+                return True
         if (resource == "attests" and notice.get("op") == "upsert"
                 and payload.get("kind") and payload.get("bySession")
                 and activity_time(payload.get("ts")) is not None and scope):
