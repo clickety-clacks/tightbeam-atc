@@ -662,6 +662,38 @@ class EvidenceModel:
         self.closed_revision += 1
         self._item_activity_parts.clear()
 
+    def update_closed_attest_contribution(self, aid, row):
+        """Fold a validated notice into one released current contribution.
+
+        Source ownership, feed policy and concurrent replacement ordering are
+        the caller's responsibility. This changes neither the last source
+        confirmation nor its actual detail fingerprint. Pending replacement
+        facts stay held until the replacement integration can merge the notice.
+        """
+        aid = str(aid)
+        previous = self.item_contributions.entries.get(aid)
+        if previous is None or previous.state == "open":
+            return False
+        wid = previous.item
+        assignments = self.inventory("assignments")
+        if (wid not in self.work_items() or wid in self.item_assignment_pending
+                or aid in assignments.rows
+                or any(value.get("workItemId") == wid and value.get("state") != "open"
+                       for value in assignments.rows.values())):
+            return False
+        part = self.closed_items.get(wid)
+        if part is None:
+            return False
+        current = previous.attests.notice(row)
+        if current is None:
+            return False
+        if current is previous.attests:
+            return True
+        self.item_contributions.entries[aid] = previous._replace(attests=current)
+        self._reduce_current_closed_item(wid, part)
+        self.details_revision += 1
+        return True
+
     def apply_assignment_projection(self, row, *, at, source):
         """Merge an ordered current assignment without reading item membership.
 

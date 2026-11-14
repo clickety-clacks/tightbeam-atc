@@ -261,6 +261,52 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual(contributions, model.item_contributions.entries)
         self.assertEqual(before, model.closed_items)
 
+    def test_released_attest_notice_keeps_full_publication_pins_and_outage(self):
+        from copy import deepcopy
+        from publication_assertions import assert_publication_equal
+        for outage in (False, True):
+            with self.subTest(outage=outage):
+                model = ClosedAssignmentFoldTest().model()
+                baseline = deepcopy(model)
+                model.fold_closed_assignments()
+                if outage:
+                    model.mark_unconfirmed(1100)
+                    baseline.mark_unconfirmed(1100)
+                prior = model.item_contributions.entries['first']
+                pin = model.closed_items['work']['detailFingerprint']
+                revision = model.details_revision
+                notice = dict(id='later', assignmentId='first', ts=1500, kind='progress',
+                              bySession='other', commitRefs=[{'commit': 'additional'}],
+                              note='not retained contribution text')
+                inventory = baseline.inventory('attests', 'first')
+                self.assertTrue(inventory.payload(notice, at=1600, source='feed', policy='immutable'))
+                baseline.fold_activity_inventory('attests', 'first')
+                self.assertTrue(model.update_closed_attest_contribution('first', notice))
+                # The service's existing positive-activity path runs separately
+                # from the item fold; the item helper must not invent a read.
+                model.fold_session_activity('other', 1500, 'attest', 'first',
+                    dict(inventory.evidence(), status='known', complete=True,
+                         freshness='live', unconfirmedSince=None), owner='work')
+                assert_publication_equal(self, baseline.snapshot(1700), model.snapshot(1700),
+                                         'r26-released-attest-' + str(outage))
+                current = model.item_contributions.entries['first']
+                self.assertEqual(prior.evidence, current.evidence)
+                self.assertEqual(prior.detail_fingerprint, current.detail_fingerprint)
+                self.assertEqual(pin, model.closed_items['work']['detailFingerprint'])
+                self.assertFalse(model.closed_items['work']['detailsKnown'])
+                self.assertEqual(90, model.closed_items['work']['turnActivity'])
+                self.assertEqual(revision + 1, model.details_revision)
+                self.assertNotIn(('attests', 'first'), model.inventories)
+                self.assertNotIn('not retained contribution text', repr(current))
+                before = model.snapshot(1700)
+                self.assertTrue(model.update_closed_attest_contribution('first', notice))
+                self.assertEqual(revision + 1, model.details_revision)
+                self.assertEqual(before, model.snapshot(1700))
+                model.hold_item_assignments('work')
+                self.assertFalse(model.update_closed_attest_contribution(
+                    'first', dict(notice, id='newer', ts=1800)))
+                self.assertEqual(current, model.item_contributions.entries['first'])
+
     def test_assignment_projection_new_close_and_reopen_keep_full_model_parity(self):
         from copy import deepcopy
         model = ClosedAssignmentFoldTest().model()

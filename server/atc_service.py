@@ -1814,7 +1814,7 @@ class LiveService:
                 and required <= payload.keys() and notice.get("class") in CLASSES.get(resource, ())
                 and str(payload.get(inventory.key)) == str(key)):
             row = attest_row(payload) if resource == "attests" else payload
-            previous = inventory.rows.get(str(row[inventory.key]))
+            previous_revision = inventory.data_revision
             if resource == "work-items":
                 summary_was_active = self._summary_contract_active()
                 applied = self.model.payload_work_item(
@@ -1826,7 +1826,7 @@ class LiveService:
                 if resource == "turns":
                     self.model.fold_activity_inventory(resource, scope)
                 self.metrics["payloads"] += 1
-                if resource == "attests" and previous != inventory.rows.get(str(row[inventory.key])):
+                if resource == "attests" and previous_revision != inventory.data_revision:
                     self.model.details_revision += 1
                 if resource == "work-items":
                     if str(row["id"]) in self.model.item_assignment_pending:

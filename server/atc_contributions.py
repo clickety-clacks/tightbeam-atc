@@ -14,7 +14,13 @@ class AttestFrontier(NamedTuple):
     """
 
     maximum: int | float | None = None
-    ids: frozenset = frozenset()
+    # (attest ID, start, length) in the existing flat reference sequence.
+    # IDs and boundaries share this one tuple; no second retained ID set.
+    groups: tuple = ()
+
+    @property
+    def ids(self):
+        return frozenset(identity for identity, _start, _length in self.groups)
 
     @staticmethod
     def usable(row):
@@ -26,19 +32,42 @@ class AttestFrontier(NamedTuple):
         if not self.usable(row) or self.maximum is None:
             return False
         return (row['ts'] < self.maximum or
-                (row['ts'] == self.maximum and str(row['id']) in self.ids))
+                (row['ts'] == self.maximum and
+                 any(identity == str(row['id']) for identity, _, _ in self.groups)))
 
-    def observe(self, row):
-        # Source fold counts are authoritative; this stores only the current
-        # maximum's identities, independent of page boundaries or row order.
+    def observe(self, row, *, start=0):
+        # Source fold counts are authoritative. The pinned complete read is
+        # ordered by timestamp and ID; offsets span its page boundaries.
         if not self.usable(row):
             return self
         timestamp, identity = row['ts'], str(row['id'])
+        group = (identity, start, len(row.get('commitRefs') or ()))
         if self.maximum is None or timestamp > self.maximum:
-            return AttestFrontier(timestamp, frozenset((identity,)))
-        if timestamp == self.maximum and identity not in self.ids:
-            return AttestFrontier(timestamp, self.ids | {identity})
+            return AttestFrontier(timestamp, (group,))
+        if timestamp == self.maximum and not self.includes(row):
+            return AttestFrontier(timestamp, tuple(sorted((*self.groups, group))))
         return self
+
+    def insert_refs(self, row, refs):
+        """Insert one unseen notice's group in exact current-frontier ID order."""
+        if not self.usable(row):
+            raise ValueError('attest frontier requires an ID and finite timestamp')
+        if self.includes(row):
+            return self, refs
+        identity = str(row['id'])
+        incoming = tuple(deepcopy(row.get('commitRefs') or ()))
+        if self.maximum is None or row['ts'] > self.maximum:
+            start = len(refs)
+            frontier = AttestFrontier(row['ts'], ((identity, start, len(incoming)),))
+            return frontier, (*refs, *incoming)
+        # Empty groups still have a start offset, so an interposed ID cannot
+        # accidentally move ahead of the lower-timestamp reference prefix.
+        following = next((start for key, start, _ in self.groups if key > identity), None)
+        start = following if following is not None else len(refs)
+        groups = tuple((key, offset + (len(incoming) if key > identity else 0), length)
+                       for key, offset, length in self.groups)
+        groups = tuple(sorted((*groups, (identity, start, len(incoming)))))
+        return AttestFrontier(self.maximum, groups), (*refs[:start], *incoming, *refs[start:])
 
 
 class ContributionEvidence(NamedTuple):
@@ -94,6 +123,17 @@ class AttestContribution(NamedTuple):
         result['refs'].extend(deepcopy(self.refs))
         result['activity'] = result['recentActivity'] = self.activity
         return result
+
+    def notice(self, row):
+        """Fold an eligible immutable notice without source text or a read."""
+        from atc_summary import apply_attest_notice
+        if not self.frontier.usable(row):
+            return None
+        if self.frontier.includes(row):
+            return self
+        summary = self.summary()
+        frontier = apply_attest_notice(summary, self.frontier, row)
+        return AttestContribution.capture(summary, frontier)
 
 
 class AssignmentContribution(NamedTuple):

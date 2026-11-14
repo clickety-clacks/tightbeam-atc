@@ -359,9 +359,28 @@ class HistoryInventory(Inventory):
                                       if row[field] > now - 300_000]
 
     def payload(self, row, *, at, source, policy):
-        from atc_summary import HISTORY_TIMES, summarize
+        from atc_summary import HISTORY_TIMES, summarize, apply_attest_notice
         key = str(row[self.key])
         old = self.rows.get(key)
+        if self.resource == "attests":
+            if not self.attest_frontier.usable(row):
+                return False
+            if old is not None and old != row:
+                self.invalidate()
+                return False
+            if self.attest_frontier.includes(row):
+                return True
+            revision = self.data_revision
+            if not super().payload(row, at=at, source=source, policy=policy):
+                return False
+            self.attest_frontier = apply_attest_notice(self.folded, self.attest_frontier, row)
+            # A partial read can retain this raw row without counting it in
+            # the held complete fold. Its later notice changes that fold even
+            # if the raw immutable row was already present.
+            if self.data_revision == revision:
+                self.data_revision += 1
+            self.prune(at, force=True)
+            return True
         timestamp = row.get(HISTORY_TIMES[self.resource])
         if old is None and (not isinstance(timestamp, (int, float))
                             or timestamp <= (self.folded["recentActivity"] or 0)):
@@ -374,8 +393,6 @@ class HistoryInventory(Inventory):
             return True
         if old is None:
             summarize(self.resource, (row,), into=self.folded, now=at)
-            if self.resource == "attests":
-                self.attest_frontier = self.attest_frontier.observe(row)
         elif self.resource in {"turns", "wakes"}:
             current = summarize(self.resource, self.rows.values(), now=at)
             self.folded["live"] = current["live"]

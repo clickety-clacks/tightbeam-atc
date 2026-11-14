@@ -100,6 +100,16 @@ def recent_marks(summary, field, now):
         yield row
 
 
+def apply_attest_notice(summary, frontier, row):
+    """Update counted current facts and maximum-only reference boundaries."""
+    next_frontier, refs = frontier.insert_refs(row, summary["refs"])
+    if next_frontier is frontier:
+        return frontier
+    summarize("attests", (row,), into=summary)
+    summary["refs"] = list(refs)
+    return next_frontier
+
+
 HISTORY_KEYS = {"attests": "id", "turns": "seq", "wakes": "wakeId", "messages": "id"}
 HISTORY_TIMES = {"attests": "ts", "turns": "createdAt", "wakes": "createdAt", "messages": "at"}
 
@@ -120,10 +130,12 @@ class HistoryFold:
         from copy import deepcopy
         resource = self.resource
         key, timestamp = HISTORY_KEYS[resource], HISTORY_TIMES[resource]
+        reference_offset = len(self.summary["refs"])
         summarize(resource, rows, into=self.summary, now=self.now)
         for row in rows:
             if resource == "attests":
-                self.attest_frontier = self.attest_frontier.observe(row)
+                self.attest_frontier = self.attest_frontier.observe(row, start=reference_offset)
+                reference_offset += len(row.get("commitRefs") or ())
             self.fingerprint.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode())
             self.fingerprint.update(b"\n")
             at = row.get(timestamp)
