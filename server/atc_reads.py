@@ -1,6 +1,7 @@
 """Bounded background reads; the model worker alone consumes their results."""
 
 from collections import OrderedDict, defaultdict
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from threading import Lock
@@ -8,6 +9,77 @@ import time
 
 from atc_upstream import Read, now_ms
 from atc_contributions import AssignmentContribution
+
+
+class AttestReadFlight:
+    """One attempt's protected snapshots through local atomic application.
+
+    The model worker owns notice delivery and application. The read worker
+    opens each contribution immediately before its snapshot, after all turns
+    have been folded and discarded. This lock serializes those boundaries;
+    no upstream operation runs while it is held.
+    """
+    def __init__(self):
+        self.lock = Lock()
+        self.buffers = {}
+        self.opened_at = {}
+        self.read_completed_at = {}
+        self.closed = False
+        self.notice_count = 0
+        self.peak_notice_count = 0
+        self.maximum_lifetime = 0.0
+        self.maximum_read_duration = 0.0
+
+    def open(self, aid):
+        with self.lock:
+            if self.closed or aid in self.buffers:
+                raise ValueError('attest protection opened outside a new snapshot')
+            self.buffers[aid] = []
+            self.opened_at[aid] = time.monotonic()
+
+    def notice(self, aid, row):
+        with self.lock:
+            if self.closed or aid not in self.buffers:
+                return False
+            # Replay needs the normal contribution fields, not notes, bodies
+            # or a second copy of the transport envelope. References retain
+            # their existing shape and cannot alias the caller's payload.
+            self.buffers[aid].append({key: deepcopy(row.get(key)) for key in (
+                'id', 'assignmentId', 'kind', 'verdictKind', 'bySession', 'ts', 'commitRefs')})
+            self.notice_count += 1
+            self.peak_notice_count = max(self.peak_notice_count, self.notice_count)
+            return True
+
+    def read_completed(self, aid):
+        with self.lock:
+            if not self.closed:
+                self.read_completed_at[aid] = time.monotonic()
+                self.maximum_read_duration = max(self.maximum_read_duration,
+                    self.read_completed_at[aid] - self.opened_at[aid])
+            # Keep protection while other members or local application wait.
+
+    def apply(self, consume):
+        with self.lock:
+            if self.closed:
+                raise ValueError('attest protection already disposed')
+            try:
+                return consume(self.buffers)
+            finally:
+                self._discard()
+
+    def discard(self):
+        with self.lock:
+            self._discard()
+
+    def _discard(self):
+        if self.opened_at:
+            self.maximum_lifetime = max(self.maximum_lifetime,
+                                       time.monotonic() - min(self.opened_at.values()))
+        self.buffers.clear()
+        self.opened_at.clear()
+        self.read_completed_at.clear()
+        self.notice_count = 0
+        self.closed = True
 
 
 @dataclass
@@ -152,7 +224,7 @@ class ReadQueue:
             # Exception bodies may contain credentials or upstream responses.
             return Read([], False, now_ms(), resource, type(error).__name__)
 
-    def _item_assignments(self, wid, live_ids):
+    def _item_assignments(self, wid, live_ids, flight=None):
         from atc_evidence import HistoryInventory
         from atc_model import ClosedAssignmentFold, fold_session_activity_record
         from atc_summary import HistoryFold
@@ -173,7 +245,10 @@ class ReadQueue:
         staged.absent_activity_winners = activity_winners
         retired = {}
         at = membership.at
-        for position, member in enumerate(membership.rows):
+        # Validate the same membership/details before reading its selected
+        # retired holders. Keep only the existing membership projection;
+        # detail-only rows do not survive to the protected attest portion.
+        for member in membership.rows:
             aid = member["id"]
             staged.absent_activity_winners.discard(aid)
             detail = self.gateway.detail("assignments", aid)
@@ -194,6 +269,31 @@ class ReadQueue:
             holder = row.get("holderKey")
             if visible is not None and holder and holder not in visible:
                 retired.setdefault(holder, {})[aid] = wid
+            del row, member, detail
+        # R28: complete the existing turn portion before any attest snapshot
+        # can open protection. A growing turn tail must not retain notices
+        # belonging to an earlier completed attest snapshot.
+        from atc_summary import ItemActivityFold
+        for session, mapping in retired.items():
+            if hasattr(self.gateway, "read_item_activity"):
+                result = self.gateway.read_item_activity(session, mapping)
+                fold = result.folded
+            else:
+                result = self.gateway.read("turns", session)
+                fold = ItemActivityFold(mapping)
+                fold.add(result.rows)
+            if not result.complete:
+                return Read([], False, result.at, source, result.error)
+            value = fold.activity.get(wid)
+            if value is not None:
+                staged.activity = max(staged.activity or 0, value)
+            at = result.at
+            del result, fold
+        retired.clear()
+        for position, member in enumerate(membership.rows):
+            aid, row = member["id"], member
+            if read_attests and flight is not None:
+                flight.open(aid)
             if not read_attests:
                 result = None
             elif hasattr(self.gateway, "read_current"):
@@ -226,25 +326,9 @@ class ReadQueue:
             # Only current open sources survive the next member. Closed raw
             # assignment/attest text and temporary page folds are not staged.
             membership.rows[position] = None
-            del row, member, detail, result, fold, inventory
-        # The same existing warm-path turn history used by fresh full loads.
-        # Only holders discovered in this item's complete membership qualify.
-        from atc_summary import ItemActivityFold
-        for session, mapping in retired.items():
-            if hasattr(self.gateway, "read_item_activity"):
-                result = self.gateway.read_item_activity(session, mapping)
-                fold = result.folded
-            else:
-                result = self.gateway.read("turns", session)
-                fold = ItemActivityFold(mapping)
-                fold.add(result.rows)
-            if not result.complete:
-                return Read([], False, result.at, source, result.error)
-            value = fold.activity.get(wid)
-            if value is not None:
-                staged.activity = max(staged.activity or 0, value)
-            at = result.at
-            del result, fold
+            del row, member, result, fold, inventory
+            if read_attests and flight is not None:
+                flight.read_completed(aid)
         if closed.part["count"]:
             staged.closed = closed.finish()
         return Read([], True, at, source, folded=staged)

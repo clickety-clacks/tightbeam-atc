@@ -9,9 +9,10 @@ from unittest.mock import patch
 import weakref
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
-from atc_reads import ReadQueue
+from atc_reads import AttestReadFlight, ReadQueue
 from atc_service import LiveService
-from atc_upstream import Gateway
+from atc_upstream import Gateway, Read
+from atc_summary import ItemActivityFold
 from test_closed_folding import ClosedAssignmentFoldTest
 from atc_contributions import AttestFrontier
 from publication_assertions import assert_publication_equal, assert_replay_current
@@ -67,8 +68,8 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         result = self.result()
         self.assertTrue(result.complete, result.error)
         self.assertEqual([], result.rows)
-        self.assertEqual(['work-item-get', 'work-item-trace', 'assignment-get', 'attests',
-                          'assignment-get', 'attests', 'assignment-get', 'attests'],
+        self.assertEqual(['work-item-get', 'work-item-trace', 'assignment-get',
+                          'assignment-get', 'assignment-get', 'attests', 'attests', 'attests'],
                          [verb for verb, _ in self.calls])
         staged = result.folded
         self.model.accept('assignments', None, self.gateway.read('assignments'))
@@ -83,6 +84,72 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         self.assertEqual(['first', 'corrected'], [ref['commit'] for _, _, ref in staged.closed['refs']])
         self.assertEqual(60, staged.closed['closedAt'])
         self.assertEqual({'author': 10, 'other': 30}, staged.closed['summary']['authors'])
+
+    def test_selected_turns_finish_and_release_raw_results_before_first_attest(self):
+        order, raw_refs = [], []
+        flight = AttestReadFlight()
+        self.addCleanup(flight.discard)
+        class TurnRow(dict):
+            pass
+        def turns(session, mapping):
+            self.assertEqual({}, flight.buffers)
+            order.append(('turns', session, dict(mapping)))
+            rows = [TurnRow(seq=1, sessionKey=session, assignmentId=next(iter(mapping)),
+                            createdAt=70, startedAt=80, endedAt=90)]
+            raw_refs.extend(weakref.ref(row) for row in rows)
+            fold = ItemActivityFold(mapping)
+            fold.add(rows)
+            return Read(rows, True, 100, 'turn-source', folded=fold)
+        original = self.gateway.read_current
+        def read_current(resource, scope, **kwargs):
+            if resource == 'attests':
+                gc.collect()
+                self.assertTrue(raw_refs)
+                self.assertTrue(all(ref() is None for ref in raw_refs))
+                self.assertIn(scope, flight.buffers)
+                self.assertEqual(['author', 'other'],
+                                 [entry[1] for entry in order if entry[0] == 'turns'])
+                order.append(('attests', scope))
+            return original(resource, scope, **kwargs)
+        self.gateway.read_item_activity = turns
+        self.gateway.read_current = read_current
+        result = self.reads._item_assignments('work',
+            dict(liveIds=set(), attests=True, visibleSessions=set()), flight)
+        self.assertTrue(result.complete, result.error)
+        self.assertEqual([('turns', 'author', {'first': 'work', 'open': 'work'}),
+                          ('turns', 'other', {'last': 'work'}),
+                          ('attests', 'first'), ('attests', 'open'), ('attests', 'last')], order)
+        self.assertEqual(90, result.folded.activity)
+        self.assertEqual({'first', 'open', 'last'}, flight.buffers.keys())
+        self.assertFalse(flight.closed)
+        flight.apply(result.folded.replay_attests)
+        self.assertEqual({}, flight.buffers)
+
+    def test_failed_turn_portion_never_starts_attest_portion_or_returns_partial_stage(self):
+        self.gateway.read_item_activity = lambda session, mapping: Read(
+            [], False, 100, 'turn-source', 'fixture-failure')
+        result = self.reads._read(('item-assignment-source', 'work', None),
+            dict(liveIds=set(), attests=True, visibleSessions=set()))
+        self.assertFalse(result.complete)
+        self.assertEqual('fixture-failure', result.error)
+        self.assertIsNone(result.folded)
+        self.assertFalse(any(verb == 'attests' for verb, _ in self.calls))
+
+    def test_turn_first_stage_does_not_roll_back_newer_published_turn_activity(self):
+        fold = ItemActivityFold({'first': 'work'})
+        fold.activity['work'] = 90
+        self.gateway.read_item_activity = lambda session, mapping: Read(
+            [], True, 100, 'turn-source', folded=fold)
+        result = self.reads._read(('item-assignment-source', 'work', None),
+            dict(liveIds=set(), attests=True, visibleSessions={'other'}))
+        self.assertTrue(result.complete, result.error)
+        self.model.fold_closed_assignments()
+        self.model.closed_items['work']['turnActivity'] = 200
+        self.model.closed_items['work']['activity'] = 200
+        self.model.hold_item_assignments('work')
+        self.model.replace_item_assignments('work', result)
+        self.assertEqual(200, self.model.closed_items['work']['turnActivity'])
+        self.assertEqual(200, self.model.item_activity()['work'])
 
     def test_complete_membership_reports_only_missing_published_winners(self):
         plan = dict(liveIds=set(), attests=True, activityWinners={"first", "missing"})
