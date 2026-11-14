@@ -812,6 +812,72 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 assert_publication_equal(self, fresh.current, service.current,
                                          'b4-released-attest-duplicate-' + str(explicit_owner))
 
+    def test_released_notice_preserves_revision_guarded_on_demand_details(self):
+        gateway = ItemReads()
+        assignment = next(row for row in gateway.rows['assignments', None]
+                          if row['id'] == 'first')
+        assignment.update(state='open', closedAt=None)
+        service = self.load(gateway)
+        row = dict.fromkeys(ATTEST_FIELDS) | dict(id='detail-later', assignmentId='first',
+            kind='progress', bySession='author', byUser=None, ts=500,
+            commitRefs=[{'commit': 'detail-later'}], note='Original evidence text')
+        gateway.rows['attests', 'first'].append(deepcopy(row))
+        # The assignment observation can precede delivery of its earlier
+        # progress notice. Keep that source ordering identical to production.
+        assignment.update(state='closed', closedAt=600)
+        released = service.model.apply_assignment_projection(
+            assignment, at=1000, source='published-detail')
+        self.assertIsNotNone(released)
+        service._forget_scopes(released)
+        service._publish()
+        baseline = deepcopy(service.current)
+        old_pin = service.model.closed_items['work']['detailFingerprint']
+        gateway.calls.clear()
+        self.assertTrue(service.change(dict(resource='attests', op='upsert',
+            refs={'attestId': row['id'], 'assignmentId': 'first'}, payload=deepcopy(row),
+            **{'class': 'attest.filed'})))
+        self.settle(service)
+        self.assertEqual([], gateway.calls)
+        self.assertEqual(old_pin, service.model.closed_items['work']['detailFingerprint'])
+        self.assertFalse(service.model.closed_items['work']['detailsKnown'])
+        self.assertTrue(service.model.closed_items['work']['attestsRead'])
+        self.assertGreater(service.revision, baseline['revision'])
+
+        status, _ = service.evidence_page('work', generation=baseline['generation'],
+                                          revision=baseline['revision'])
+        self.assertEqual(409, status)
+        self.assertEqual([], gateway.calls)
+        # Only the explicit page request may start the existing detail refresh.
+        status, _ = service.evidence_page('work')
+        self.assertEqual(409, status)
+        event = service.events.get_nowait()
+        self.assertEqual('detail-reload', event[0])
+        service._handle(*event)
+        self.settle(service)
+        self.assertTrue(service.model.closed_items['work']['attestsRead'])
+        self.assertFalse(service.model.item_assignment_pending)
+        self.assertNotIn(('attests', 'first'), service.model.inventories)
+
+        status, page = service.evidence_page('work')
+        self.assertEqual(200, status)
+        self.assertTrue(page['complete'])
+        self.assertIsNone(page['nextOffset'])
+        self.assertEqual(service.revision, page['revision'])
+        expected = sorted((dict(value, bySession=value.get('bySession'),
+                                byUser=value.get('byUser'), note=value.get('note'))
+                           for member in gateway.rows['assignments', None]
+                           for value in gateway.rows['attests', member['id']]),
+                          key=lambda value: (value.get('ts') or 0, value['id']))
+        self.assertEqual(expected, page['records'])
+        self.assertEqual(len(expected), page['total'])
+        self.assertTrue(service.events.empty())
+        fresh_gateway = ItemReads()
+        fresh_gateway.rows = deepcopy(gateway.rows)
+        fresh = self.load(fresh_gateway)
+        assert_publication_equal(self, fresh.current, service.current,
+                                 'b4-released-notice-detail-fresh')
+        assert_replay_current(self, service, baseline, 'b4-released-notice-detail-replay')
+
     def test_summary_backed_duplicate_counts_keep_review_timing_stage_and_ring_exact(self):
         gateway = ItemReads()
         item = summarized_work(attest_counts={'completion': 1, 'verdict': 2},
