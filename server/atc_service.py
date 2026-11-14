@@ -1228,7 +1228,7 @@ class LiveService:
         result.rows.clear()
         del row
         if eligible:
-            facts = dict(status="known", freshness="live", complete=True,
+            facts = dict(status="known", freshness="live" if self.connected else "stale", complete=True,
                          observedAt=pending["observedAt"], unconfirmedSince=None,
                          source="cli:attests " + str(assignment_id))
             for author, timestamp in pending["authors"].items():
@@ -1677,7 +1677,7 @@ class LiveService:
         normalized = "decision-requests" if resource == "decision requests" else resource
         policy = self.policies.get(resource)
         if resource == "attests":
-            scope = payload.get("assignmentId")
+            scope = payload.get("assignmentId") or refs.get("assignmentId")
         elif resource in {"turns", "wakes", "messages"}:
             scope = payload.get("sessionKey") or refs.get("sessionKey")
         else:
@@ -1698,8 +1698,9 @@ class LiveService:
                 return self._queue_attest_activity(str(scope), payload["bySession"], payload["ts"])
             if self._attest_activity_eligible(activity_owner):
                 self.model.fold_session_activity(payload["bySession"], payload["ts"], "attest", scope,
-                    dict(status="known", freshness="live", complete=True, observedAt=now_ms(),
-                         unconfirmedSince=None, source="cli:attests " + str(scope)), owner=activity_owner)
+                    dict(status="known", freshness="live" if self.connected else "stale", complete=True,
+                         observedAt=now_ms(), unconfirmedSince=None,
+                         source="cli:attests " + str(scope)), owner=activity_owner)
             if activity_owner is None and held is None:
                 return True
         owner = (payload.get("workItemId") or refs.get("workItemId") or
@@ -1857,7 +1858,8 @@ class LiveService:
                 # their next complete read.
                 for resource, scope in tuple(self.reads.active):
                     self.reads.touch(resource, scope)
-                    self.model.inventory(resource, scope).invalidate()
+                    if resource != "attest-owner":
+                        self.model.inventory(resource, scope).invalidate()
                 # Start or resume one recovery cycle. Repeated lost events do
                 # not reset epochs or bypass retry deadlines.
                 self.rebuild(resume=True)

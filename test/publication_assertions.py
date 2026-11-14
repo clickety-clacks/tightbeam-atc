@@ -1,4 +1,5 @@
 """Preserve complete parity evidence before an assertion can stop a test."""
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -82,3 +83,34 @@ def assert_winner_exit_publication(case, fresh, warm, label, affected):
         if not allowed:
             unexpected.append(change)
     case.assertEqual([], unexpected)
+
+
+def assert_replay_current(case, service, baseline, label):
+    """Apply actual retained SSE frames and compare the complete current frame."""
+    full = json.loads(service.event.split(b"data: ", 1)[1])
+    case.assertEqual(service.current, full)
+    result = service.next_event(baseline["revision"], timeout=0)
+    case.assertIsNotNone(result)
+    revision, wire = result
+    frames = []
+    reconstructed = deepcopy(baseline)
+    for encoded in (part for part in wire.split(b"\n\n") if part):
+        payload = json.loads(encoded.split(b"data: ", 1)[1])
+        frames.append(payload)
+        if encoded.startswith(b"event: model"):
+            reconstructed = payload
+            continue
+        case.assertEqual(reconstructed["revision"], payload["baseRevision"])
+        for name, change in payload["changes"].items():
+            rows = {row["id"]: row for row in reconstructed[name]}
+            for key in change["remove"]:
+                rows.pop(key, None)
+            for row in change["upsert"]:
+                rows[row["id"]] = row
+            reconstructed[name] = list(rows.values())
+        reconstructed.update({key: value for key, value in payload.items()
+                              if key not in {"baseRevision", "changes"}})
+    capture_publication(full, reconstructed, label,
+                        replayBaseline=baseline, replayFrames=frames)
+    case.assertEqual(service.revision, revision)
+    case.assertEqual(full, reconstructed)

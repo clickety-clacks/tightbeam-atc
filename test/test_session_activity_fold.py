@@ -72,6 +72,25 @@ class SessionActivityFoldTest(unittest.TestCase):
         self.assertEqual(["attest", "cli:attests winner"],
                          model.session_activity_evidence["mixed"]["source"])
 
+    def test_resumed_refresh_does_not_reconfirm_a_pre_outage_record(self):
+        model = EvidenceModel()
+        model.begin_activity_refresh()
+        model.fold_session_activity("author", 950000, "attest", "winner", self.facts())
+        model.mark_unconfirmed(20)
+        model.finish_activity_refresh()
+        facts = model.session_activity_facts("author", self.facts())
+        self.assertEqual(950000, model.session_activity["author"])
+        self.assertEqual("unconfirmed", facts["freshness"])
+        self.assertEqual(20, facts["unconfirmedSince"])
+        # A subsequent full source reconstruction starts a new confirmation
+        # fold; it is distinct from keeping pre-outage completion credit.
+        model.begin_activity_refresh()
+        model.fold_session_activity("author", 950000, "attest", "winner", self.facts(observedAt=30))
+        model.finish_activity_refresh()
+        facts = model.session_activity_facts("author", self.facts(observedAt=30))
+        self.assertEqual("live", facts["freshness"])
+        self.assertIsNone(facts["unconfirmedSince"])
+
     def test_folding_does_not_erase_incomplete_or_stale_evidence(self):
         model = EvidenceModel()
         model.fold_session_activity("author", 950000, "attest", "winner", self.facts(

@@ -12,7 +12,7 @@ from atc_payloads import SESSION_FIELDS, PAYLOAD_POLICIES
 from atc_upstream import Read
 from test_service import PublishedReads, summarized_work, work
 from test_assignment_source_failure import publication
-from publication_assertions import assert_publication_equal, assert_winner_exit_publication
+from publication_assertions import assert_publication_equal, assert_winner_exit_publication, assert_replay_current
 
 
 class ReturningReads(PublishedReads):
@@ -255,6 +255,7 @@ class ReturningAuthorTest(unittest.TestCase):
                 changes = [summarized_work(version=2, holders=[], attest_counts={}) |
                            dict(id='other'), work(version=3) | dict(id='other')]
                 for row in changes:
+                    before_change = deepcopy(service.current)
                     gateway.rows['work-items', None][1] = row
                     gateway.calls.clear()
                     with patch.object(service, 'rebuild', side_effect=AssertionError('global rebuild')):
@@ -271,6 +272,7 @@ class ReturningAuthorTest(unittest.TestCase):
                     self.assertNotIn(('read', 'assignments', None), gateway.calls)
                     self.assertEqual(1, gateway.calls.count(('read', 'work-items', None)))
                     label = "implicit-summary-" + delivery + "-" + state + "-" + str(row['rowVersion'])
+                    assert_replay_current(self, service, before_change, label + "-replay")
                     fresh = self.fresh(service).current
                     if row['rowVersion'] == 2:
                         assert_winner_exit_publication(self, fresh, service.current, label, {"guest-one"})
@@ -292,9 +294,11 @@ class ReturningAuthorTest(unittest.TestCase):
                 service = self.load(gateway)
                 self.returns(service, {'guest-one', 'guest-two'}); self.drain(service)
                 self.assertEqual(1000000, service.model.session_activity['guest-one'])
+                before_exit = deepcopy(service.current)
                 gateway.rows['work-items', None] = [summarized_work(
                     holders=[], attest_counts={'progress': 1}) | dict(state='closed', closedAt=20)]
                 service._refresh('work-items'); self.drain(service)
+                assert_replay_current(self, service, before_exit, 'winner-exit-replay-' + str(lower))
                 fresh = self.fresh(service)
                 self.assertEqual(lower, fresh.model.session_activity.get('guest-one'))
                 self.assertEqual(1000000, service.model.session_activity['guest-one'])
@@ -310,11 +314,13 @@ class ReturningAuthorTest(unittest.TestCase):
                            bySession='guest-one', ts=1100000)
                 gateway.rows['attests', 'outside'].append(row)
                 gateway.calls.clear()
+                before_next = deepcopy(service.current)
                 service.change(dict(resource='attests', op='upsert',
                     refs={'assignmentId': 'outside', 'workItemId': None}, payload=deepcopy(row)))
                 self.drain(service)
                 self.assertEqual([], gateway.calls)
                 self.assertEqual(1100000, service.model.session_activity['guest-one'])
+                assert_replay_current(self, service, before_next, 'winner-next-replay-' + str(lower))
                 assert_publication_equal(self, self.fresh(service).current, service.current,
                                          'winner-exit-next-activity-' + str(lower))
 

@@ -420,6 +420,8 @@ class EvidenceModel:
                     fact["freshness"] = "unconfirmed"
         facts = [part["facts"] for part in self.closed_items.values()]
         facts.extend(self.session_activity_evidence.values())
+        if self.activity_refresh is not None:
+            facts.extend(self.activity_refresh[1].values())
         for fact in facts:
             if fact["complete"] and fact.get("unconfirmedSince") is None:
                 fact["unconfirmedSince"] = at
