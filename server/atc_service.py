@@ -1904,16 +1904,16 @@ class LiveService:
             payload, at=now_ms(), source="feed:" + notice["class"], allow_pending=True)
         if released is None:
             return False
-        # Creation may already have scheduled this scope's first confirmation.
-        # Closing before it runs must not cancel the independently required
-        # read and strand an unknown compact contribution. Its existing scoped
-        # consumer applies to the now-closed member; no new read is added here.
+        # Closing does not cancel an independently required confirmation,
+        # including a refresh of previously complete facts. Its existing
+        # scoped consumer applies attest facts to the current closed/reopened
+        # member. Preserve existing ownership/deadlines; add no read here.
         confirming = {scope for scope in released
             if scope[0] == 'attests'
             and (current := self.model.item_contributions.entries.get(str(scope[1]))) is not None
-            and not current.evidence.complete
             and (scope in self.reads.active
-                 or any(job[:2] == scope for job in self.reads.pending))}
+                 or any(job[:2] == scope for job in self.reads.pending)
+                 or any(job[:2] == scope for job in self.read_retries))}
         self._forget_scopes(released - confirming)
         self.metrics["payloads"] += 1
         self._discover_assignment_sessions((payload,))

@@ -230,14 +230,22 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 self.assertEqual(expected, inventory.folded['count'])
                 self.assertEqual(expected,
                     service.model.item_contributions.entries['first'].attests.count)
-                self.assertFalse(inventory.needs_source_read)
                 if partial:
-                    self.assertFalse(inventory.complete)
-                    self.assertTrue(inventory.stale)
-                    service._publish()
-                    deadline = service.read_retries['attests', 'first', None][0]
+                    # Existing R10 recovery owns a failed scoped read through
+                    # a complete item replacement. The response is never
+                    # accepted as a replacement attest inventory.
+                    self.assertIn('work', service.model.item_assignment_pending)
+                    gateway.fail_member = 'last'
+                    self.settle(service)
+                    self.assertEqual(prior.attests.count + 1,
+                        service.model.item_contributions.entries['first'].attests.count)
+                    self.assertFalse(service.current['items'][0]['evidence']['assignments']['complete'])
+                    deadline = service.read_retries['item-assignment-source', 'work', None][0]
+                    gateway.fail_member = None
                     with patch('atc_service.time.monotonic', return_value=deadline + 1):
                         service._retry_incomplete_reads()
+                else:
+                    self.assertFalse(inventory.needs_source_read)
                 self.settle(service)
                 self.assertEqual(prior.attests.count + 2,
                     service.model.item_contributions.entries['first'].attests.count)
@@ -245,7 +253,8 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 self.assertEqual(2 if partial else 1,
                     sum(call[:2] == ('read', 'attests') and call[-1] == 'first'
                         for call in gateway.calls))
-                self.assertFalse([call for call in gateway.calls if call[0] == 'membership'])
+                self.assertEqual(2 if partial else 0,
+                    sum(call[0] == 'membership' for call in gateway.calls))
                 fresh_gateway = ItemReads()
                 fresh_gateway.rows = deepcopy(gateway.rows)
                 fresh = self.load(fresh_gateway)
@@ -666,6 +675,65 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 assert_publication_equal(self, fresh.current, service.current,
                                          'b4-ordinary-' + state)
                 assert_replay_current(self, service, baseline, 'b4-ordinary-' + state + '-replay')
+
+    def test_close_keeps_existing_refresh_of_complete_evidence(self):
+        for queued in (False, True):
+            for reopen in (False, True):
+                with self.subTest(queued=queued, reopen=reopen):
+                    gateway = ItemReads()
+                    gateway.rows['assignments', None] = [dict.fromkeys(ASSIGNMENT_FIELDS) | row
+                        for row in gateway.rows['assignments', None]]
+                    service = self.load(gateway)
+                    baseline = deepcopy(service.current)
+                    previous = service.model.item_contributions.entries['open']
+                    self.assertTrue(previous.evidence.complete)
+                    row = next(row for row in gateway.rows['assignments', None] if row['id'] == 'open')
+                    gateway.rows['attests', 'open'].append(dict.fromkeys(ATTEST_FIELDS) | dict(
+                        id='refresh-append', assignmentId='open', kind='progress',
+                        bySession='author', ts=4000, commitRefs=[]))
+                    gateway.calls.clear()
+                    job = ('attests', 'open', None)
+                    service._refresh(*job)
+                    event = None
+                    if queued:
+                        service.reads.pump()
+                        event = service.events.get(timeout=5)
+                        self.assertEqual(job, event[1][0])
+                    epoch = service.reads.epochs['attests', 'open']
+                    calls = list(gateway.calls)
+                    row.update(state='closed', closedAt=5000, outcome='completed')
+                    service.change(dict(resource='assignments', op='upsert',
+                        refs={'assignmentId': 'open'}, payload=deepcopy(row),
+                        **{'class': 'assignment.closed'}))
+                    if not queued:
+                        self.assertIn(job, service.reads.pending)
+                    else:
+                        self.assertIn(('attests', 'open'), service.reads.active)
+                        self.assertFalse(service.reads.attest_flights['open'].closed)
+                    if reopen:
+                        row.update(state='open', closedAt=None, outcome=None)
+                        service.change(dict(resource='assignments', op='upsert',
+                            refs={'assignmentId': 'open'}, payload=deepcopy(row),
+                            **{'class': 'assignment.reopened'}))
+                    self.assertEqual(calls, gateway.calls)
+                    self.assertEqual(epoch, service.reads.epochs['attests', 'open'])
+                    service._publish()
+                    if event is not None:
+                        service._handle(*event)
+                    self.settle(service)
+                    self.assertEqual(1, gateway.calls.count(('read', 'attests', 'open')))
+                    self.assertFalse([call for call in gateway.calls if call[0] == 'membership'])
+                    self.assertEqual(previous.attests.count + 1,
+                        service.model.item_contributions.entries['open'].attests.count)
+                    self.assertEqual('open' if reopen else 'closed',
+                        service.model.item_contributions.entries['open'].state)
+                    self.assertEqual(0, service.reads.epoch_discards)
+                    fresh_gateway = ItemReads()
+                    fresh_gateway.rows = deepcopy(gateway.rows)
+                    fresh = self.load(fresh_gateway)
+                    label = 'b4-complete-refresh-' + str(queued) + '-' + str(reopen)
+                    assert_publication_equal(self, fresh.current, service.current, label)
+                    assert_replay_current(self, service, baseline, label + '-replay')
 
     def test_reopen_uses_existing_fold_without_item_member_reads(self):
         gateway = ItemReads()
