@@ -6,6 +6,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_contributions import AssignmentContribution, ItemContributions
 from atc_model import ClosedAssignmentFold
+from atc_evidence import HistoryInventory
 from atc_upstream import Read
 from test_closed_folding import ClosedAssignmentFoldTest
 
@@ -76,6 +77,16 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual(original.corrections,
                          original.assignment_update({'closedAt': 90}).corrections)
 
+    def test_summary_skipped_contribution_does_not_claim_an_attest_read(self):
+        inventory = HistoryInventory('attests')
+        contribution = AssignmentContribution.capture(
+            dict(id='skipped', workItemId='work', state='closed'), inventory, 0)
+        fold = ClosedAssignmentFold()
+        fold.add_contribution(contribution)
+        self.assertFalse(fold.part['attestsRead'])
+        self.assertFalse(fold.part['detailsKnown'])
+        self.assertFalse(fold.part['facts']['complete'])
+
     def test_reduction_keeps_order_corrections_and_authors_after_contributor_removal(self):
         entries = self.entries()
         store = ItemContributions()
@@ -100,6 +111,7 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual([(2, 0, {'commitRefs': [{'commit': 'corrected'}], 'id': 'correction'})],
                          part['corrections'])
         self.assertFalse(part['detailsKnown'])
+        self.assertTrue(part['attestsRead'])
         # Partial omission preserves the other author's timing and correction.
         store.replace_item('work', {'first': entries['first']}, complete=False)
         self.assertEqual(part['corrections'], reduced()['corrections'])

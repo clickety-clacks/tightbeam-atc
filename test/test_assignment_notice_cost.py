@@ -39,6 +39,21 @@ class AssignmentNoticeCostTest(unittest.TestCase):
         self.assertEqual([], unrelated, calls)
         self.assertFalse([call for call in calls if call[0] == 'membership'], calls)
 
+    def test_reduced_detail_pin_does_not_change_attest_source_eligibility(self):
+        gateway = ItemReads()
+        service = self.load(gateway)
+        closed = service.model.closed_items['work']
+        self.assertTrue(closed['attestsRead'])
+        # Compact reductions retain source facts but cannot regenerate the
+        # discarded detail text. That is not a source-skip transition.
+        closed['detailsKnown'] = False
+        gateway.calls.clear()
+        with patch.object(service, '_request_item_assignments') as item_read:
+            service._reconcile_item_attests(service.model.work_items()['work'])
+            item_read.assert_not_called()
+        self.assertEqual([], gateway.calls)
+        self.assertEqual(set(), service.model.item_assignment_pending)
+
     def test_new_and_held_close_preserve_released_facts_without_member_fanout(self):
         gateway = ItemReads()
         service = self.load(gateway)

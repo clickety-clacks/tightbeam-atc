@@ -884,7 +884,7 @@ class LiveService:
                 # certify activity delivered while that scope was omitted.
                 self._refresh("attests", row["id"])
         closed = self.model.closed_item(item["id"], owned)
-        if assignments.complete and closed is not None and closed["detailsKnown"] == skip:
+        if assignments.complete and closed is not None and closed["attestsRead"] == skip:
             # A change into or out of the existing summary-skip set changes
             # activity eligibility even when the published counts are equal.
             # Released closed identities need the item's complete read path.

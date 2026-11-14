@@ -96,6 +96,7 @@ class ClosedAssignmentFold:
             "corrections": [], "summary": summarize("attests", ()),
             "facts": None, "detailFingerprint": DetailFingerprint(),
             "assignmentFingerprint": DetailFingerprint(), "detailsKnown": True,
+            "attestsRead": True,
         }
 
     def add(self, row, inventory, *, order, position):
@@ -115,6 +116,10 @@ class ClosedAssignmentFold:
         """
         part = self.part
         part["detailsKnown"] = False
+        # Source eligibility survives raw-text disposal. A compact reduction
+        # cannot reconstruct the original detail pin, but that does not turn
+        # an already-read attest scope into a summary-skipped scope.
+        part["attestsRead"] &= contribution.evidence.observed_at is not None
         summary = contribution.attests
         facts = contribution.evidence.publication()
         order = contribution.order
