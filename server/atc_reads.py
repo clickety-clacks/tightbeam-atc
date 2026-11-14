@@ -123,21 +123,29 @@ class ItemAssignmentSource:
     # shared projection. This map is not installed in the live model.
     assignment_fingerprints: dict = field(default_factory=dict)
 
-    def preserve_assignments(self, model, protected):
+    def preserve_assignments(self, model, protected, *, arrivals=()):
         """Keep conflicted mutable projections while retaining staged attests.
 
         Call after complete snapshot replay and before atomic replacement.
+        Arrivals are already-applied creations absent from the snapshot; keep
+        their current contribution and existing observation, never a fabricated
+        snapshot count or raw closed assignment row.
         Validate every member before changing the stage. This method selects
         no winner, changes no live model, and retains no mutable notice history.
         """
         from atc_evidence import HistoryInventory
         from atc_model import ClosedAssignmentFold, latest_time
 
+        protected, arrivals = set(protected), set(arrivals)
+        if arrivals & self.contributions.keys():
+            raise ValueError('new-member preservation requires snapshot absence')
         changed, rows, inventories = {}, {}, {}
         assignments = model.inventory('assignments').rows
-        for aid in protected:
+        for aid in protected | arrivals:
             incoming = self.contributions.get(aid)
             current = model.item_contributions.entries.get(aid)
+            if aid in arrivals:
+                incoming = current
             if incoming is None or current is None or incoming.item != current.item:
                 raise ValueError('item conflict requires an established present contributor')
             if current.state not in {'open', 'closed'}:
@@ -150,7 +158,8 @@ class ItemAssignmentSource:
                 if row is None or row.get('state') != 'open' or row.get('workItemId') != current.item:
                     raise ValueError('open item conflict has no current open projection')
                 rows[aid] = deepcopy(row)
-                inventory = self.open_attests.get(aid)
+                inventory = (deepcopy(model.inventory('attests', aid)) if aid in arrivals
+                             else self.open_attests.get(aid))
                 if inventory is None:
                     # The complete snapshot folded this now-open member as
                     # closed. Restore its *new snapshot/replay* fold and actual
@@ -171,16 +180,22 @@ class ItemAssignmentSource:
         if not changed:
             return False
         wid = next(iter(changed.values())).item
-        if any(value.item != wid for value in self.contributions.values()):
+        combined = self.contributions | changed
+        if any(value.item != wid for value in combined.values()):
             raise ValueError('item conflict stage contains another item')
         # The fold below is a mixed projection, not a new raw-source hash.
         original = model.closed_items.get(wid) or self.closed
-        has_closed = any(changed.get(aid, value).state != 'open'
-                         for aid, value in self.contributions.items())
+        has_closed = any(value.state != 'open' for value in combined.values())
         if has_closed and original is None:
             raise ValueError('item conflict has no actual closed-source pin')
 
         self.contributions.update(changed)
+        if arrivals:
+            ordered = sorted(combined, key=lambda aid: (
+                combined[aid].opened_at is not None, combined[aid].opened_at or 0, aid), reverse=True)
+            self.contributions = {aid: combined[aid]._replace(order=index)
+                                  for index, aid in enumerate(ordered)}
+            self.absent_activity_winners.difference_update(arrivals)
         for aid, value in changed.items():
             if value.state == 'open':
                 self.open_rows[aid] = rows[aid]
@@ -194,6 +209,8 @@ class ItemAssignmentSource:
                 self.live_items[aid] = model.live_assignment_items[aid]
             else:
                 self.live_items.pop(aid, None)
+        if arrivals:
+            self.open_order = {aid: self.contributions[aid].order for aid in self.open_rows}
         self.open_rows = dict(sorted(self.open_rows.items(),
                                      key=lambda pair: self.open_order[pair[0]]))
         if has_closed:

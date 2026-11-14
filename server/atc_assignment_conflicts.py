@@ -30,18 +30,20 @@ class _NoticeState(NamedTuple):
 
 
 class AssignmentReadConflicts:
-    """One read attempt's close/reopen equality summary.
+    """One attempt's close/reopen equality and delivered creation identities.
 
     The caller serializes dispatch, queued/delivered notice admission and read
     application. There is one fixed tuple per affected assignment, not an event
     list. Two distinct projections suffice to prove that any single returned
     row conflicts with at least one notice; keeping only the latest would lose
-    that fact. Discard this attempt on success, failure or cancellation.
+    that fact. Creation identity protects only a current member missing from
+    the snapshot. Discard both maps on success, failure or cancellation.
     """
-    __slots__ = ('notices', 'closed')
+    __slots__ = ('notices', 'creations', 'closed')
 
     def __init__(self):
         self.notices = {}
+        self.creations = {}
         self.closed = False
 
     def observe(self, notice, *, delivery=0):
@@ -49,11 +51,18 @@ class AssignmentReadConflicts:
             return False
         row, refs = notice.get('payload') or {}, notice.get('refs') or {}
         if (notice.get('resource') != 'assignments' or notice.get('op') != 'upsert'
-                or notice.get('class') not in {'assignment.closed', 'assignment.reopened'}
+                or notice.get('class') not in {
+                    'assignment.opened', 'assignment.closed', 'assignment.reopened'}
                 or not ASSIGNMENT_FIELDS <= row.keys()
                 or row.get('id') is None or refs.get('assignmentId') != row['id']):
             return False
         aid = str(row['id'])
+        if notice['class'] == 'assignment.opened':
+            # Pinned assign/dispatch emit this only for creation, not their
+            # idempotent replay. Keep identity/delivery only for this attempt.
+            # This is not a version for subsequent close/reopen projections.
+            self.creations.setdefault(aid, delivery)
+            return True
         signature = assignment_projection_fingerprint(row)
         previous = self.notices.get(aid)
         if previous is None:
@@ -95,8 +104,21 @@ class AssignmentReadConflicts:
                 conflicts[aid] = notice.different_delivery
         return conflicts
 
+    def created_after_snapshot(self, present, current, *, consumed):
+        """Current delivered creations absent from this complete snapshot.
+
+        A queued, unapplied creation cannot supply a current contribution.
+        The caller handles it in feed order after result application. Ordinary
+        absent IDs without a creation in this attempt still follow removal.
+        """
+        if self.closed:
+            raise ValueError('assignment read attempt already disposed')
+        return {aid for aid, delivery in self.creations.items()
+                if delivery <= consumed and aid not in present and aid in current}
+
     def discard(self):
         self.notices.clear()
+        self.creations.clear()
         self.closed = True
 
 

@@ -613,7 +613,7 @@ class EvidenceModel:
         # folded, those rows are the contribution, not both them and its prior fold.
         return self.closed_items.get(wid) if not any(a.get("state") != "open" for a in owned) else None
 
-    def update_closed_assignment_contribution(self, row):
+    def update_closed_assignment_contribution(self, row, *, allow_pending=False):
         """Apply an ordered projection to a released, still-closed contributor.
 
         The caller owns source validation and read/notice ordering. A partial
@@ -627,7 +627,7 @@ class EvidenceModel:
             return False
         wid = previous.item
         assignments = self.inventory("assignments")
-        if (wid not in self.work_items() or wid in self.item_assignment_pending
+        if (wid not in self.work_items() or (wid in self.item_assignment_pending and not allow_pending)
                 or aid in assignments.rows or row.get("state") != "closed"
                 or row.get("workItemId") != wid
                 or any(value.get("workItemId") == wid and value.get("state") != "open"
@@ -741,7 +741,7 @@ class EvidenceModel:
         self.details_revision += 1
         return True
 
-    def apply_assignment_projection(self, row, *, at, source):
+    def apply_assignment_projection(self, row, *, at, source, allow_pending=False):
         """Merge an ordered current assignment without reading item membership.
 
         This is the model commit seam, not a payload validator or an ordering
@@ -749,7 +749,7 @@ class EvidenceModel:
         until their caller merges newer accepted projections into that result.
         """
         aid, wid = str(row["id"]), row.get("workItemId")
-        if (wid not in self.work_items() or wid in self.item_assignment_pending
+        if (wid not in self.work_items() or (wid in self.item_assignment_pending and not allow_pending)
                 or row.get("state") not in {"open", "closed"}):
             return None
         previous = self.item_contributions.entries.get(aid)
@@ -763,7 +763,8 @@ class EvidenceModel:
             # contributor never established in this item's current source.
             return None
         if aid not in assignments.rows and previous is not None and row["state"] == "closed":
-            return set() if self.update_closed_assignment_contribution(row) else None
+            return (set() if self.update_closed_assignment_contribution(
+                row, allow_pending=allow_pending) else None)
 
         old_closed = self.closed_items.get(wid)
         if previous is not None and aid not in assignments.rows:
@@ -798,6 +799,15 @@ class EvidenceModel:
         assignments.observations[aid] = dict(status="known", freshness="live",
             observedAt=at, source=source, complete=True)
         assignments.data_revision += 1
+        if wid in self.item_assignment_pending:
+            # An admitted live notice changes this one known projection; it
+            # does not certify membership or erase the incomplete-source hold.
+            # General source capture deliberately skips pending items.
+            if previous is not None:
+                self.item_contributions.entries[aid] = previous.assignment_update(incoming)
+            else:
+                self.item_contributions.entries[aid] = AssignmentContribution.capture(
+                    incoming, self.inventory('attests', aid), len(self.item_contributions.entries))
         self.capture_assignment_contributions(items={wid})
         # The existing collection and item-membership routes order assignments
         # by openedAt DESC,id DESC. A new member must enter that same order,
@@ -908,7 +918,7 @@ class EvidenceModel:
         staged.assignment_fingerprints.clear()
         return released
 
-    def accept_assignment_read_preserving(self, result, protected):
+    def accept_assignment_read_preserving(self, result, protected, *, arrivals=()):
         """Accept a complete collection without choosing conflicted row values.
 
         The service establishes R29 conflicts and retains actual publication.
@@ -920,13 +930,16 @@ class EvidenceModel:
         """
         if not result.complete:
             raise ValueError('assignment conflict replacement requires a complete read')
-        protected = set(protected)
-        if not protected:
+        protected, arrivals = set(protected), set(arrivals)
+        if not protected and not arrivals:
             return self.accept('assignments', None, result)
         assignments = self.inventory('assignments')
         incoming = {str(row['id']): row for row in result.rows}
         if not protected <= incoming.keys():
             raise ValueError('conflict comparison requires present assignment rows')
+        if arrivals & incoming.keys():
+            raise ValueError('new-member preservation requires snapshot absence')
+        protected |= arrivals
         current = self.item_contributions.entries
         if any(aid not in assignments.rows and aid not in current for aid in protected):
             raise ValueError('conflict has no established assignment projection')
@@ -946,12 +959,24 @@ class EvidenceModel:
         if released_closed != closed.keys():
             raise ValueError('released contributor has no current closed item fold')
         positions = {aid: index for index, aid in enumerate(incoming)}
+        if arrivals:
+            # The existing collection orders by openedAt DESC,id DESC. Insert
+            # only admitted creations into that order, without replaying a
+            # creation projection over an already-present mutable snapshot.
+            opening = {aid: row.get('openedAt') for aid, row in incoming.items()}
+            opening.update((aid, rows[aid].get('openedAt') if aid in rows
+                            else contributions[aid].opened_at) for aid in arrivals)
+            positions = {aid: index for index, aid in enumerate(sorted(opening,
+                key=lambda aid: (opening[aid] is not None, opening[aid] or 0, aid), reverse=True))}
 
         # Keep the original result intact for diagnostic/source identity. The
         # ordinary accept path may filter its own list for an R10 item hold.
         accepted = copy(result)
         accepted.rows = list(result.rows)
-        self.accept('assignments', None, accepted)
+        accepted.rows.extend(rows[aid] for aid in arrivals if aid in rows)
+        if arrivals:
+            accepted.rows.sort(key=lambda row: positions[str(row['id'])])
+        self.accept('assignments', None, accepted, assignment_preserved=arrivals)
         for aid in protected:
             if aid in rows:
                 assignments.rows[aid] = rows[aid]
@@ -985,11 +1010,11 @@ class EvidenceModel:
                     self.closed_items[wid] = part
         self._item_activity_parts.clear()
 
-    def accept(self, resource, scope, result, *, activity_eligible=True):
+    def accept(self, resource, scope, result, *, activity_eligible=True, assignment_preserved=()):
         inventory = self.inventory(resource, scope)
         held_closed = {}
         if resource == "assignments" and result.complete:
-            present = {str(row["id"]) for row in result.rows}
+            present = {str(row["id"]) for row in result.rows} | set(assignment_preserved)
             for aid, contribution in tuple(self.item_contributions.entries.items()):
                 if aid not in present and contribution.item not in self.item_assignment_pending:
                     del self.item_contributions.entries[aid]

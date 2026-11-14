@@ -130,3 +130,46 @@ class AssignmentConflictSourceTest(unittest.TestCase):
         self.assertEqual({}, current.closed_items)
         assert_publication_equal(self, reference.snapshot(1000), current.snapshot(1000),
                                  'r29-clean-empty-source')
+
+    def test_complete_snapshot_preserves_delivered_creation_open_or_already_closed(self):
+        for state in ('open', 'closed'):
+            with self.subTest(state=state):
+                current, reference = self.models()
+                incoming = deepcopy(list(reference.inventory('assignments').rows.values()))
+                new = dict(id='new', workItemId='work', holderKey='author', state='open',
+                           effectKind='code', openedAt=40, closedAt=None)
+                current.apply_assignment_projection(new, at=100, source='feed')
+                reference.detail('assignments', None, Read([new], True, 100, 'feed'))
+                attest = dict(id='new-attest', assignmentId='new', kind='progress',
+                              bySession='author', ts=500, commitRefs=[{'commit': 'new'}])
+                for model in (current, reference):
+                    model.accept('attests', 'new', Read([attest], True, 100, 'fixture'))
+                current.capture_assignment_contributions()
+                if state == 'closed':
+                    new.update(state='closed', closedAt=600)
+                    current.apply_assignment_projection(new, at=100, source='feed')
+                reference.accept('assignments', None,
+                    Read([deepcopy(new), *deepcopy(incoming)], True, 100, 'fixture'))
+                current.accept_assignment_read_preserving(
+                    Read(incoming, True, 100, 'fixture'), set(), arrivals={'new'})
+                for row in incoming:
+                    aid = row['id']
+                    current.inventories['attests', aid] = deepcopy(reference.inventory('attests', aid))
+                    current.summaries.pop(('attests', aid), None)
+                for model in (current, reference):
+                    model.fold_closed_assignments()
+                self.assertEqual(state, current.item_contributions.entries['new'].state)
+                self.assertEqual(1, current.item_contributions.entries['new'].attests.count)
+                self.assertEqual(0, current.item_contributions.entries['new'].order)
+                self.assertEqual({'first', 'open', 'last'}, {row['id'] for row in incoming})
+                assert_publication_equal(self, reference.snapshot(1000), current.snapshot(1000),
+                                         'r29-global-created-after-snapshot-' + state)
+
+    def test_creation_preservation_cannot_replace_a_present_or_unknown_member(self):
+        for incoming, arrivals in (([{'id': 'first'}], {'first'}), ([], {'unknown'})):
+            current, _ = self.models()
+            before = deepcopy(current.snapshot(1000))
+            with self.assertRaises(ValueError):
+                current.accept_assignment_read_preserving(
+                    Read(incoming, True, 100, 'fixture'), set(), arrivals=arrivals)
+            self.assertEqual(before, current.snapshot(1000))

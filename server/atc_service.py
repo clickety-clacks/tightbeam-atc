@@ -1320,6 +1320,10 @@ class LiveService:
             conflicts = (assignment_flight.conflict_fingerprints(
                 stage.assignment_fingerprints.items(), complete=True)
                 if assignment_flight is not None else {})
+            arrivals = (assignment_flight.created_after_snapshot(
+                stage.assignment_fingerprints, self.model.item_contributions.entries,
+                consumed=self.assignment_delivery_consumed)
+                if assignment_flight is not None else set())
             def replace(notices):
                 # Validate/replay before creating holds or changing live state.
                 # Closed membership rows have already been released; their
@@ -1327,7 +1331,7 @@ class LiveService:
                 # used for the equality comparison above.
                 try:
                     stage.replay_attests(notices)
-                    stage.preserve_assignments(self.model, conflicts)
+                    stage.preserve_assignments(self.model, conflicts, arrivals=arrivals)
                 except ValueError:
                     return None
                 self._hold_assignment_conflict_deliveries(
@@ -1535,7 +1539,9 @@ class LiveService:
             result.rows = []
         elif resource == "assignments" and key is None and result.complete:
             for wid in tuple(self.model.item_assignment_pending):
-                self._request_item_assignments(wid, changed=True)
+                # The item flight owns its complete snapshot/replay. A global
+                # completion must not restart it or erase its notice boundary.
+                self._request_item_assignments(wid)
         if (resource == "assignments" and key is not None and result.rows
                 and result.rows[0].get("workItemId") in self.model.item_assignment_pending):
             self._request_item_assignments(result.rows[0]["workItemId"])
@@ -1639,10 +1645,14 @@ class LiveService:
         elif resource == 'assignments' and key is None and result.complete:
             conflicts = (assignment_flight.conflict_deliveries(result.rows, complete=True)
                          if assignment_flight is not None else {})
+            arrivals = (assignment_flight.created_after_snapshot(
+                {str(row['id']) for row in result.rows}, self.model.item_contributions.entries,
+                consumed=self.assignment_delivery_consumed)
+                if assignment_flight is not None else set())
             # The model validates the protected current projections before
             # accepting unaffected rows/absence. Publication is still the last
             # committed frame throughout this model-worker operation.
-            self.model.accept_assignment_read_preserving(result, conflicts)
+            self.model.accept_assignment_read_preserving(result, conflicts, arrivals=arrivals)
             self._hold_assignment_conflict_deliveries(conflicts,
                 ((str(row['id']), row.get('workItemId')) for row in result.rows), at=now_ms())
             self._resolve_assignment_read_holds(conflicts,
@@ -1862,25 +1872,34 @@ class LiveService:
         if (notice.get("op") != "upsert" or not ASSIGNMENT_FIELDS <= payload.keys()
                 or str(payload["id"]) != str(key)
                 or notice.get("class") not in {
-                    "assignment.opened", "assignment.closed", "assignment.reopened"}
-                or not self.model.closed_sources_released or self.cycle):
+                    "assignment.opened", "assignment.closed", "assignment.reopened"}):
             return False
+        if (notice['class'] == 'assignment.opened'
+                and (str(key) in self.model.item_contributions.entries
+                     or str(key) in self.model.inventory('assignments').rows)):
+            # A delayed creation is not a reopening. The pinned source emits
+            # creation once and omits it on idempotent assign/dispatch replay;
+            # an already-loaded projection has observed that creation.
+            return True
         wid = payload["workItemId"]
-        # A mutable assignment's timestamp-derived version is not strict
-        # across reopening. This path applies ordered feed projections only
-        # when no assignment source result can overwrite them. A scoped
-        # attest result changes only attest facts on the current contribution,
-        # so it cannot roll back a close or reopen. Concurrent item replacement
-        # still uses its held publication path.
-        if (wid in self.model.item_assignment_pending
-                or ("assignments", None) in self.reads.active
-                or ("item-assignment-source", wid) in self.reads.active):
-            return False
+        # The dispatch registry compares concurrent mutable snapshots before
+        # replacement. Valid notices therefore need neither epoch changes nor
+        # item rereads, including while a failed source is waiting for retry.
         released = self.model.apply_assignment_projection(
-            payload, at=now_ms(), source="feed:" + notice["class"])
+            payload, at=now_ms(), source="feed:" + notice["class"], allow_pending=True)
         if released is None:
             return False
-        self._forget_scopes(released)
+        # Creation may already have scheduled this scope's first confirmation.
+        # Closing before it runs must not cancel the independently required
+        # read and strand an unknown compact contribution. Its existing scoped
+        # consumer applies to the now-closed member; no new read is added here.
+        confirming = {scope for scope in released
+            if scope[0] == 'attests'
+            and (current := self.model.item_contributions.entries.get(str(scope[1]))) is not None
+            and not current.evidence.complete
+            and (scope in self.reads.active
+                 or any(job[:2] == scope for job in self.reads.pending))}
+        self._forget_scopes(released - confirming)
         self.metrics["payloads"] += 1
         self._discover_assignment_sessions((payload,))
         self._discover_histories()

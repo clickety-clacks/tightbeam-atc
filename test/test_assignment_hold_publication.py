@@ -209,6 +209,127 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.assertFalse(self.service.reads.assignment_reads.flights)
         assert_replay_current(self, self.service, baseline, 'r29-repeat-conflict-failed-item')
 
+    def test_applied_close_during_item_read_is_retained_without_epoch_restart(self):
+        baseline = deepcopy(self.service.current)
+        event = self.queued_source('item-assignment-source')
+        job = event[1][0]
+        epoch = self.service.reads.epochs[job[:2]]
+        calls = list(self.gateway.calls)
+        self.clock.return_value = 6000
+        self.set_source_assignment(self.closed)
+        self.assertTrue(self.service.change(self.notice(self.closed)))
+        self.service._publish()
+        published_close = deepcopy(self.item(self.service.current))
+        self.assertEqual('closed', self.service.model.item_contributions.entries['open'].state)
+        self.assertEqual(epoch, self.service.reads.epochs[job[:2]])
+        self.assertFalse(self.service.reads.pending)
+        self.assertEqual(calls, self.gateway.calls)
+        self.service._handle(*event)
+        self.service._publish()
+        self.assert_retained(published_close, self.item(self.service.current), 6000)
+        self.assertIn('open', self.service.assignment_holds.assignments)
+        self.assertEqual(0, self.service.reads.epoch_discards)
+        self.set_source_assignment(self.opened)
+        self.service.change(self.notice(self.opened))
+        self.settle()
+        self.assertFalse(self.service.assignment_holds.assignments)
+        assert_publication_equal(self, self.fresh().current, self.service.current,
+                                 'r29-applied-close-during-item-read')
+        assert_replay_current(self, self.service, baseline, 'r29-applied-close-item-replay')
+
+    def test_applied_close_during_global_read_keeps_its_actual_publication(self):
+        baseline = deepcopy(self.service.current)
+        event = self.queued_source('assignments')
+        epoch = self.service.reads.epochs['assignments', None]
+        self.clock.return_value = 6000
+        self.set_source_assignment(self.closed)
+        self.service.change(self.notice(self.closed))
+        self.service._publish()
+        published_close = deepcopy(self.item(self.service.current))
+        self.assertEqual(epoch, self.service.reads.epochs['assignments', None])
+        self.assertFalse(self.service.reads.pending)
+        self.service._handle(*event)
+        self.settle()
+        self.assert_retained(published_close, self.item(self.service.current), 6000)
+        self.assertIn('open', self.service.assignment_holds.assignments)
+        self.assertEqual('closed', self.service.model.item_contributions.entries['open'].state)
+        self.assertEqual(0, self.service.reads.epoch_discards)
+        clean = self.queued_source('assignments')
+        self.service._handle(*clean)
+        self.settle()
+        assert_publication_equal(self, self.fresh().current, self.service.current,
+                                 'r29-applied-close-during-global-read')
+        assert_replay_current(self, self.service, baseline, 'r29-applied-close-global-replay')
+
+    def test_delayed_creation_cannot_reopen_a_loaded_closed_projection(self):
+        self.service.change(self.notice(self.closed))
+        self.service._publish()
+        baseline = deepcopy(self.service.current)
+        contribution = self.service.model.item_contributions.entries['open']
+        revision = self.service.model.details_revision
+        calls = list(self.gateway.calls)
+        notice = self.notice(self.opened)
+        notice['class'] = 'assignment.opened'
+        self.assertTrue(self.service.change(notice))
+        self.service._publish()
+        self.assertEqual(contribution, self.service.model.item_contributions.entries['open'])
+        self.assertEqual(revision, self.service.model.details_revision)
+        self.assertEqual(calls, self.gateway.calls)
+        self.assertFalse(self.service.reads.pending)
+        assert_publication_equal(self, baseline, self.service.current, 'r29-delayed-creation')
+
+    def test_new_member_and_close_during_item_read_keep_existing_scoped_confirmation(self):
+        baseline = deepcopy(self.service.current)
+        event = self.queued_source('item-assignment-source')
+        epoch = self.service.reads.epochs['item-assignment-source', 'work']
+        new = dict(self.opened, id='new', effectKind='code', reviewsAssignmentId=None,
+                   openedAt=40, closedAt=None, state='open')
+        self.gateway.rows['assignments', None].insert(0, deepcopy(new))
+        self.gateway.rows['attests', 'new'] = []
+        notice = self.notice(new)
+        notice['class'] = 'assignment.opened'
+        self.service.change(notice)
+        scoped = ('attests', 'new', None)
+        self.assertIn(scoped, self.service.reads.pending)
+        close = dict(new, state='closed', closedAt=5000, outcome='completed')
+        self.set_source_assignment(close)
+        self.service.change(self.notice(close))
+        self.assertIn(scoped, self.service.reads.pending)
+        self.assertEqual('closed', self.service.model.item_contributions.entries['new'].state)
+        self.assertEqual(epoch, self.service.reads.epochs['item-assignment-source', 'work'])
+        self.service._handle(*event)
+        self.assertIn('new', self.service.model.item_contributions.entries)
+        self.settle()
+        self.assertTrue(self.service.model.item_contributions.entries['new'].evidence.complete)
+        self.assertEqual(1, sum(call[0] == 'membership' for call in self.gateway.calls))
+        self.assertEqual(1, sum(call == ('read', 'attests', 'new') for call in self.gateway.calls))
+        self.assertEqual(0, self.service.reads.epoch_discards)
+        assert_publication_equal(self, self.fresh().current, self.service.current,
+                                 'r29-created-closed-during-item-read')
+        assert_replay_current(self, self.service, baseline, 'r29-created-closed-item-replay')
+
+    def test_global_completion_neither_restarts_item_read_nor_resolves_its_held_scope(self):
+        flight = AssignmentReadConflicts()
+        flight.observe(self.notice(self.closed), delivery=1)
+        self.service._hold_assignment_conflicts([self.opened], flight, complete=True, at=1000)
+        item_event = self.queued_source('item-assignment-source')
+        epoch = self.service.reads.epochs['item-assignment-source', 'work']
+        # The first worker has finished, but its item result is still queued
+        # for application. Admit another dispatch without consuming that result.
+        self.service.reads.workers = 2
+        global_event = self.queued_source('assignments')
+        self.service._handle(*global_event)
+        self.assertEqual(epoch, self.service.reads.epochs['item-assignment-source', 'work'])
+        self.assertIn('open', self.service.assignment_holds.assignments)
+        self.assertNotIn(('item-assignment-source', 'work', None), self.service.reads.pending)
+        self.service._handle(*item_event)
+        self.settle()
+        self.assertFalse(self.service.assignment_holds.assignments)
+        self.assertEqual(0, self.service.reads.epoch_discards)
+        self.assertEqual(1, sum(call[0] == 'membership' for call in self.gateway.calls))
+        assert_publication_equal(self, self.fresh().current, self.service.current,
+                                 'r29-global-completion-with-pending-item')
+
     def test_hold_shares_actual_last_publication_without_changing_other_collections(self):
         before_close = deepcopy(self.service.current)
         self.clock.return_value = 6000

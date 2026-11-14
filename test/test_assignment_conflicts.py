@@ -73,8 +73,25 @@ class AssignmentConflictsTest(unittest.TestCase):
         self.assertFalse(flight.observe(missing))
         opened = self.notice(self.row())
         opened['class'] = 'assignment.opened'
-        self.assertFalse(flight.observe(opened))
+        self.assertTrue(flight.observe(opened))
         self.assertEqual({}, flight.notices)
+        self.assertEqual({'a': 0}, flight.creations)
+
+    def test_only_consumed_creations_missing_from_snapshot_protect_current_members(self):
+        flight = AssignmentReadConflicts()
+        for identity, delivery in (('new', 3), ('in-snapshot', 4), ('queued', 5)):
+            notice = self.notice(self.row(id=identity))
+            notice['class'] = 'assignment.opened'
+            flight.observe(notice, delivery=delivery)
+        current = {'new', 'in-snapshot', 'queued', 'old-absent'}
+        self.assertEqual({'new'}, flight.created_after_snapshot(
+            {'in-snapshot'}, current, consumed=4))
+        self.assertEqual(set(), flight.conflicting_rows([self.row(id='in-snapshot')], complete=True))
+        self.assertEqual(set(), flight.created_after_snapshot(set(), set(), consumed=9))
+        flight.discard()
+        self.assertEqual({}, flight.creations)
+        with self.assertRaises(ValueError):
+            flight.created_after_snapshot(set(), current, consumed=9)
 
     def test_hold_uses_last_publication_and_resolves_assignments_individually(self):
         holds = AssignmentHolds()
