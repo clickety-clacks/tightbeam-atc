@@ -16,7 +16,7 @@ from atc_payloads import ASSIGNMENT_FIELDS
 _SHARED_FIELDS = tuple(sorted(ASSIGNMENT_FIELDS - {'derivedStatus', 'rowVersion'}))
 
 
-def _projection(row):
+def assignment_projection_fingerprint(row):
     values = [row.get(key) for key in _SHARED_FIELDS]
     return hashlib.sha256(json.dumps(values, sort_keys=True,
                                     separators=(',', ':')).encode('utf-8')).digest()
@@ -54,7 +54,7 @@ class AssignmentReadConflicts:
                 or row.get('id') is None or refs.get('assignmentId') != row['id']):
             return False
         aid = str(row['id'])
-        signature = _projection(row)
+        signature = assignment_projection_fingerprint(row)
         previous = self.notices.get(aid)
         if previous is None:
             self.notices[aid] = _NoticeState(row['workItemId'], signature, delivery)
@@ -74,17 +74,22 @@ class AssignmentReadConflicts:
 
     def conflict_deliveries(self, rows, *, complete):
         """Identify the first conflicting local delivery, not a source version."""
+        return self.conflict_fingerprints(
+            ((str(row['id']), assignment_projection_fingerprint(row)) for row in rows),
+            complete=complete)
+
+    def conflict_fingerprints(self, fingerprints, *, complete):
+        """Compare actual read projections after closed raw rows are discarded."""
         if self.closed:
             raise ValueError('assignment read attempt already disposed')
         if not complete:
             return None
         conflicts = {}
-        for row in rows:
-            aid = str(row['id'])
+        for aid, signature in fingerprints:
             notice = self.notices.get(aid)
             if notice is None:
                 continue
-            if notice.first_projection != _projection(row):
+            if notice.first_projection != signature:
                 conflicts[aid] = notice.first_delivery
             elif notice.different_delivery is not None:
                 conflicts[aid] = notice.different_delivery

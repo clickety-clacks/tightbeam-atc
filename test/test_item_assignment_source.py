@@ -15,6 +15,8 @@ from atc_upstream import Gateway, Read
 from atc_summary import ItemActivityFold
 from test_closed_folding import ClosedAssignmentFoldTest
 from atc_contributions import AttestFrontier
+from atc_assignment_conflicts import AssignmentReadConflicts, assignment_projection_fingerprint
+from atc_payloads import ASSIGNMENT_FIELDS
 from publication_assertions import assert_publication_equal, assert_replay_current
 
 
@@ -202,6 +204,99 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         self.assertTrue(result.complete)
         self.assertIsNone(result.folded.closed)
         self.assertEqual({}, result.folded.open_rows)
+
+    def test_closed_read_projection_can_be_compared_without_retaining_its_row(self):
+        result = self.result()
+        self.assertTrue(result.complete, result.error)
+        stage = result.folded
+        self.assertNotIn('first', stage.open_rows)
+        self.assertEqual({'first', 'open', 'last'}, set(stage.assignment_fingerprints))
+        row = dict.fromkeys(ASSIGNMENT_FIELDS) | deepcopy(self.assignments[0])
+        self.assertEqual(assignment_projection_fingerprint(row), stage.assignment_fingerprints['first'])
+        flight = AssignmentReadConflicts()
+        row.update(state='open', closedAt=None)
+        flight.observe(dict(resource='assignments', op='upsert',
+            refs={'assignmentId': 'first'}, payload=row, **{'class': 'assignment.reopened'}),
+            delivery=12)
+        calls = list(self.calls)
+        self.assertEqual({'first': 12}, flight.conflict_fingerprints(
+            stage.assignment_fingerprints.items(), complete=True))
+        self.assertIsNone(flight.conflict_fingerprints(
+            stage.assignment_fingerprints.items(), complete=False))
+        self.assertEqual(calls, self.calls)
+        self.assertTrue(all(isinstance(value, bytes) and len(value) == 32
+                            for value in stage.assignment_fingerprints.values()))
+        self.model.hold_item_assignments('work')
+        self.model.replace_item_assignments('work', result)
+        self.assertEqual({}, stage.assignment_fingerprints)
+        self.assertFalse(hasattr(self.model, 'assignment_fingerprints'))
+
+    def test_conflicted_item_projection_keeps_new_attests_and_full_publication(self):
+        # A held closed projection can conflict with a reopened snapshot, and
+        # a held open projection can conflict with a closed snapshot. Neither
+        # conflict authorizes discarding the independent complete attest read.
+        for aid in ('first', 'open'):
+            with self.subTest(assignment=aid):
+                original_rows = deepcopy(self.assignments)
+                original_attests = deepcopy(self.attests)
+                current = deepcopy(self.model)
+                current.fold_closed_assignments()
+                old = current.item_contributions.entries[aid]
+                row = next(row for row in self.assignments if row['id'] == aid)
+                row.update(state='open' if old.state == 'closed' else 'closed',
+                           closedAt=None if old.state == 'closed' else 500)
+                snapshot = self.result()
+                self.assertTrue(snapshot.complete, snapshot.error)
+                read_pin = snapshot.folded.contributions[aid].detail_fingerprint
+                notice = dict(id='new-' + aid, assignmentId=aid, kind='progress',
+                              ts=600, bySession='other', commitRefs=[{'commit': 'new-' + aid}])
+                snapshot.folded.replay_attests({aid: [notice]})
+                read_attests = snapshot.folded.contributions[aid].attests
+                before_live = deepcopy(current.snapshot(1000))
+                calls = list(self.calls)
+                self.assertTrue(snapshot.folded.preserve_assignments(current, {aid}))
+                self.assertEqual(calls, self.calls)
+                self.assertEqual(before_live, current.snapshot(1000))
+                protected = snapshot.folded.contributions[aid]
+                self.assertEqual(old.state, protected.state)
+                self.assertEqual(old.closed_at, protected.closed_at)
+                self.assertEqual(old.corrections, protected.corrections)
+                self.assertEqual(read_attests, protected.attests)
+                self.assertEqual(read_pin, protected.detail_fingerprint)
+                self.assertEqual(2, protected.attests.count)
+                self.assertEqual(600, snapshot.folded.session_activity['other'])
+                if old.state == 'open':
+                    self.assertEqual(read_pin, snapshot.folded.open_attests[aid].fingerprint)
+                    self.assertEqual(read_attests.summary(), snapshot.folded.open_attests[aid].folded)
+                else:
+                    self.assertNotIn(aid, snapshot.folded.open_rows)
+                    self.assertNotIn(aid, snapshot.folded.open_attests)
+                self.assertFalse(snapshot.folded.closed['detailsKnown'])
+
+                # Expected mixed source uses the established mutable projection
+                # and the actual new immutable attest. This is not an upstream
+                # fresh-equality claim while R29's publication hold is active.
+                self.assignments = original_rows
+                self.attests[aid].append(notice)
+                expected = self.result()
+                self.assertTrue(expected.complete, expected.error)
+                self.assert_staged_replay_publication(snapshot, expected,
+                                                     'r29-item-preserved-' + aid)
+                self.attests = original_attests
+
+    def test_invalid_protected_member_leaves_entire_item_stage_and_model_unchanged(self):
+        result = self.result()
+        self.assertTrue(result.complete, result.error)
+        self.model.fold_closed_assignments()
+        stage = result.folded
+        before_stage = deepcopy(stage)
+        before_live = deepcopy(self.model.snapshot(1000))
+        with self.assertRaisesRegex(ValueError, 'established present contributor'):
+            stage.preserve_assignments(self.model, ['first', 'missing'])
+        self.assertEqual(before_stage, stage)
+        self.assertEqual(before_live, self.model.snapshot(1000))
+        self.assertFalse(stage.preserve_assignments(self.model, set()))
+        self.assertEqual(before_stage, stage)
 
     def test_replayed_stage_matches_fresh_open_closed_corrections_and_authors(self):
         snapshot = self.result()

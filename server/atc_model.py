@@ -903,6 +903,9 @@ class EvidenceModel:
         self.closed_revision += 1
         self.details_revision += 1
         self._item_activity_parts.clear()
+        # Read/feed comparison precedes this atomic commit. No complete-read
+        # assignment projection fingerprints become a live history cache.
+        staged.assignment_fingerprints.clear()
         return released
 
     def accept_assignment_read_preserving(self, result, protected):

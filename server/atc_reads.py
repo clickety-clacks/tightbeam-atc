@@ -9,7 +9,7 @@ import time
 
 from atc_upstream import Read, now_ms
 from atc_contributions import AssignmentContribution, AttestContribution
-from atc_assignment_conflicts import AssignmentReadRegistry
+from atc_assignment_conflicts import AssignmentReadRegistry, assignment_projection_fingerprint
 
 
 def replay_attest_read(result, notices):
@@ -118,6 +118,98 @@ class ItemAssignmentSource:
     session_evidence: dict = field(default_factory=dict)
     absent_activity_winners: set = field(default_factory=set)
     contributions: dict = field(default_factory=dict)
+    # Transient complete-read equality only. Closed source rows are discarded
+    # before result delivery; compact published fields cannot reconstruct their
+    # shared projection. This map is not installed in the live model.
+    assignment_fingerprints: dict = field(default_factory=dict)
+
+    def preserve_assignments(self, model, protected):
+        """Keep conflicted mutable projections while retaining staged attests.
+
+        Call after complete snapshot replay and before atomic replacement.
+        Validate every member before changing the stage. This method selects
+        no winner, changes no live model, and retains no mutable notice history.
+        """
+        from atc_evidence import HistoryInventory
+        from atc_model import ClosedAssignmentFold, latest_time
+
+        changed, rows, inventories = {}, {}, {}
+        assignments = model.inventory('assignments').rows
+        for aid in protected:
+            incoming = self.contributions.get(aid)
+            current = model.item_contributions.entries.get(aid)
+            if incoming is None or current is None or incoming.item != current.item:
+                raise ValueError('item conflict requires an established present contributor')
+            if current.state not in {'open', 'closed'}:
+                raise ValueError('item conflict has no supported current assignment state')
+            changed[aid] = current._replace(order=incoming.order,
+                attests=incoming.attests, evidence=incoming.evidence,
+                detail_fingerprint=incoming.detail_fingerprint)
+            if current.state == 'open':
+                row = assignments.get(aid)
+                if row is None or row.get('state') != 'open' or row.get('workItemId') != current.item:
+                    raise ValueError('open item conflict has no current open projection')
+                rows[aid] = deepcopy(row)
+                inventory = self.open_attests.get(aid)
+                if inventory is None:
+                    # The complete snapshot folded this now-open member as
+                    # closed. Restore its *new snapshot/replay* fold and actual
+                    # attest pin, not the older warm count or discarded rows.
+                    inventory = HistoryInventory('attests')
+                    inventory.folded = incoming.attests.summary()
+                    inventory.attest_frontier = incoming.attests.frontier
+                    inventory.fingerprint = incoming.detail_fingerprint
+                    facts = incoming.evidence.publication()
+                    inventory.complete = facts['complete']
+                    inventory.stale = facts['freshness'] == 'stale'
+                    inventory.observed_at = facts['observedAt']
+                    inventory.confirmed_at = facts['observedAt'] if facts['complete'] else None
+                    inventory.unconfirmed_since = facts.get('unconfirmedSince')
+                    inventory.source = facts['source']
+                    inventory.data_revision += 1
+                inventories[aid] = inventory
+        if not changed:
+            return False
+        wid = next(iter(changed.values())).item
+        if any(value.item != wid for value in self.contributions.values()):
+            raise ValueError('item conflict stage contains another item')
+        # The fold below is a mixed projection, not a new raw-source hash.
+        original = model.closed_items.get(wid) or self.closed
+        has_closed = any(changed.get(aid, value).state != 'open'
+                         for aid, value in self.contributions.items())
+        if has_closed and original is None:
+            raise ValueError('item conflict has no actual closed-source pin')
+
+        self.contributions.update(changed)
+        for aid, value in changed.items():
+            if value.state == 'open':
+                self.open_rows[aid] = rows[aid]
+                self.open_attests[aid] = inventories[aid]
+                self.open_order[aid] = value.order
+            else:
+                self.open_rows.pop(aid, None)
+                self.open_attests.pop(aid, None)
+                self.open_order.pop(aid, None)
+            if aid in model.live_assignment_items:
+                self.live_items[aid] = model.live_assignment_items[aid]
+            else:
+                self.live_items.pop(aid, None)
+        self.open_rows = dict(sorted(self.open_rows.items(),
+                                     key=lambda pair: self.open_order[pair[0]]))
+        if has_closed:
+            fold = ClosedAssignmentFold()
+            for value in self.contributions.values():
+                if value.state != 'open':
+                    fold.add_contribution(value)
+            closed = fold.finish()
+            closed['detailFingerprint'] = original['detailFingerprint']
+            closed['assignmentFingerprint'] = original['assignmentFingerprint']
+            closed['turnActivity'] = original['turnActivity']
+            closed['activity'] = latest_time(closed['activity'], original['turnActivity'])
+            self.closed = closed
+        else:
+            self.closed = None
+        return True
 
     def replay_attests(self, notices):
         """Prepare a complete item stage for atomic replacement plus replay.
@@ -316,6 +408,7 @@ class ReadQueue:
             # shared fields must still describe the same membership revision.
             if any(row.get(key) != value for key, value in member.items() if key != "files"):
                 return Read([], False, detail.at, source, "assignment-source-changed")
+            staged.assignment_fingerprints[str(aid)] = assignment_projection_fingerprint(member)
             row = member
             holder = row.get("holderKey")
             if visible is not None and holder and holder not in visible:
