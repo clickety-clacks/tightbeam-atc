@@ -118,3 +118,51 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertTrue(recovered.evidence.complete)
         self.assertEqual('live', recovered.evidence.freshness)
         self.assertEqual(1300, recovered.evidence.observed_at)
+
+    def test_complete_membership_reorders_existing_open_and_closed_contributions(self):
+        model = ClosedAssignmentFoldTest().model()
+        original_rows = list(model.inventory('assignments').rows.values())
+        model.fold_closed_assignments()
+        model.capture_assignment_contributions()
+        self.assertEqual(1, model.item_contributions.entries['open'].order)
+        inserted = dict(id='new-first', workItemId='work', holderKey='author',
+                        state='open', effectKind='code', openedAt=200)
+        # The complete source is authoritative for order; the former open-row
+        # position cannot survive insertion of a preceding assignment.
+        model.accept('assignments', None,
+                     Read([inserted, *original_rows], True, 1100, 'membership'))
+        model.capture_assignment_contributions()
+        self.assertEqual({'new-first': 0, 'first': 1, 'open': 2, 'last': 3},
+                         {key: value.order for key, value in
+                          model.item_contributions.entries.items()})
+
+    def test_partial_membership_and_released_subset_do_not_renumber_contributors(self):
+        model = ClosedAssignmentFoldTest().model()
+        last = model.inventory('assignments').rows['last']
+        model.fold_closed_assignments()
+        prior = {key: value.order for key, value in model.item_contributions.entries.items()}
+        model.capture_assignment_contributions()
+        self.assertEqual(prior, {key: value.order for key, value in
+                                model.item_contributions.entries.items()})
+        model.accept('assignments', None, Read([last], False, 1100, 'partial'))
+        model.capture_assignment_contributions()
+        self.assertEqual(prior, {key: value.order for key, value in
+                                model.item_contributions.entries.items()})
+
+    def test_published_older_item_keeps_contributors_until_complete_item_exit(self):
+        model = ClosedAssignmentFoldTest().model()
+        item = dict(model.work_items()['work'], state='closed')
+        model.accept('work-items', None, Read([item], True, 1100, 'complete'))
+        model.fold_closed_assignments()
+        prior = dict(model.item_contributions.entries)
+        before = model.snapshot(1200)
+        model.fold_older_work_items()
+        self.assertNotIn('work', model.inventory('work-items').rows)
+        model.release_auxiliary_sources()
+        self.assertEqual(prior, model.item_contributions.entries)
+        self.assertEqual(before, model.snapshot(1200))
+        model.accept('work-items', None, Read([], False, 1300, 'partial'))
+        model.release_auxiliary_sources()
+        self.assertEqual(prior, model.item_contributions.entries)
+        model.accept('work-items', None, Read([], True, 1400, 'complete'))
+        self.assertEqual({}, model.item_contributions.entries)

@@ -474,15 +474,21 @@ class EvidenceModel:
         """Capture current facts before releasing their construction rows."""
         published = self.work_items()
         self.item_contributions.retain_items(published)
-        for index, (aid, row) in enumerate(self.inventory("assignments").rows.items()):
+        assignments = self.inventory("assignments")
+        full_order = assignments.complete and not self.closed_sources_released
+        for index, (aid, row) in enumerate(assignments.rows.items()):
             wid = row.get("workItemId")
             if (wid not in published or wid in self.item_assignment_pending
                     or (items is not None and wid not in items)):
                 continue
-            order = self.open_assignment_order.get(aid, index)
+            previous = self.item_contributions.entries.get(aid)
+            # A complete source walk supplies the new order, including inserted
+            # members. A released/partial inventory is only a subset and must
+            # not renumber the remaining contributors around its missing rows.
+            order = (index if full_order else previous.order if previous is not None
+                     else self.open_assignment_order.get(aid, index))
             inventory = self.inventory("attests", aid)
             contribution = AssignmentContribution.capture(row, inventory, order)
-            previous = self.item_contributions.entries.get(aid)
             if previous is not None and not inventory.complete:
                 # Reading assignment membership alone does not replace its
                 # released attest contribution. An incomplete attest response
