@@ -84,7 +84,26 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         index = next(i for i, value in enumerate(rows) if value['id'] == row['id'])
         rows[index] = deepcopy(row)
 
-    def first_discovery(self, resource, *, unpublished):
+    def assert_first_discovery_hold(self, baseline, wid, unpublished, label):
+        expected = deepcopy(self.fresh().current)
+        if unpublished:
+            expected['items'] = [item for item in expected['items'] if item['id'] != wid]
+            self.assertIsNone(self.service.assignment_holds.items[wid])
+        else:
+            retained = deepcopy(self.item(baseline, wid))
+            since = self.service.assignment_holds.since(wid)
+            for fact in retained['evidence'].values():
+                if fact['freshness'] != 'stale':
+                    fact['freshness'] = 'unconfirmed'
+                prior = fact.get('unconfirmedSince')
+                fact['unconfirmedSince'] = since if prior is None else min(prior, since)
+            expected['items'] = [retained if item['id'] == wid else item
+                                 for item in expected['items']]
+        # R30 permits only the named item's publication/absence. In
+        # particular do not omit agents, links, board health or other items.
+        assert_publication_equal(self, expected, self.service.current, label)
+
+    def first_discovery(self, resource, *, unpublished, resolution='notice'):
         baseline = deepcopy(self.service.current)
         wid = 'discovered-item' if unpublished else 'work'
         if unpublished:
@@ -109,8 +128,12 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         # Both source-consistent histories can expose an open read and a
         # queued close. A following reopen is already queued, but is not a
         # resolver until it is consumed after the hold is established.
-        self.service._queue_feed_change(self.notice(dict(row, state='closed', closedAt=95)))
-        self.service._queue_feed_change(self.notice(row))
+        closed = dict(row, state='closed', closedAt=95)
+        self.service._queue_feed_change(self.notice(closed))
+        if resolution == 'notice':
+            self.service._queue_feed_change(self.notice(row))
+        else:
+            self.set_source_assignment(closed)
         self.service._handle(*event)
         self.service._publish()
         self.assertIn('discovered', self.service.assignment_holds.assignments)
@@ -127,16 +150,30 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.service._publish()
         self.assertIn('discovered', self.service.assignment_holds.assignments)
         self.assertEqual(calls, self.gateway.calls)
-        label = 'r30-first-' + resource + ('-absent' if unpublished else '-published')
+        label = 'r30-' + self._testMethodName
         assert_replay_current(self, self.service, baseline, label + '-held-replay')
 
-        self.service._handle(*self.service.events.get(timeout=5))
+        if resolution == 'notice':
+            self.service._handle(*self.service.events.get(timeout=5))
+        else:
+            # Finish ordinary discovery already scheduled by the global
+            # source. Feed drain and completion of attest reads do not resolve
+            # a mutable assignment hold.
+            self.settle()
+            self.assertIn('discovered', self.service.assignment_holds.assignments)
+            self.assert_first_discovery_hold(baseline, wid, unpublished, label + '-full-held')
+            if resolution == 'held':
+                return baseline, row, wid, label
+            self.assertEqual('clean', resolution)
+            clean = self.queued_source(resource, wid)
+            self.service._handle(*clean)
         self.assertNotIn('discovered', self.service.assignment_holds.assignments)
         self.settle()
         self.assertIn(wid, {item['id'] for item in self.service.current['items']})
-        self.assertEqual(1 if resource == 'item-assignment-source' else 0,
+        attempts = 1 if resolution == 'notice' else 2
+        self.assertEqual(attempts if resource == 'item-assignment-source' else 0,
                          sum(call[0] == 'membership' for call in self.gateway.calls))
-        self.assertEqual(1 if resource == 'assignments' else 0,
+        self.assertEqual(attempts if resource == 'assignments' else 0,
                          self.gateway.calls.count(('read', 'assignments', None)))
         self.assertEqual(0, self.service.reads.epoch_discards)
         assert_publication_equal(self, self.fresh().current, self.service.current, label)
@@ -153,6 +190,93 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
 
     def test_item_first_discovery_holds_prior_absence(self):
         self.first_discovery('item-assignment-source', unpublished=True)
+
+    def test_global_first_discovery_clean_read_resolves_published_item(self):
+        self.first_discovery('assignments', unpublished=False, resolution='clean')
+
+    def test_item_first_discovery_clean_read_resolves_published_item(self):
+        self.first_discovery('item-assignment-source', unpublished=False, resolution='clean')
+
+    def test_global_first_discovery_clean_read_resolves_prior_absence(self):
+        self.first_discovery('assignments', unpublished=True, resolution='clean')
+
+    def test_item_first_discovery_clean_read_resolves_prior_absence(self):
+        self.first_discovery('item-assignment-source', unpublished=True, resolution='clean')
+
+    def first_discovery_repeat_and_retry(self, resource, *, unpublished):
+        baseline, opened, wid, label = self.first_discovery(
+            resource, unpublished=unpublished, resolution='held')
+        original = deepcopy(self.service.assignment_holds.items[wid])
+        repeat = self.queued_source(resource, wid)
+        self.service._queue_feed_change(self.notice(opened))
+        self.service._handle(*repeat)
+        self.service._handle(*self.service.events.get(timeout=5))
+        self.settle()
+        self.assertEqual(original, self.service.assignment_holds.items[wid])
+        self.assert_first_discovery_hold(baseline, wid, unpublished, label + '-repeat')
+        if resource == 'assignments':
+            self.gateway.subset = set()
+            self.service._refresh('assignments')
+            job = ('assignments', None, None)
+        else:
+            self.gateway.fail_member = 'discovered'
+            self.service._request_item_assignments(wid)
+            job = ('item-assignment-source', wid, None)
+        self.service.reads.pump()
+        failed = self.service.events.get(timeout=5)
+        self.assertEqual(job, failed[1][0])
+        self.assertFalse(failed[1][2].complete)
+        self.service._handle(*failed)
+        self.service._publish()
+        self.assertEqual(original, self.service.assignment_holds.items[wid])
+        self.assertIn('discovered', self.service.assignment_holds.assignments)
+        self.assertIn(job, self.service.read_retries)
+        if unpublished:
+            self.assertNotIn(wid, {item['id'] for item in self.service.current['items']})
+        else:
+            self.assert_retained(self.item(baseline, wid), self.item(self.service.current, wid), 1000)
+        assert_replay_current(self, self.service, baseline, label + '-failed')
+
+        self.gateway.subset = None
+        self.gateway.fail_member = None
+        _deadline, priority = self.service.read_retries[job]
+        self.service.read_retries[job] = (0, priority)
+        self.service._retry_incomplete_reads()
+        self.settle()
+        self.assertFalse(self.service.assignment_holds.assignments)
+        self.assertFalse(self.service.assignment_holds.items)
+        self.assertNotIn(job, self.service.read_retries)
+        self.assertEqual(0, self.service.reads.epoch_discards)
+        self.assertEqual(4 if resource == 'item-assignment-source' else 0,
+                         sum(call[0] == 'membership' for call in self.gateway.calls))
+        self.assertEqual(4 if resource == 'assignments' else 0,
+                         self.gateway.calls.count(('read', 'assignments', None)))
+        assert_publication_equal(self, self.fresh().current, self.service.current, label + '-retry')
+        assert_replay_current(self, self.service, baseline, label + '-retry-replay')
+
+    def test_global_first_discovery_repeat_partial_and_retry_published(self):
+        self.first_discovery_repeat_and_retry('assignments', unpublished=False)
+
+    def test_global_first_discovery_repeat_partial_and_retry_absent(self):
+        self.first_discovery_repeat_and_retry('assignments', unpublished=True)
+
+    def test_item_first_discovery_repeat_failure_and_retry_published(self):
+        self.first_discovery_repeat_and_retry('item-assignment-source', unpublished=False)
+
+    def test_item_first_discovery_repeat_failure_and_retry_absent(self):
+        self.first_discovery_repeat_and_retry('item-assignment-source', unpublished=True)
+
+    def test_restart_releases_first_discovery_absence_through_fresh_load(self):
+        baseline, _row, wid, label = self.first_discovery(
+            'item-assignment-source', unpublished=True, resolution='held')
+        self.service.stop()
+        restarted = self.fresh()
+        self.assertEqual({}, restarted.assignment_holds.assignments)
+        self.assertEqual({}, restarted.assignment_holds.items)
+        self.assertEqual(1, sum(item['id'] == wid for item in restarted.current['items']))
+        self.assertEqual(self.item(baseline, 'unaffected-item'),
+                         self.item(restarted.current, 'unaffected-item'))
+        assert_publication_equal(self, self.fresh().current, restarted.current, label + '-restart')
 
     def test_item_queued_establisher_is_not_applied_and_clean_source_resolves(self):
         baseline = deepcopy(self.service.current)
