@@ -3,6 +3,7 @@
 from collections import Counter, defaultdict
 from copy import deepcopy
 from math import isfinite
+from urllib.parse import quote
 import hashlib
 import json
 from atc_summary import summarize, recent_marks, HistoryFold, HISTORY_KEYS, DetailFingerprint
@@ -97,6 +98,7 @@ class EvidenceModel:
         self._item_activity = {}
         self.retired_item_activity = {}
         self.session_activity = {}
+        self.session_activity_evidence = {}
         self.retired_activity_revision = 0
         self.closed_items = {}
         self.closed_revision = 0
@@ -109,6 +111,45 @@ class EvidenceModel:
         self.older_items = {}
         self._work_item_order = []
         self.older_item_sources_released = False
+
+    def fold_session_activity(self, session, timestamp, kind, scope, facts):
+        """Fold one eligible contribution; eligibility belongs to the caller.
+
+        Keep only a maximum and its compact evidence, never losing routes or
+        contributor identities. Scope removal and confirmation are separate
+        from receiving a positive activity fact.
+        """
+        timestamp = latest_time(timestamp)
+        if not session or timestamp is None:
+            return False
+        if kind == "attest":
+            source = "cli:attests " + str(scope)
+        elif kind == "turn":
+            source = "/api/sessions/" + quote(str(session), safe="") + "/turns"
+        else:
+            raise ValueError("session activity requires attest or turn")
+        previous_at = self.session_activity.get(session)
+        previous = self.session_activity_evidence.get(session)
+        kinds = {kind}
+        winner = source
+        if previous is not None:
+            kinds.update(s for s in previous["source"] if s in {"attest", "turn"})
+            previous_source = next((s for s in previous["source"]
+                                    if s not in {"attest", "turn"}), None)
+            if previous_source is not None and previous_at is not None:
+                if previous_at > timestamp:
+                    winner = previous_source
+                elif previous_at == timestamp:
+                    winner = min(previous_source, source)
+        merged = combined_evidence(*(fact for fact in (previous, facts) if fact is not None))
+        # combined_evidence retains its scalar confirmation semantics. Only
+        # its per-scope source union is replaced by the fixed source contract.
+        merged["source"] = sorted(kinds | {winner})
+        latest = latest_time(previous_at, timestamp)
+        changed = previous_at != latest or previous != merged
+        self.session_activity[session] = latest
+        self.session_activity_evidence[session] = merged
+        return changed
 
     @staticmethod
     def item_fingerprint(row):

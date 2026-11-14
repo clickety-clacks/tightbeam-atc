@@ -852,14 +852,12 @@ class LiveService:
         owned = [row for row in assignments.rows.values()
                  if row.get("workItemId") == item["id"]]
         closed = self.model.closed_item(item["id"], owned)
-        if assignments.complete and (
-                (closed is not None and closed["detailsKnown"] == skip)
-                or (skip and any(self.model.inventory("attests", row["id"]).fingerprint
-                                 is not None for row in owned))):
+        if assignments.complete and closed is not None and closed["detailsKnown"] == skip:
             # A change into or out of the existing summary-skip set changes
             # activity eligibility even when the published counts are equal.
-            # Replace the item's whole source through its existing read path;
-            # never treat locally discarded rows as authoritative absence.
+            # Released closed identities need the item's complete read path.
+            # Retained assignment identities use the matching attest scopes
+            # below; summary validity alone does not require a membership read.
             self._request_item_assignments(item["id"], changed=True)
             return
         if not summary_active:
