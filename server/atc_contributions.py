@@ -135,6 +135,28 @@ class AttestContribution(NamedTuple):
         frontier = apply_attest_notice(summary, self.frontier, row)
         return AttestContribution.capture(summary, frontier)
 
+    def replay_complete(self, notices):
+        """Reduce an arrival-ordered flight buffer onto this complete snapshot.
+
+        The caller owns the flight and its release, and must establish source
+        completeness before calling. No old warm count participates. This pure
+        reduction lets the caller publish replacement and replay atomically;
+        it does not alter live facts if snapshot validation fails.
+        """
+        if self.count:
+            if (not self.frontier.groups or not self.frontier.usable(
+                    {'id': self.frontier.groups[0][0], 'ts': self.frontier.maximum})):
+                raise ValueError('complete nonempty attest snapshot has no usable frontier')
+        elif self.frontier.maximum is not None or self.frontier.groups:
+            raise ValueError('complete empty attest snapshot has nonempty frontier')
+        current = self
+        for row in notices:
+            updated = current.notice(row)
+            if updated is None:
+                raise ValueError('buffered attest has no usable ID or timestamp')
+            current = updated
+        return current
+
 
 class AssignmentContribution(NamedTuple):
     item: str
