@@ -146,7 +146,15 @@ class ItemAssignmentSource:
             current = model.item_contributions.entries.get(aid)
             if aid in arrivals:
                 incoming = current
-            if incoming is None or current is None or incoming.item != current.item:
+            if incoming is None:
+                raise ValueError('item conflict requires a present source contributor')
+            if current is None:
+                # R30 retains prior publication/absence in the service. With
+                # no current projection, keep the actual complete snapshot
+                # internally; do not invent a prior row or apply the ambiguous
+                # notice. A later resolving notice can use these read facts.
+                continue
+            if incoming.item != current.item:
                 raise ValueError('item conflict requires an established present contributor')
             if current.state not in {'open', 'closed'}:
                 raise ValueError('item conflict has no supported current assignment state')

@@ -134,7 +134,8 @@ class AssignmentHolds:
     Publication frames are immutable after commit. Share their item object
     until resolution rather than copying one frame per conflicting assignment.
     The publisher must copy before adding the existing unconfirmed marking.
-    There is no completed-hold history, timer or read scheduler here.
+    None records prior absence, never a synthetic published item. There is
+    no completed-hold history, timer or read scheduler here.
     """
     __slots__ = ('assignments', 'items')
 
@@ -143,7 +144,7 @@ class AssignmentHolds:
         self.items = {}
 
     def hold(self, assignment, item, published_item, *, at, after_delivery=0):
-        if published_item is None or published_item.get('id') != item:
+        if published_item is not None and published_item.get('id') != item:
             raise ValueError('hold requires the actual published item')
         previous = self.assignments.get(assignment)
         if previous is not None:
@@ -193,9 +194,13 @@ class AssignmentHolds:
         self.retain_items({item['id'] for item in items})
         result = []
         for item in items:
-            previous = self.items.get(item['id'])
-            if previous is None:
+            if item['id'] not in self.items:
                 result.append(item)
+                continue
+            previous = self.items[item['id']]
+            if previous is None:
+                # R30: a never-published item stays absent until resolution;
+                # there is no visible evidence object to mark unconfirmed.
                 continue
             retained = deepcopy(previous)
             since = self.since(item['id'])

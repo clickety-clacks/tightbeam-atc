@@ -122,7 +122,37 @@ class AssignmentConflictsTest(unittest.TestCase):
         self.assertEqual({}, restarted.assignments)
         self.assertEqual({}, restarted.items)
         with self.assertRaises(ValueError):
-            holds.hold('new', 'unknown', None, at=300)
+            holds.hold('new', 'unknown', {'id': 'different'}, at=300)
+
+    def test_prior_absence_is_internal_and_repeat_conflict_cannot_make_it_visible(self):
+        holds = AssignmentHolds()
+        current = {'id': 'new-item', 'title': 'Not yet published',
+                   'evidence': {'assignments': {'freshness': 'live'}}}
+        other = {'id': 'other', 'title': 'Unaffected'}
+        original = deepcopy(current)
+        self.assertTrue(holds.hold('a', 'new-item', None, at=100, after_delivery=2))
+        self.assertEqual([other], holds.published_items([current, other]))
+        self.assertIsNone(holds.items['new-item'])
+        self.assertFalse(holds.hold('a', 'new-item', current, at=200, after_delivery=3))
+        self.assertTrue(holds.hold('b', 'new-item', current, at=300, after_delivery=4))
+        self.assertIsNone(holds.items['new-item'])
+        self.assertFalse(holds.resolve_notice('a', 3))
+        self.assertTrue(holds.resolve_notice('a', 4))
+        self.assertEqual([other], holds.published_items([current, other]))
+        self.assertTrue(holds.resolve_notice('b', 5))
+        self.assertEqual([current, other], holds.published_items([current, other]))
+        self.assertEqual(original, current)
+        self.assertEqual({}, holds.items)
+        self.assertEqual({}, holds.assignments)
+
+    def test_absent_hold_is_released_on_item_exit_and_not_recreated_on_restart(self):
+        holds = AssignmentHolds()
+        holds.hold('a', 'item', None, at=100)
+        self.assertEqual([], holds.published_items([]))
+        self.assertEqual({}, holds.assignments)
+        self.assertEqual({}, holds.items)
+        restarted = AssignmentHolds()
+        self.assertEqual([{'id': 'item'}], restarted.published_items([{'id': 'item'}]))
 
     def test_establishing_delivery_cannot_resolve_but_next_queued_notice_can(self):
         registry = AssignmentReadRegistry()

@@ -1394,9 +1394,9 @@ class LiveService:
     def _hold_assignment_conflict_deliveries(self, conflicts, owners, *, at):
         published = {item['id']: item for item in self.current.get('items', ())}
         for aid, wid in owners:
-            if aid not in conflicts or wid not in published:
+            if aid not in conflicts or wid is None:
                 continue
-            self.assignment_holds.hold(aid, wid, published[wid], at=at,
+            self.assignment_holds.hold(aid, wid, published.get(wid), at=at,
                 after_delivery=max(conflicts[aid], self.assignment_delivery_consumed))
 
     def _resolve_assignment_read_holds(self, conflicts, *, item=None, excluded_items=()):

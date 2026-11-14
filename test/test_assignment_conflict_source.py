@@ -109,8 +109,7 @@ class AssignmentConflictSourceTest(unittest.TestCase):
     def test_partial_or_absent_comparison_cannot_mutate_current_source(self):
         for complete, rows, protected in (
                 (False, [{'id': 'first', 'state': 'open'}], {'first'}),
-                (True, [], {'first'}),
-                (True, [{'id': 'new', 'state': 'closed'}], {'new'})):
+                (True, [], {'first'})):
             with self.subTest(complete=complete, rows=rows):
                 current, _ = self.models()
                 before = deepcopy(current.snapshot(1000))
@@ -120,6 +119,21 @@ class AssignmentConflictSourceTest(unittest.TestCase):
                         Read(rows, complete, 100, 'fixture'), protected)
                 self.assertEqual(before, current.snapshot(1000))
                 self.assertEqual(contributions, current.item_contributions.entries)
+
+    def test_first_discovery_retains_actual_complete_source_for_later_resolution(self):
+        current, reference = self.models()
+        incoming = deepcopy(list(reference.inventory('assignments').rows.values()))
+        discovered = dict(incoming[0], id='discovered', state='open', closedAt=None)
+        incoming.append(discovered)
+        original = deepcopy(incoming)
+        current.accept_assignment_read_preserving(
+            Read(incoming, True, 100, 'fixture'), {'discovered'})
+        # Publication retention belongs to the service. This seam does not
+        # fabricate an old row, choose a conflicting notice, or lose the
+        # actual source facts needed by a later resolving notice.
+        self.assertEqual(discovered, current.inventory('assignments').rows['discovered'])
+        self.assertEqual(original, incoming)
+        self.assertTrue(current.inventory('assignments').complete)
 
     def test_clean_empty_complete_read_keeps_existing_absence_semantics(self):
         current, _ = self.models()

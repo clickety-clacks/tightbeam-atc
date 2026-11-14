@@ -941,8 +941,14 @@ class EvidenceModel:
             raise ValueError('new-member preservation requires snapshot absence')
         protected |= arrivals
         current = self.item_contributions.entries
-        if any(aid not in assignments.rows and aid not in current for aid in protected):
-            raise ValueError('conflict has no established assignment projection')
+        if any(aid not in assignments.rows and aid not in current for aid in arrivals):
+            raise ValueError('new-member preservation requires an established projection')
+        # R30 first discovery has no old projection to restore. Keep the
+        # actual read internally, without replaying its conflicting notice.
+        # The service retains the item's actual publication (or absence)
+        # before any publication and until a permitted resolver. This also
+        # supplies existing source facts to the next notice without a reread.
+        protected = {aid for aid in protected if aid in assignments.rows or aid in current}
         rows = {aid: assignments.rows[aid] for aid in protected if aid in assignments.rows}
         observations = {aid: assignments.observations[aid] for aid in rows
                         if aid in assignments.observations}

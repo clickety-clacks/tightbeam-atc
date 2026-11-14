@@ -325,12 +325,25 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         stage = result.folded
         before_stage = deepcopy(stage)
         before_live = deepcopy(self.model.snapshot(1000))
-        with self.assertRaisesRegex(ValueError, 'established present contributor'):
+        with self.assertRaisesRegex(ValueError, 'present source contributor'):
             stage.preserve_assignments(self.model, ['first', 'missing'])
         self.assertEqual(before_stage, stage)
         self.assertEqual(before_live, self.model.snapshot(1000))
         self.assertFalse(stage.preserve_assignments(self.model, set()))
         self.assertEqual(before_stage, stage)
+
+    def test_first_discovered_contribution_needs_no_invented_prior_stage(self):
+        new = dict(self.assignments[0], id='discovered', state='open', closedAt=None)
+        self.assignments.append(new)
+        self.attests['discovered'] = []
+        result = self.result()
+        self.assertTrue(result.complete, result.error)
+        self.model.fold_closed_assignments()
+        stage = result.folded
+        original = deepcopy(stage)
+        self.assertFalse(stage.preserve_assignments(self.model, {'discovered'}))
+        self.assertEqual(original, stage)
+        self.assertNotIn('discovered', self.model.item_contributions.entries)
 
     def test_replayed_stage_matches_fresh_open_closed_corrections_and_authors(self):
         snapshot = self.result()
