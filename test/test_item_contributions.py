@@ -248,13 +248,13 @@ class ItemContributionsTest(unittest.TestCase):
     def test_closed_scoped_confirmation_preserves_other_contributors_warnings(self):
         from copy import deepcopy
         from publication_assertions import assert_publication_equal
-        for warning in ('none', 'unconfirmed', 'stale'):
+        for warning in ('none', 'unconfirmed', 'stale', 'disconnected'):
             with self.subTest(warning=warning):
                 model = ClosedAssignmentFoldTest().model()
                 baseline = deepcopy(model)
                 model.fold_closed_assignments()
                 for current in (model, baseline):
-                    if warning == 'unconfirmed':
+                    if warning in ('unconfirmed', 'disconnected'):
                         current.mark_unconfirmed(1100)
                     elif warning == 'stale':
                         current.invalidate()
@@ -265,16 +265,21 @@ class ItemContributionsTest(unittest.TestCase):
                                  bySession='author', commitRefs=[{'commit': 'new'}]))
                 result = Read(rows, True, 1250, 'fixture')
                 baseline.accept('attests', 'first', deepcopy(result))
-                self.assertTrue(model.accept_closed_attest_read('first', result, connected=True))
+                connected = warning != 'disconnected'
+                if not connected:
+                    baseline.inventory('attests', 'first').invalidate()
+                self.assertTrue(model.accept_closed_attest_read('first', result, connected=connected))
                 current = model.item_contributions.entries['first']
                 self.assertEqual(2, current.attests.count)
-                self.assertEqual('live', current.evidence.freshness)
+                self.assertEqual('live' if connected else 'stale', current.evidence.freshness)
                 self.assertEqual(old.corrections, current.corrections)
                 self.assertEqual(old.closed_at, current.closed_at)
                 self.assertEqual(pin, model.closed_items['work']['detailFingerprint'])
                 self.assertFalse(model.closed_items['work']['detailsKnown'])
                 self.assertNotIn(('attests', 'first'), model.inventories)
-                self.assertEqual('live' if warning == 'none' else warning,
+                expected = ('live' if warning == 'none' else
+                            'stale' if warning == 'disconnected' else warning)
+                self.assertEqual(expected,
                                  model.closed_items['work']['facts']['freshness'])
                 assert_publication_equal(self, baseline.snapshot(1300), model.snapshot(1300),
                                          'r28-closed-scope-confirmation-' + warning)

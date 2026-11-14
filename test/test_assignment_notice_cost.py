@@ -161,6 +161,95 @@ class AssignmentNoticeCostTest(unittest.TestCase):
         fresh = self.load(fresh_gateway)
         assert_publication_equal(self, fresh.current, service.current, 'b4-flight-failure-retry')
 
+    def test_failed_scoped_read_keeps_close_and_live_attest_through_bounded_retry(self):
+        for failure in ('partial', 'timeout'):
+            with self.subTest(failure=failure):
+                gateway = ItemReads()
+                gateway.rows['assignments', None] = [dict.fromkeys(ASSIGNMENT_FIELDS) | row
+                    for row in gateway.rows['assignments', None]]
+                service = self.load(gateway)
+                baseline = deepcopy(service.current)
+                assignment = next(row for row in gateway.rows['assignments', None]
+                                  if row['id'] == 'open')
+                started, release = Event(), Event()
+                self.addCleanup(release.set)
+                original = gateway.read
+                def read(resource, scope=None):
+                    result = original(resource, scope)
+                    if (resource, scope) == ('attests', 'open'):
+                        started.set()
+                        if not release.wait(5):
+                            raise AssertionError('fixture did not release failed scoped read')
+                        if failure == 'timeout':
+                            raise TimeoutError('fixture timeout')
+                        return Read(result.rows, False, result.at, result.source, 'fixture-partial')
+                    return result
+                gateway.calls.clear()
+                with patch.object(gateway, 'read', side_effect=read):
+                    service.reads.schedule('attests', 'open')
+                    service.reads.pump()
+                    self.assertTrue(started.wait(5))
+                    flight = service.reads.attest_flights['open']
+                    epoch = service.reads.epochs['attests', 'open']
+                    assignment.update(state='closed', closedAt=100)
+                    service.change(dict(resource='assignments', op='upsert',
+                        refs={'assignmentId': 'open', 'workItemId': 'work'},
+                        payload=deepcopy(assignment), **{'class': 'assignment.closed'}))
+                    notice = dict.fromkeys(ATTEST_FIELDS) | dict(id='during-failure',
+                        assignmentId='open', kind='progress', bySession='author',
+                        ts=4000, commitRefs=[{'commit': 'after-close'}])
+                    gateway.rows['attests', 'open'].append(deepcopy(notice))
+                    service.change(dict(resource='attests', op='upsert', payload=notice,
+                        refs={'attestId': notice['id'], 'assignmentId': 'open'},
+                        **{'class': 'attest.filed'}))
+                    service._publish()
+                    before_failure = service.model.item_contributions.entries['open']
+                    self.assertEqual('closed', before_failure.state)
+                    self.assertEqual(2, before_failure.attests.count)
+                    self.assertEqual(epoch, service.reads.epochs['attests', 'open'])
+                    self.assertEqual(1, flight.notice_count)
+                    release.set()
+                    service._handle(*service.events.get(timeout=5))
+                self.assertTrue(flight.closed)
+                self.assertEqual({}, flight.buffers)
+                self.assertEqual({}, service.reads.attest_flights)
+                self.assertEqual(before_failure, service.model.item_contributions.entries['open'])
+                self.assertEqual(4000, service.model.session_activity['author'])
+                self.assertEqual(0, service.reads.epoch_discards)
+                self.assertIn('work', service.model.item_assignment_pending)
+                # Existing partial-source recovery may read the item. Its
+                # first failure must retain the same live effects and use B3,
+                # not retry immediately or retain either attempt's buffer.
+                gateway.fail_member = 'last'
+                self.settle(service)
+                self.assertEqual({}, service.reads.item_flights)
+                self.assertEqual(before_failure, service.model.item_contributions.entries['open'])
+                self.assertFalse(service.current['items'][0]['evidence']['assignments']['complete'])
+                retry_job = ('item-assignment-source', 'work', None)
+                deadline, _ = service.read_retries[retry_job]
+                calls_before_retry = list(gateway.calls)
+                with patch('atc_service.time.monotonic', return_value=deadline - 0.001):
+                    service._retry_incomplete_reads()
+                self.assertNotIn(retry_job, service.reads.pending)
+                self.assertEqual(calls_before_retry, gateway.calls)
+                gateway.fail_member = None
+                with patch('atc_service.time.monotonic', return_value=deadline):
+                    service._retry_incomplete_reads()
+                self.assertIn(retry_job, service.reads.pending)
+                self.settle(service)
+                self.assertNotIn(retry_job, service.read_retries)
+                self.assertEqual(set(), service.model.item_assignment_pending)
+                self.assertEqual(2, gateway.calls.count(('membership', 'work')))
+                self.assertEqual(2, gateway.calls.count(('read', 'attests', 'open')))
+                self.assertEqual(2, service.model.item_contributions.entries['open'].attests.count)
+                self.assertNotIn(('attests', 'open'), service.model.inventories)
+                fresh_gateway = ItemReads()
+                fresh_gateway.rows = deepcopy(gateway.rows)
+                fresh = self.load(fresh_gateway)
+                label = 'r28-scoped-failure-close-retry-' + failure
+                assert_publication_equal(self, fresh.current, service.current, label)
+                assert_replay_current(self, service, baseline, label + '-replay')
+
     def test_scoped_attest_snapshot_replays_without_item_fanout_or_epoch_restart(self):
         for initial_ids, replay_ids, expected in (
                 (('m', 'a'), ('b', 'c'), 4),
