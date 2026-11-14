@@ -10,6 +10,7 @@ from atc_service import LiveService
 from atc_payloads import ASSIGNMENT_FIELDS
 from atc_upstream import ATTEST_FIELDS
 from test_item_assignment_retry import ItemReads
+from test_service import summarized_work
 from publication_assertions import assert_publication_equal, assert_replay_current
 
 
@@ -19,11 +20,13 @@ class AssignmentNoticeCostTest(unittest.TestCase):
         clock.start()
         self.addCleanup(clock.stop)
 
-    def load(self, gateway):
+    def load(self, gateway, version=None):
         service = LiveService(gateway, workers=1)
-        service.connected = True
         self.addCleanup(service.stop)
-        service.rebuild()
+        # Exercise the same version/payload-policy setup as the follower. A
+        # direct rebuild alone leaves all payload policies unset.
+        service._handle('ready', version or {
+            'version': '0.1.9', 'build': 2908, 'sha': '8433d22f'})
         self.settle(service)
         return service
 
@@ -159,3 +162,66 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 self.assertEqual(revision + 1, service.model.details_revision)
                 assert_publication_equal(self, fresh.current, service.current,
                                          'b4-released-attest-duplicate-' + str(explicit_owner))
+
+    def test_summary_backed_duplicate_counts_keep_review_timing_stage_and_ring_exact(self):
+        gateway = ItemReads()
+        item = summarized_work(attest_counts={'completion': 1, 'verdict': 2},
+            verdict_counts={'tests-passed': 1, 'reviewed-clean': 1}, holders=[], refs=[])
+        producer = dict.fromkeys(ASSIGNMENT_FIELDS) | dict(id='producer', workItemId='work',
+            holderKey='author', state='closed', effectKind='code', openedAt=1, closedAt=100,
+            reviewsAssignmentId=None, commitRefCorrections=[], files=[])
+        review = dict.fromkeys(ASSIGNMENT_FIELDS) | dict(id='review', workItemId='work',
+            holderKey='other', state='closed', effectKind='review', openedAt=110, closedAt=200,
+            reviewsAssignmentId='producer', commitRefCorrections=[], files=[])
+
+        def attest(identity, assignment, author, timestamp, kind, verdict=None):
+            return dict.fromkeys(ATTEST_FIELDS) | dict(id=identity, assignmentId=assignment,
+                bySession=author, ts=timestamp, kind=kind, verdictKind=verdict, commitRefs=[])
+
+        tested = attest('tested', 'producer', 'author', 10, 'verdict', 'tests-passed')
+        done = attest('done', 'producer', 'author', 100, 'completion')
+        clean = attest('clean', 'review', 'other', 200, 'verdict', 'reviewed-clean')
+        gateway.rows = {
+            ('work-items', None): [item], ('assignments', None): [review, producer],
+            ('roles', None): [],
+            ('sessions', None): [dict(sessionKey=key, state='active', displayName=key)
+                                 for key in ('author', 'other')],
+            ('attests', 'producer'): [tested, done], ('attests', 'review'): [clean],
+            **{(resource, key): [] for resource in ('turns', 'wakes', 'messages')
+               for key in ('author', 'other')},
+        }
+        version = {'version': '0.1.15', 'build': 3866, 'sha': 'b09a64a9'}
+        service = self.load(gateway, version)
+        before = deepcopy(service.current)
+        current = before['items'][0]
+        self.assertEqual(5, current['stage'])
+        self.assertEqual('yellow', current['ring'])
+        self.assertEqual('known', current['evidence']['stage']['status'])
+        self.assertTrue(current['evidence']['stage']['complete'])
+        self.assertEqual({'total': 3, 'byKind': {'completion': 1, 'verdict': 2},
+                          'byVerdict': {'tests-passed': 1, 'reviewed-clean': 1}},
+                         current['evidenceCounts'])
+        self.assertTrue(service._item_attest_counts_match(item, require_fresh=True))
+        self.assertNotIn(('attests', 'producer'), service.model.inventories)
+        self.assertNotIn(('attests', 'review'), service.model.inventories)
+        revision = service.model.details_revision
+        gateway.calls.clear()
+        # The tested notice is older than its current maximum. Done and clean
+        # are already-counted frontier IDs; all repeats must remain exact.
+        for index, row in enumerate((tested, done, clean, tested, clean)):
+            with self.subTest(index=index, identity=row['id']):
+                self.assertTrue(service.change(dict(resource='attests', op='upsert',
+                    refs={'attestId': row['id'], 'assignmentId': row['assignmentId']},
+                    payload=deepcopy(row), **{'class': 'attest.filed'})))
+                self.settle(service)
+                self.assertEqual([], gateway.calls)
+                self.assertEqual(revision, service.model.details_revision)
+                self.assertTrue(service._item_attest_counts_match(item, require_fresh=True))
+                self.assertEqual(3, service.model.closed_items['work']['summary']['count'])
+                assert_publication_equal(self, before, service.current,
+                                         'r25-summary-duplicate-' + str(index))
+        fresh_gateway = ItemReads()
+        fresh_gateway.rows = deepcopy(gateway.rows)
+        fresh = self.load(fresh_gateway, version)
+        assert_publication_equal(self, fresh.current, service.current, 'r25-summary-duplicates-fresh')
+        assert_replay_current(self, service, before, 'r25-summary-duplicates-replay')
