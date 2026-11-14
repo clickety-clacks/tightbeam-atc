@@ -45,6 +45,58 @@ class AssignmentNoticeCostTest(unittest.TestCase):
         self.assertEqual([], unrelated, calls)
         self.assertFalse([call for call in calls if call[0] == 'membership'], calls)
 
+    def test_known_attest_during_queued_global_read_and_recovery_is_zero_read(self):
+        for recovery in (False, True):
+            for aid in ('first', 'open'):
+                with self.subTest(recovery=recovery, assignment=aid):
+                    gateway = ItemReads()
+                    service = self.load(gateway)
+                    baseline = deepcopy(service.current)
+                    gateway.calls.clear()
+                    service._refresh('assignments')
+                    service.reads.pump()
+                    event = service.events.get(timeout=5)
+                    self.assertEqual(('assignments', None), event[1][0][:2])
+                    self.assertTrue(event[1][2].complete)
+                    # The real complete membership result is queued. Recovery
+                    # may be requested before the model worker consumes it.
+                    if recovery:
+                        service.rebuild()
+                        self.assertIsNotNone(service.cycle)
+                    self.assertTrue(service.model.closed_sources_released)
+                    original = service.model.item_contributions.entries[aid]
+                    row = dict.fromkeys(ATTEST_FIELDS) | dict(id='during-membership',
+                        assignmentId=aid, kind='progress', bySession='author',
+                        ts=4000, commitRefs=[])
+                    gateway.rows['attests', aid].append(deepcopy(row))
+                    notice = dict(resource='attests', op='upsert',
+                        refs={'attestId': row['id'], 'assignmentId': aid}, payload=row,
+                        **{'class': 'attest.filed'})
+                    calls = list(gateway.calls)
+                    pending = dict(service.reads.pending)
+                    epochs = dict(service.reads.epochs)
+                    for _ in range(2):
+                        self.assertTrue(service.change(notice))
+                        self.assertEqual(calls, gateway.calls)
+                        self.assertEqual(pending, service.reads.pending)
+                        self.assertEqual(epochs, dict(service.reads.epochs))
+                        service._publish()
+                    current = service.model.item_contributions.entries[aid]
+                    self.assertEqual(original.attests.count + 1, current.attests.count)
+                    self.assertEqual(original.evidence, current.evidence)
+                    self.assertEqual(original.detail_fingerprint, current.detail_fingerprint)
+                    self.assertFalse(service.model.item_assignment_pending)
+                    service._handle(*event)
+                    self.settle(service)
+                    self.assertEqual(0, service.reads.epoch_discards)
+                    self.assertFalse([call for call in gateway.calls if call[0] == 'membership'])
+                    fresh_gateway = ItemReads()
+                    fresh_gateway.rows = deepcopy(gateway.rows)
+                    fresh = self.load(fresh_gateway)
+                    label = 'b4-attest-global-' + aid + '-' + str(recovery)
+                    assert_publication_equal(self, fresh.current, service.current, label)
+                    assert_replay_current(self, service, baseline, label + '-replay')
+
     def test_attest_burst_replays_queued_complete_item_result_without_restart(self):
         cases = [(aid, ids, count) for aid in ('first', 'open')
                  for ids, count in ((('b', 'c'), 4), (('a', 'c'), 3))]

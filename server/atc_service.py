@@ -1908,7 +1908,7 @@ class LiveService:
 
     def _apply_contribution_attest_notice(self, notice, key, scope, payload):
         """Update held or released provenance without re-reading members."""
-        if (self.cycle or not self.model.closed_sources_released or notice.get("op") != "upsert"
+        if (not self.model.closed_sources_released or notice.get("op") != "upsert"
                 or notice.get("class") not in CLASSES["attests"]
                 or self.policies.get("attests") != "immutable"
                 or not set(ATTEST_FIELDS) <= payload.keys()
@@ -1923,8 +1923,9 @@ class LiveService:
         if any("workItemId" in value and value["workItemId"] != owner
                for value in (payload, refs)):
             return False
-        if ("assignments", None) in self.reads.active:
-            return False
+        # A global membership read (including recovery) does not read attest
+        # history. Its queued result cannot replace these immutable facts, so
+        # it is not a reason to restart an item read for an admitted notice.
         if not self._attest_activity_eligible(owner):
             # This source is excluded by the same complete item-summary
             # contract as fresh load. Its notice cannot make it eligible.
