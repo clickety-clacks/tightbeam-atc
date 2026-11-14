@@ -212,6 +212,55 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual('unconfirmed', model.closed_items['work']['facts']['freshness'])
         self.assertEqual(1100, model.closed_items['work']['facts']['unconfirmedSince'])
 
+    def test_released_closed_assignment_projection_preserves_complete_publication(self):
+        from copy import deepcopy
+        for outage in (False, True):
+            with self.subTest(outage=outage):
+                model = ClosedAssignmentFoldTest().model()
+                baseline = deepcopy(model)
+                model.fold_closed_assignments()
+                if outage:
+                    model.mark_unconfirmed(1100)
+                    baseline.mark_unconfirmed(1100)
+                old = model.item_contributions.entries['last']
+                pin = model.closed_items['work']['detailFingerprint']
+                revision = model.details_revision
+                # The ordinary projection omits corrections and attest rows.
+                projection = dict(id='last', workItemId='work', state='closed',
+                                  holderKey='other', closedAt=150, effectKind='code')
+                source = dict(baseline.inventory('assignments').rows['last'], **projection)
+                baseline.detail('assignments', None, Read([source], True, 1150, 'detail'))
+                self.assertTrue(model.update_closed_assignment_contribution(projection))
+                self.assertEqual(baseline.snapshot(1200), model.snapshot(1200))
+                current = model.item_contributions.entries['last']
+                self.assertIs(old.attests, current.attests)
+                self.assertIs(old.corrections, current.corrections)
+                self.assertEqual(150, model.closed_items['work']['closedAt'])
+                self.assertEqual(90, model.closed_items['work']['turnActivity'])
+                self.assertEqual(pin, model.closed_items['work']['detailFingerprint'])
+                self.assertFalse(model.closed_items['work']['detailsKnown'])
+                self.assertEqual(revision + 1, model.details_revision)
+                self.assertNotIn('last', model.inventory('assignments').rows)
+                self.assertNotIn(('attests', 'last'), model.inventories)
+                self.assertTrue(model.update_closed_assignment_contribution(projection))
+                self.assertEqual(revision + 1, model.details_revision)
+
+    def test_released_projection_cannot_override_pending_or_different_item_source(self):
+        from copy import deepcopy
+        model = ClosedAssignmentFoldTest().model()
+        model.fold_closed_assignments()
+        before = deepcopy(model.closed_items)
+        contributions = dict(model.item_contributions.entries)
+        projection = dict(id='last', workItemId='work', state='closed', closedAt=150)
+        self.assertFalse(model.update_closed_assignment_contribution(
+            dict(projection, workItemId='not-published')))
+        self.assertFalse(model.update_closed_assignment_contribution(
+            dict(projection, state='open', closedAt=None)))
+        model.hold_item_assignments('work')
+        self.assertFalse(model.update_closed_assignment_contribution(projection))
+        self.assertEqual(contributions, model.item_contributions.entries)
+        self.assertEqual(before, model.closed_items)
+
     def test_membership_refresh_cannot_erase_released_attests_and_partial_retry_recovers(self):
         model = ClosedAssignmentFoldTest().model()
         assignment_rows = list(model.inventory('assignments').rows.values())

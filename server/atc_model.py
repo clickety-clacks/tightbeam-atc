@@ -607,6 +607,53 @@ class EvidenceModel:
         # folded, those rows are the contribution, not both them and its prior fold.
         return self.closed_items.get(wid) if not any(a.get("state") != "open" for a in owned) else None
 
+    def update_closed_assignment_contribution(self, row):
+        """Apply an ordered projection to a released, still-closed contributor.
+
+        The caller owns source validation and read/notice ordering. A partial
+        item replacement, a reopening, or a construction row still in flight
+        uses its own integration path; none may silently replace held facts.
+        Assignment projections do not establish new attest observations.
+        """
+        aid = str(row["id"])
+        previous = self.item_contributions.entries.get(aid)
+        if previous is None or previous.state == "open":
+            return False
+        wid = previous.item
+        assignments = self.inventory("assignments")
+        if (wid not in self.work_items() or wid in self.item_assignment_pending
+                or aid in assignments.rows or row.get("state") != "closed"
+                or row.get("workItemId") != wid
+                or any(value.get("workItemId") == wid and value.get("state") != "open"
+                       for value in assignments.rows.values())):
+            return False
+        part = self.closed_items.get(wid)
+        if part is None:
+            return False
+        current = previous.assignment_update(row)
+        if current == previous:
+            return True
+        self.item_contributions.entries[aid] = current
+        fold = ClosedAssignmentFold()
+        for contribution in self.item_contributions.entries.values():
+            if contribution.item == wid and contribution.state != "open":
+                fold.add_contribution(contribution)
+        replacement = fold.finish()
+        # No source text was read. Keep its last observed pin and any outage
+        # affecting other contributors; changing assignment fields cannot
+        # reconfirm their attest scopes. The next requested detail read checks
+        # the actual source under the existing publication revision guard.
+        replacement["detailFingerprint"] = part["detailFingerprint"]
+        replacement["assignmentFingerprint"] = part["assignmentFingerprint"]
+        replacement["facts"] = combined_evidence(part["facts"], replacement["facts"])
+        replacement["turnActivity"] = part["turnActivity"]
+        replacement["activity"] = latest_time(replacement["activity"], part["turnActivity"])
+        self.closed_items[wid] = replacement
+        self.closed_revision += 1
+        self.details_revision += 1
+        self._item_activity_parts.clear()
+        return True
+
     def hold_item_assignments(self, wid):
         item = self.work_items().get(wid)
         if item is None:
