@@ -762,7 +762,8 @@ class EvidenceModel:
         for key, inventory in self.inventories.items():
             resource = key[0]
             if resource in {"assignments", "attests"}:
-                versions["assignments"].append((key, inventory.data_revision))
+                versions["assignments"].append((key, inventory.data_revision,
+                                                getattr(inventory, "activity_eligible", True)))
             if resource in {"artifacts", "turns"}:
                 versions[resource].append((key, inventory.data_revision))
         assignments = self.inventory("assignments")
@@ -786,11 +787,14 @@ class EvidenceModel:
                     if wid not in raw_closed or not assignments.complete:
                         record(wid, part["activity"])
                 for assignment in assignments.rows.values():
+                    inventory = self.inventory("attests", assignment["id"])
                     record(assignment.get("workItemId"), assignment.get("openedAt"),
                            assignment.get("closedAt"),
-                           self.summary("attests", assignment["id"])["activity"])
+                           self.summary("attests", assignment["id"])["activity"]
+                           if getattr(inventory, "activity_eligible", True) else None)
                 # Missing attest scopes are created by summary on first use.
-                revision = [(key, inv.data_revision) for key, inv in self.inventories.items()
+                revision = [(key, inv.data_revision, getattr(inv, "activity_eligible", True))
+                            for key, inv in self.inventories.items()
                             if key[0] in {"assignments", "attests"}]
                 revision.append(("closed-items", self.closed_revision))
             elif group == "artifacts":

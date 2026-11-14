@@ -872,6 +872,17 @@ class LiveService:
         skip = summary_active and not timing_needed
         owned = [row for row in assignments.rows.values()
                  if row.get("workItemId") == item["id"]]
+        for row in owned:
+            inventory = self.model.inventories.get(("attests", row["id"]))
+            if inventory is None:
+                continue
+            was_eligible = getattr(inventory, "activity_eligible", True)
+            inventory.activity_eligible = not skip
+            if not skip and not was_eligible:
+                # Re-entering the fresh-load source set requires the existing
+                # scoped read; observations from before the skip cannot
+                # certify activity delivered while that scope was omitted.
+                self._refresh("attests", row["id"])
         closed = self.model.closed_item(item["id"], owned)
         if assignments.complete and closed is not None and closed["detailsKnown"] == skip:
             # A change into or out of the existing summary-skip set changes
