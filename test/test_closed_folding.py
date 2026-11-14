@@ -91,7 +91,7 @@ class ClosedAssignmentFoldTest(unittest.TestCase):
                 self.assertNotIn('first', folded.summary('turns', 'author')['assignmentActivity'])
                 self.assertEqual(baseline.snapshot(800001), folded.snapshot(800001))
 
-    def test_retirement_releases_author_details_and_preserves_item_facts(self):
+    def test_retirement_preserves_current_authored_activity_and_item_facts(self):
         folded = self.model()
         folded.fold_closed_assignments()
         self.read(folded, 'sessions', [dict(sessionKey='author', state='active', displayName='author'),
@@ -100,9 +100,9 @@ class ClosedAssignmentFoldTest(unittest.TestCase):
         folded.release_session_histories({'author'})
         self.assertEqual(before, folded.snapshot(1000))
         part = folded.closed_items['work']
-        self.assertEqual({'author'}, part['summary']['authorIds'])
-        self.assertNotIn('other', part['summary']['authors'])
-        self.assertNotIn('other', part['authorFacts'])
+        self.assertEqual({'author', 'other'}, part['summary']['authorIds'])
+        self.assertIn('other', part['summary']['authors'])
+        self.assertEqual(part['summary']['authors']['other'], folded.session_activity['other'])
         self.assertEqual(90, folded.item_activity()['work'])
 
     def test_closed_review_timing_and_unknown_code_remain_exact(self):

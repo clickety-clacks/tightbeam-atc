@@ -115,10 +115,6 @@ class LiveService:
         self.reads = ReadQueue(gateway, self.events, workers, self._read_plan)
         self.retired_activity_marker = None
         self.retired_activity_pending = False
-        self.returning_authors = {}
-        self.returning_authors_ready = set()
-        self.returning_author_items = {}
-        self.returning_author_result = None
         self.backstop = ActiveBackstop()
         self.scope_budget = scope_budget
         self.rotation = deque()
@@ -506,8 +502,6 @@ class LiveService:
             reason = "assignments unavailable; last complete read: " + str(confirmed)
         if state == "live" and self.model.item_assignment_pending:
             state, reason = "rebuilding", "reading complete item assignment source"
-        if state == "live" and self.returning_authors:
-            state, reason = "rebuilding", "recovering returning session activity"
         if (state in {"live", "rebuilding"} and self.connected and
                 any(self.model.inventory(*s).budget_stale for s in self.backstop.active)):
             state, reason = "stale", "active reconciliation budget exceeded"
@@ -533,23 +527,6 @@ class LiveService:
         # holding the condition used by subscribers of the committed frame.
         at = now_ms()
         visible = {row["sessionKey"] for row in self.model.active_sessions()}
-        self.returning_authors = {key: value for key, value in self.returning_authors.items()
-                                  if key in visible}
-        self.returning_authors_ready.intersection_update(visible)
-        self.returning_author_items = {key: items for key, items in self.returning_author_items.items()
-                                       if key in visible}
-        for key in tuple(self.returning_authors_ready):
-            if (not self.returning_author_items.get(key, set()).intersection(
-                    self.model.item_assignment_pending)
-                    and all(self.model.inventory(resource, key).complete
-                            for resource in ("turns", "wakes", "messages"))):
-                self.returning_authors.pop(key, None)
-                self.returning_authors_ready.discard(key)
-                self.returning_author_items.pop(key, None)
-        if (not self.returning_authors and self.reason == "recovering returning session activity"
-                and self.connected and not self.cycle and not self.read_failures
-                and not self.correlation_gaps):
-            self._state("live")
         removed = self.model.item_assignment_pending - self.model.work_items().keys()
         self._forget_scopes({("item-assignment-source", wid) for wid in removed})
         for wid in removed:
@@ -566,12 +543,6 @@ class LiveService:
         old_agents = {row["id"]: row for row in self.current.get("agents", [])}
         for agent in data["agents"]:
             key = agent["sessionKey"]
-            if key in self.returning_authors:
-                agent["idleSince"] = self.returning_authors[key]
-                agent["idleFor"] = (max(0, (at - agent["idleSince"]) // 1000)
-                                    if agent["idleSince"] is not None else None)
-                agent["evidence"]["idleFor"] = dict(agent["evidence"]["idleFor"],
-                    status="unknown", complete=False, freshness="stale")
             fact = agent["evidence"]["idleFor"]
             previous = old_agents.get(agent["id"])
             if (previous and previous.get("idleSince") == agent.get("idleSince") and
@@ -1138,76 +1109,7 @@ class LiveService:
         if item.get("state") in {"closed", "iceboxed"} and could_be_visible:
             self.reads.schedule("finish-time", wid)
 
-    def _request_returning_authors(self, session):
-        previous = next((row for row in self.current.get("agents", [])
-                         if row["sessionKey"] == session), {})
-        self.returning_authors.setdefault(session, previous.get("idleSince"))
-        job = ("returning-authors", None, None)
-        if job not in self.read_retries:
-            self.reads.schedule(*job, priority=True)
-        self._incomplete_state("recovering returning session activity")
-
-    def _invalidate_returning_authors(self, *, preserve_ready=False):
-        if not self.returning_authors:
-            return
-        job = ("returning-authors", None, None)
-        if not preserve_ready:
-            self.returning_authors_ready.clear()
-        self.reads.touch(*job[:2])
-        if (job not in self.read_retries
-                and set(self.returning_authors) - self.returning_authors_ready):
-            self.reads.schedule(*job, priority=True)
-
-    def _returning_authors_done(self, job, result):
-        self.retry_in_flight.discard(job)
-        if not result.complete:
-            self.read_failures.add(job[:2])
-            self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, 2)
-            self.last_incomplete_read = self._read_outcome(*job, result)
-            self._incomplete_state("recovering returning session activity")
-            return True
-        visible = {row["sessionKey"] for row in self.model.active_sessions()}
-        sources = result.folded["sources"]
-        # Complete global membership also establishes empty eligible items.
-        # Reuse the same attest folds for changed item facts and open sources;
-        # a second per-item history scan would exceed the recovery pass bound.
-        for wid in self.model.work_items().keys() - result.folded["excludedItems"]:
-            sources.setdefault(wid, ItemAssignmentSource())
-        owned = {}
-        for aid, row in self.model.inventory("assignments").rows.items():
-            owned.setdefault(row.get("workItemId"), {})[aid] = row
-        for wid, staged in sources.items():
-            if wid in self.model.item_assignment_pending:
-                for author in result.folded["authors"].intersection(visible):
-                    self.returning_author_items.setdefault(author, set()).add(wid)
-                continue
-            if wid is not None and wid not in self.model.work_items():
-                continue
-            closed = self.model.closed_items.get(wid)
-            changed = ((closed or {}).get("detailFingerprint") !=
-                       (staged.closed or {}).get("detailFingerprint")
-                       or owned.get(wid, {}) != staged.open_rows
-                       or any(self.model.inventory("attests", aid).fingerprint != inventory.fingerprint
-                              for aid, inventory in staged.open_attests.items()))
-            if changed:
-                replacement = Read([], True, result.at, "item-assignment-source", folded=staged)
-                self._forget_scopes(self.model.replace_item_assignments(wid, replacement))
-        self.model.restore_returning_authors(result.folded, visible)
-        self.returning_authors_ready.update(result.folded["authors"].intersection(visible))
-        self.returning_author_result = {
-            "authors": len(result.folded["authors"]), "items": len(result.folded["items"]),
-            "assignments": result.folded["assignments"], "durationMs": result.folded["durationMs"]}
-        self.read_failures.discard(job[:2])
-        self.read_retries.pop(job, None)
-        # Returns arriving after this pass started share the next pass. No
-        # concurrent scan and no completion credit for unread authors.
-        if set(self.returning_authors) - self.returning_authors_ready:
-            self.reads.schedule(*job, priority=True)
-        return True
-
     def _request_item_assignments(self, wid, *, changed=False):
-        if changed:
-            self._invalidate_returning_authors()
         if not self.model.hold_item_assignments(wid):
             return False
         # The held values are current facts, not a license to keep old closed
@@ -1222,17 +1124,6 @@ class LiveService:
         return True
 
     def _read_plan(self, resource, scope):
-        if resource == "returning-authors":
-            authors = set(self.returning_authors) - self.returning_authors_ready
-            if not authors:
-                return authors, set(), set()
-            excluded = {wid for wid, item in self.model.work_items().items()
-                        if self._summary_contract_active() and has_work_item_summary(item)
-                        and not self._summary_needs_review_timing(item)}
-            live_ids = {turn.get("assignmentId")
-                        for resource, scope in self.model.inventories if resource == "turns"
-                        for turn in self.model.summary(resource, scope)["live"]}
-            return authors, excluded, live_ids
         if (resource == "turns" and self.model.closed_sources_released
                 and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
             # Correlation needs no retained turn inventory. Creating one here
@@ -1257,8 +1148,6 @@ class LiveService:
             self._forget_scopes({job[:2]})
             return True
         if result.complete:
-            completing_recovery = any(wid in items for items in self.returning_author_items.values())
-            self._invalidate_returning_authors(preserve_ready=completing_recovery)
             released = self.model.replace_item_assignments(wid, result)
             self._forget_scopes(released | {job[:2]})
             if not self.connected:
@@ -1297,12 +1186,6 @@ class LiveService:
             return self._retired_activity_done(job, result)
         if resource == "item-assignment-source":
             return self._item_assignments_done(job, result)
-        if resource == "returning-authors":
-            return self._returning_authors_done(job, result)
-        if resource in {"work-items", "assignments", "attests"} and result.complete:
-            # Reconciliation reads can observe changes without a feed notice.
-            # Their source state supersedes any pass already in flight too.
-            self._invalidate_returning_authors()
         assignments = self.model.inventory("assignments")
         if resource == "assignments" and key is None:
             if not result.complete and not result.rows:
@@ -1466,17 +1349,9 @@ class LiveService:
                 self._state("stale", "uncorrelated " + resource + " change")
             return True
         if key is None:
-            previous_sessions = ({row["sessionKey"] for row in self.model.active_sessions()}
-                                 if resource == "sessions" else set())
             self.model.accept(resource, scope, result)
         else:
-            previous_sessions = ({row["sessionKey"] for row in self.model.active_sessions()}
-                                 if resource == "sessions" else set())
             self.model.detail(resource, scope, result)
-        if resource == "sessions" and result.complete and self.model.closed_sources_released:
-            for session in self.model.active_sessions():
-                if session["sessionKey"] not in previous_sessions:
-                    self._request_returning_authors(session["sessionKey"])
         if resource == "turns" and scope is not None and result.complete:
             if self.model.closed_sources_released:
                 for turn in self.model.summary("turns", scope)["live"]:
@@ -1672,8 +1547,6 @@ class LiveService:
         if resource not in RESOURCE_REFS:
             # Observational events do not imply that every inventory changed.
             return False
-        if resource in {"assignments", "attests", "work-items"} and self.returning_authors:
-            self._invalidate_returning_authors()
         payload, refs = notice.get("payload") or {}, notice.get("refs") or {}
         key = refs.get(RESOURCE_REFS[resource])
         normalized = "decision-requests" if resource == "decision requests" else resource
@@ -1781,10 +1654,6 @@ class LiveService:
                 inventory.invalidate()
                 self._state("stale", "change missing primary reference")
         if resource == "sessions" and applied:
-            if (self.model.closed_sources_released and payload.get("state") == "active"
-                    and notice.get("class") != "session.spawned"
-                    and (previous is None or previous.get("state") != "active")):
-                self._request_returning_authors(payload["sessionKey"])
             self._discover_histories()
         if resource in {"sessions", "assignments", "work-items"} and applied:
             self._ensure_retired_activity()

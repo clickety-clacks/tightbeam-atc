@@ -78,8 +78,6 @@ class ReadQueue:
                 return self._retired_activity(keep_ids)
             if resource == "item-assignment-source":
                 return self._item_assignments(scope, keep_ids)
-            if resource == "returning-authors":
-                return self._returning_authors(keep_ids)
             if key is None:
                 if hasattr(self.gateway, "read_current"):
                     return self.gateway.read_current(resource, scope, keep_ids=keep_ids)
@@ -198,72 +196,6 @@ class ReadQueue:
             # No previous session's rows or page accumulator survive the next read.
             del result, folded
         return Read([], True, at, "turns", folded=(marker, activity))
-
-    def _returning_authors(self, plan):
-        from atc_evidence import HistoryInventory
-        from atc_model import ClosedAssignmentFold
-        from atc_summary import HistoryFold
-
-        authors, excluded_items, live_ids = plan
-        started, at = time.monotonic(), now_ms()
-        if not authors:
-            return Read([], True, at, "returning-authors", folded={
-                "authors": set(), "items": {}, "sources": {}, "excludedItems": set(),
-                "assignments": 0, "durationMs": 0})
-        # This is the same complete assignment source used to select a fresh
-        # load's attest scopes. Per-item membership omits null-item assignments.
-        membership = self.gateway.read("assignments")
-        if not membership.complete:
-            return Read([], False, membership.at, "returning-authors", membership.error)
-        sources, closed, positions, count = {}, {}, defaultdict(int), 0
-        for order, row in enumerate(membership.rows):
-            wid, aid = row.get("workItemId"), row["id"]
-            if wid in excluded_items:
-                membership.rows[order] = None
-                continue
-            position = positions[wid]
-            positions[wid] += 1
-            if hasattr(self.gateway, "read_current"):
-                result = self.gateway.read_current("attests", aid)
-            else:
-                result = self.gateway.read("attests", aid)
-            count += 1
-            if not result.complete:
-                return Read([], False, result.at, "returning-authors", result.error)
-            at = result.at
-            fold = result.folded
-            if fold is None:
-                fold = HistoryFold("attests", at)
-                fold.add(result.rows)
-            inventory = HistoryInventory("attests")
-            inventory.read_fold(fold, complete=True, at=at, source=result.source)
-            staged = sources.setdefault(wid, ItemAssignmentSource())
-            if row.get("state") == "open":
-                staged.open_rows[aid] = row
-                staged.open_attests[aid] = inventory
-                staged.open_order[aid] = order
-            else:
-                closed.setdefault(wid, ClosedAssignmentFold()).add(
-                    row, inventory, order=order, position=position)
-            if aid in live_ids:
-                staged.live_items[aid] = wid
-            membership.rows[order] = None
-            del row, result, fold, inventory
-        items = {}
-        for wid, accumulator in closed.items():
-            part = accumulator.finish()
-            sources[wid].closed = part
-            summary = part["summary"]
-            selected = authors.intersection(summary["authorIds"])
-            items[wid] = {"authors": {key: value for key, value in summary["authors"].items()
-                                      if key in selected},
-                          "authorIds": selected,
-                          "authorFacts": {key: part["authorFacts"][key] for key in selected}}
-        # Completed item folds can reconcile newer item activity atomically
-        # without rereading any attest. No closed assignment rows are retained.
-        return Read([], True, at, "returning-authors", folded={
-            "authors": authors, "items": items, "sources": sources, "excludedItems": excluded_items,
-            "assignments": count, "durationMs": (time.monotonic() - started) * 1000})
 
     def finish(self, job, epoch):
         inventory = job[:2]

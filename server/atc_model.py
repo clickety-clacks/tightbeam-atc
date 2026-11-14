@@ -96,6 +96,7 @@ class EvidenceModel:
         self._item_activity_parts = {}
         self._item_activity = {}
         self.retired_item_activity = {}
+        self.session_activity = {}
         self.retired_activity_revision = 0
         self.closed_items = {}
         self.closed_revision = 0
@@ -262,23 +263,6 @@ class EvidenceModel:
         if changed:
             self.retired_activity_revision += 1
 
-    def restore_returning_authors(self, recovered, visible):
-        authors = recovered["authors"].intersection(visible)
-        for wid, part in self.closed_items.items():
-            summary = part["summary"]
-            for author in authors:
-                summary["authors"].pop(author, None)
-                summary["authorIds"].discard(author)
-                part["authorFacts"].pop(author, None)
-            current = recovered["items"].get(wid)
-            if current is None:
-                continue
-            for author in authors.intersection(current["authorIds"]):
-                summary["authorIds"].add(author)
-                if author in current["authors"]:
-                    summary["authors"][author] = current["authors"][author]
-                part["authorFacts"][author] = current["authorFacts"][author]
-
     def release_session_histories(self, visible):
         assignments = self.inventory("assignments").rows
         released = {key for key in self.inventories
@@ -294,15 +278,10 @@ class EvidenceModel:
         for key in released:
             del self.inventories[key]
             self.summaries.pop(key, None)
-        for part in self.closed_items.values():
-            # Retired authors no longer supply an agent's idle or live-turn
-            # attribution. The item's activity maximum remains in part itself.
-            summary = part["summary"]
-            summary["authors"] = {key: at for key, at in summary["authors"].items()
-                                  if key in visible}
-            summary["authorIds"].intersection_update(visible)
-            part["authorFacts"] = {key: facts for key, facts in part["authorFacts"].items()
-                                   if key in visible}
+        # Closed-item author maxima already fold exactly the fresh attest
+        # scope. Retirement changes rendering, not their source membership.
+        # Keep these existing folds so complete replacements can lower/remove
+        # a maximum without an additional contributor ledger or return scan.
         if released:
             self._item_activity_parts.pop("turns", None)
         return released
@@ -749,6 +728,11 @@ class EvidenceModel:
             for author, facts in closed["authorFacts"].items():
                 activity_evidence[author].append(facts)
 
+        # Recompute from the existing current-source folds, not prior maxima:
+        # complete source replacement can lower a value or remove its key.
+        # Turns enter only for selected sessions; all eligible attest authors
+        # enter even when they are not currently rendered (including null items).
+        self.session_activity = activity
         agents = []
         for session in visible:
             key = session["sessionKey"]
