@@ -8,7 +8,24 @@ from threading import Lock
 import time
 
 from atc_upstream import Read, now_ms
-from atc_contributions import AssignmentContribution
+from atc_contributions import AssignmentContribution, AttestContribution
+
+
+def replay_attest_read(result, notices):
+    """Replay onto a complete scoped result without fabricating a raw pin."""
+    from atc_summary import HistoryFold
+    if not result.complete:
+        raise ValueError('cannot replace from incomplete attest read')
+    fold = result.folded
+    if fold is None:
+        fold = HistoryFold('attests', result.at)
+        fold.add(result.rows)
+    updated = AttestContribution.capture(fold.summary, fold.attest_frontier).replay_complete(notices)
+    fold.summary = updated.summary()
+    fold.attest_frontier = updated.frontier
+    # Keep the actual read fingerprint/rows. The model's normal read revision
+    # guards detail responses; replayed notices are not invented source rows.
+    result.folded = fold
 
 
 class AttestReadFlight:
@@ -160,6 +177,7 @@ class ReadQueue:
         # Model-worker owned registry; each flight synchronizes its own read
         # worker boundary. Results queued for application still own a flight.
         self.item_flights = {}
+        self.attest_flights = {}
         self.flight_peak_notices = 0
         self.flight_maximum_lifetime = 0.0
         self.flight_maximum_read_duration = 0.0
@@ -209,6 +227,10 @@ class ReadQueue:
                 flight = AttestReadFlight()
                 self.item_flights[job[1]] = flight
                 future = self.executor.submit(self._read, job, plan, flight)
+            elif job[0] == 'attests' and job[1] is not None and job[2] is None:
+                flight = AttestReadFlight()
+                self.attest_flights[job[1]] = flight
+                future = self.executor.submit(self._read, job, plan, flight)
             else:
                 future = self.executor.submit(self._read, job, plan)
             future.add_done_callback(
@@ -228,9 +250,15 @@ class ReadQueue:
             if resource == "item-assignment-source":
                 return self._item_assignments(scope, keep_ids, flight)
             if key is None:
+                if flight is not None:
+                    flight.open(scope)
                 if hasattr(self.gateway, "read_current"):
-                    return self.gateway.read_current(resource, scope, keep_ids=keep_ids)
-                return self.gateway.read(resource, scope)
+                    result = self.gateway.read_current(resource, scope, keep_ids=keep_ids)
+                else:
+                    result = self.gateway.read(resource, scope)
+                if flight is not None:
+                    flight.read_completed(scope)
+                return result
             return self.gateway.detail(resource, key, scope=scope)
         except Exception as error:
             # Exception bodies may contain credentials or upstream responses.
@@ -375,6 +403,8 @@ class ReadQueue:
         if epoch != self.epochs[job[:2]]:
             if job[0] == 'item-assignment-source':
                 self.discard_item_flight(job[1])
+            elif job[0] == 'attests':
+                self.discard_attest_flight(job[1])
             self.epoch_discards += 1
             self.epoch_discards_by_resource[job[0]] += 1
             self.schedule(*job, priority=priority == 2, active=priority == 1)
@@ -382,7 +412,12 @@ class ReadQueue:
         return True
 
     def discard_item_flight(self, wid):
-        flight = self.item_flights.pop(wid, None)
+        self._discard_flight(self.item_flights.pop(wid, None))
+
+    def discard_attest_flight(self, aid):
+        self._discard_flight(self.attest_flights.pop(aid, None))
+
+    def _discard_flight(self, flight):
         if flight is not None:
             flight.discard()
             # Bounded maxima only; no completed-attempt history is retained.
@@ -395,3 +430,5 @@ class ReadQueue:
         self.executor.shutdown(wait=False, cancel_futures=True)
         for wid in tuple(self.item_flights):
             self.discard_item_flight(wid)
+        for aid in tuple(self.attest_flights):
+            self.discard_attest_flight(aid)

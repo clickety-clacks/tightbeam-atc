@@ -161,6 +161,68 @@ class AssignmentNoticeCostTest(unittest.TestCase):
         fresh = self.load(fresh_gateway)
         assert_publication_equal(self, fresh.current, service.current, 'b4-flight-failure-retry')
 
+    def test_scoped_attest_snapshot_replays_without_item_fanout_or_epoch_restart(self):
+        for initial_ids, replay_ids, expected in (
+                (('m', 'a'), ('b', 'c'), 4),
+                (('m', 'a'), ('a', 'c'), 3),
+                ((), ('c',), 1)):
+            with self.subTest(initial=initial_ids, replay=replay_ids):
+                gateway = ItemReads()
+                def row(key):
+                    return dict.fromkeys(ATTEST_FIELDS) | dict(id=key, assignmentId='open',
+                        kind='progress', bySession='author', commitRefs=[],
+                        ts={'m': 1000, 'a': 2000, 'b': 3000, 'c': 4000}[key])
+                gateway.rows['attests', 'open'] = [row(key) for key in initial_ids]
+                service = self.load(gateway)
+                baseline = deepcopy(service.current)
+                started, release = Event(), Event()
+                self.addCleanup(release.set)
+                original = gateway.read
+                def read(resource, scope=None):
+                    result = original(resource, scope)
+                    if (resource, scope) == ('attests', 'open'):
+                        started.set()
+                        if not release.wait(5):
+                            raise AssertionError('fixture did not release scoped snapshot')
+                    return result
+                gateway.calls.clear()
+                with patch.object(gateway, 'read', side_effect=read):
+                    service.reads.schedule('attests', 'open')
+                    service.reads.pump()
+                    self.assertTrue(started.wait(5))
+                    flight = service.reads.attest_flights['open']
+                    epoch = service.reads.epochs['attests', 'open']
+                    for identity in replay_ids:
+                        notice_row = row(identity)
+                        if identity not in initial_ids:
+                            gateway.rows['attests', 'open'].append(deepcopy(notice_row))
+                        service.change(dict(resource='attests', op='upsert',
+                            refs={'attestId': identity, 'assignmentId': 'open'},
+                            payload=notice_row, **{'class': 'attest.filed'}))
+                        service._publish()
+                    self.assertEqual(epoch, service.reads.epochs['attests', 'open'])
+                    self.assertEqual(set(), service.model.item_assignment_pending)
+                    self.assertEqual(expected, service.model.inventory('attests', 'open').folded['count'])
+                    release.set()
+                    event = service.events.get(timeout=5)
+                    self.assertFalse(flight.closed)
+                    self.assertEqual(len(replay_ids), flight.notice_count)
+                    service._handle(*event)
+                    self.settle(service)
+                self.assertEqual([('read', 'attests', 'open')], gateway.calls)
+                self.assertEqual(expected, service.model.inventory('attests', 'open').folded['count'])
+                self.assertEqual(expected, service.model.item_contributions.entries['open'].attests.count)
+                self.assertEqual({}, service.reads.attest_flights)
+                self.assertEqual({}, flight.buffers)
+                self.assertEqual(0, service.reads.epoch_discards)
+                fresh_gateway = ItemReads()
+                fresh_gateway.rows = deepcopy(gateway.rows)
+                fresh = self.load(fresh_gateway)
+                assert_publication_equal(self, fresh.current, service.current,
+                                         'b4-scoped-flight-' + str(expected))
+                assert_replay_current(self, service, baseline,
+                                     'b4-scoped-flight-' + str(expected) + '-replay')
+
     def test_item_exit_releases_protection_before_delayed_read_result(self):
         gateway = ItemReads()
         service = self.load(gateway)

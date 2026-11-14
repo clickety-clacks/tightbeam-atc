@@ -15,7 +15,7 @@ import uuid
 from atc_git import GitResolver, reference_digest
 from atc_model import EvidenceModel, activity_time, latest_time
 from atc_evidence import combined_evidence, merge_value_for_refs
-from atc_reads import ReadQueue, ItemAssignmentSource
+from atc_reads import ReadQueue, ItemAssignmentSource, replay_attest_read
 from atc_reconciliation import ActiveBackstop, RETRY_MS
 from atc_upstream import ATTEST_FIELDS, Read, attest_row, now_ms
 
@@ -1327,6 +1327,18 @@ class LiveService:
                     "result": "epoch-discarded", "at": now_ms(),
                 }
             return False
+        flight = (self.reads.attest_flights.get(scope)
+                  if resource == 'attests' and key is None else None)
+        if flight is not None:
+            try:
+                return flight.apply(lambda buffers: self._finished_read(
+                    job, result, priority, retry, buffers.get(scope, ())))
+            finally:
+                self.reads.discard_attest_flight(scope)
+        return self._finished_read(job, result, priority, retry)
+
+    def _finished_read(self, job, result, priority, retry, attest_notices=None):
+        resource, scope, key = job
         if resource == "retired-turns":
             return self._retired_activity_done(job, result)
         if resource == "attest-owner":
@@ -1375,8 +1387,20 @@ class LiveService:
                 self.last_incomplete_read = self._read_outcome(*job, result)
             return True
         if resource == "attests" and scope is not None:
+            if result.complete and attest_notices is not None:
+                try:
+                    replay_attest_read(result, attest_notices)
+                except ValueError:
+                    result = Read([], False, result.at, result.source,
+                                  'invalid-complete-attest-frontier')
             owner = assignments.rows.get(scope, {}).get("workItemId")
-            if owner and (not result.complete or owner in self.model.item_assignment_pending):
+            if owner in self.model.item_assignment_pending:
+                # The independently required complete item replacement owns
+                # this scope. A redundant scoped result must not restart it
+                # or roll back its newer delivered notices.
+                self._forget_scopes({job[:2]})
+                return True
+            if owner and not result.complete:
                 self.last_incomplete_read = self._read_outcome(*job, result)
                 self._request_item_assignments(owner, changed=True)
                 if (resource, scope) in self.model.inventories:
@@ -1507,6 +1531,10 @@ class LiveService:
                 activity_eligible = (assignment is not None and "workItemId" in assignment
                                      and self._attest_activity_eligible(assignment["workItemId"]))
             self.model.accept(resource, scope, result, activity_eligible=activity_eligible)
+            if resource == 'attests' and self.model.closed_sources_released:
+                owner = assignments.rows.get(scope, {}).get('workItemId')
+                if owner is not None:
+                    self.model.capture_assignment_contributions(items={owner})
         else:
             self.model.detail(resource, scope, result)
         if resource == "turns" and scope is not None and result.complete:
@@ -1754,10 +1782,7 @@ class LiveService:
         if any("workItemId" in value and value["workItemId"] != owner
                for value in (payload, refs)):
             return False
-        if (("assignments", None) in self.reads.active
-                or ("attests", str(scope)) in self.reads.active
-                or any(job[:2] == ("attests", str(scope))
-                       for job in (*self.reads.pending, *self.read_retries))):
+        if ("assignments", None) in self.reads.active:
             return False
         if not self._attest_activity_eligible(owner):
             # This source is excluded by the same complete item-summary
@@ -1769,6 +1794,9 @@ class LiveService:
         flight = self.reads.item_flights.get(owner)
         if flight is not None:
             flight.notice(str(scope), row)
+        scoped_flight = self.reads.attest_flights.get(str(scope))
+        if scoped_flight is not None:
+            scoped_flight.notice(str(scope), row)
         if contribution.state == 'open':
             assignment = self.model.inventory('assignments').rows.get(str(scope))
             if assignment is None or assignment.get('workItemId') != owner:
