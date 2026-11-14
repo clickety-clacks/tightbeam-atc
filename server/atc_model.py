@@ -634,25 +634,117 @@ class EvidenceModel:
         if current == previous:
             return True
         self.item_contributions.entries[aid] = current
+        self._reduce_current_closed_item(wid, part)
+        self.details_revision += 1
+        return True
+
+    def _reduce_current_closed_item(self, wid, source_part):
         fold = ClosedAssignmentFold()
         for contribution in self.item_contributions.entries.values():
             if contribution.item == wid and contribution.state != "open":
                 fold.add_contribution(contribution)
-        replacement = fold.finish()
-        # No source text was read. Keep its last observed pin and any outage
-        # affecting other contributors; changing assignment fields cannot
-        # reconfirm their attest scopes. The next requested detail read checks
-        # the actual source under the existing publication revision guard.
-        replacement["detailFingerprint"] = part["detailFingerprint"]
-        replacement["assignmentFingerprint"] = part["assignmentFingerprint"]
-        replacement["facts"] = combined_evidence(part["facts"], replacement["facts"])
-        replacement["turnActivity"] = part["turnActivity"]
-        replacement["activity"] = latest_time(replacement["activity"], part["turnActivity"])
-        self.closed_items[wid] = replacement
+        if fold.part["count"]:
+            part = fold.finish()
+            # No source text was read. Preserve its actual last pin and any
+            # outage rather than inventing a complete detail fingerprint or
+            # reconfirming attest scopes from an assignment projection.
+            if source_part:
+                part["detailFingerprint"] = source_part["detailFingerprint"]
+                part["assignmentFingerprint"] = source_part["assignmentFingerprint"]
+                part["facts"] = combined_evidence(source_part["facts"], part["facts"])
+                part["turnActivity"] = source_part["turnActivity"]
+                part["activity"] = latest_time(part["activity"], part["turnActivity"])
+            self.closed_items[wid] = part
+        else:
+            self.closed_items.pop(wid, None)
+            if source_part and source_part["turnActivity"] is not None:
+                self.fold_retired_activity({wid: source_part["turnActivity"]})
         self.closed_revision += 1
-        self.details_revision += 1
         self._item_activity_parts.clear()
-        return True
+
+    def apply_assignment_projection(self, row, *, at, source):
+        """Merge an ordered current assignment without reading item membership.
+
+        This is the model commit seam, not a payload validator or an ordering
+        rule for concurrent reads. Pending complete replacements remain held
+        until their caller merges newer accepted projections into that result.
+        """
+        aid, wid = str(row["id"]), row.get("workItemId")
+        if (wid not in self.work_items() or wid in self.item_assignment_pending
+                or row.get("state") not in {"open", "closed"}):
+            return None
+        previous = self.item_contributions.entries.get(aid)
+        if previous is not None and previous.item != wid:
+            return None
+        assignments = self.inventory("assignments")
+        self.capture_assignment_contributions(items={wid})
+        previous = self.item_contributions.entries.get(aid)
+        if previous is None and row["state"] != "open":
+            # A terminal projection alone cannot recover attest facts for a
+            # contributor never established in this item's current source.
+            return None
+        if aid not in assignments.rows and previous is not None and row["state"] == "closed":
+            return set() if self.update_closed_assignment_contribution(row) else None
+
+        old_closed = self.closed_items.get(wid)
+        if previous is not None and aid not in assignments.rows:
+            # Reopening does not revoke the assignment's already published
+            # attest contribution. Restore only its fold, never its old rows.
+            inventory = self.inventory("attests", aid)
+            facts = previous.evidence.publication()
+            if old_closed:
+                warnings = combined_evidence(facts, old_closed["facts"])
+                # The combined closed warning may include other members; it
+                # does not replace this scope's own source or confirmation.
+                facts["freshness"] = warnings["freshness"]
+                facts["unconfirmedSince"] = warnings["unconfirmedSince"]
+            inventory.folded = previous.attests.summary()
+            inventory.attest_frontier = previous.attests.frontier
+            inventory.fingerprint = previous.detail_fingerprint
+            inventory.complete = facts["complete"]
+            inventory.stale = facts["freshness"] == "stale"
+            inventory.observed_at = facts["observedAt"]
+            inventory.confirmed_at = facts["observedAt"] if facts["complete"] else None
+            inventory.unconfirmed_since = facts.get("unconfirmedSince")
+            inventory.source = facts["source"]
+            inventory.data_revision += 1
+            self.summaries.pop(("attests", aid), None)
+
+        incoming = dict(assignments.rows.get(aid, {}), **deepcopy(row))
+        if (previous is not None and "commitRefCorrections" not in row
+                and "commitRefCorrections" not in incoming):
+            incoming["commitRefCorrections"] = deepcopy(list(previous.corrections))
+        changed = assignments.rows.get(aid) != incoming
+        assignments.rows[aid] = incoming
+        assignments.observations[aid] = dict(status="known", freshness="live",
+            observedAt=at, source=source, complete=True)
+        assignments.data_revision += 1
+        self.capture_assignment_contributions(items={wid})
+        # The existing collection and item-membership routes order assignments
+        # by openedAt DESC,id DESC. A new member must enter that same order,
+        # rather than being appended after the already released members.
+        members = [(key, value) for key, value in self.item_contributions.entries.items()
+                   if value.item == wid]
+        members.sort(key=lambda pair: (pair[1].opened_at is not None,
+                                      pair[1].opened_at or 0, pair[0]), reverse=True)
+        for order, (key, value) in enumerate(members):
+            self.item_contributions.entries[key] = value._replace(order=order)
+            if key in assignments.rows:
+                self.open_assignment_order[key] = order
+        ordered_rows = [(key, assignments.rows.pop(key)) for key, _ in members
+                        if key in assignments.rows]
+        assignments.rows.update(ordered_rows)
+
+        released = self.fold_closed_assignments(items={wid})
+        # A new member changes reference positions even when no row closes.
+        # Reopening removes only its own part from the closed reduction; its
+        # attest fold above remains current open evidence instead.
+        source_part = self.closed_items.get(wid) or old_closed
+        self._reduce_current_closed_item(wid, source_part)
+        if changed:
+            self.details_revision += 1
+        self._item_activity_parts.clear()
+        return released
 
     def hold_item_assignments(self, wid):
         item = self.work_items().get(wid)

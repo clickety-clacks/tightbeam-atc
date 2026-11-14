@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_service import LiveService
+from atc_payloads import ASSIGNMENT_FIELDS
 from test_item_assignment_retry import ItemReads
 from publication_assertions import assert_publication_equal, assert_replay_current
 
@@ -58,9 +59,9 @@ class AssignmentNoticeCostTest(unittest.TestCase):
         gateway = ItemReads()
         service = self.load(gateway)
         self.assertTrue(service.model.closed_sources_released)
-        row = dict(id='new-current', workItemId='work', holderKey='author',
+        row = dict.fromkeys(ASSIGNMENT_FIELDS) | dict(id='new-current', workItemId='work', holderKey='author',
                    state='open', effectKind='code', openedAt=30,
-                   closedAt=None, commitRefCorrections=[])
+                   closedAt=None, commitRefCorrections=[], files=[])
         gateway.rows['assignments', None].insert(0, row)
         gateway.rows['attests', row['id']] = []
         for state in ('open', 'closed'):
@@ -80,3 +81,28 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 assert_publication_equal(self, fresh.current, service.current,
                                          'b4-ordinary-' + state)
                 assert_replay_current(self, service, baseline, 'b4-ordinary-' + state + '-replay')
+
+    def test_reopen_uses_existing_fold_without_item_member_reads(self):
+        gateway = ItemReads()
+        # Membership and notices share the pinned complete public projection.
+        gateway.rows['assignments', None] = [dict.fromkeys(ASSIGNMENT_FIELDS) | row
+                                            for row in gateway.rows['assignments', None]]
+        service = self.load(gateway)
+        row = next(row for row in gateway.rows['assignments', None] if row['id'] == 'last')
+        row.update(state='open', closedAt=None)
+        before = deepcopy(service.current)
+        gateway.calls.clear()
+        payload = deepcopy(row)
+        payload.pop('commitRefCorrections', None)
+        service.change(dict(resource='assignments', op='upsert',
+            refs={'assignmentId': row['id'], 'workItemId': 'work'}, payload=payload,
+            **{'class': 'assignment.reopened'}))
+        self.settle(service)
+        self.assertEqual([], gateway.calls)
+        fresh_gateway = ItemReads()
+        fresh_gateway.rows = deepcopy(gateway.rows)
+        fresh = self.load(fresh_gateway)
+        assert_publication_equal(self, fresh.current, service.current, 'b4-reopen')
+        assert_replay_current(self, service, before, 'b4-reopen-replay')
+        self.assertEqual(set(), service.model.item_assignment_pending)
+        self.assertEqual({}, service.model.inventory('attests', 'last').rows)

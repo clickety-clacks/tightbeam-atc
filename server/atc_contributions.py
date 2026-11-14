@@ -81,6 +81,20 @@ class AttestContribution(NamedTuple):
                    tuple(summary['authors'].items()), tuple(sorted(summary['authorIds'])),
                    tuple(deepcopy(summary['refs'])), summary['activity'], frontier)
 
+    def summary(self):
+        """Restore the existing current fold when a contributor becomes open."""
+        from atc_summary import summarize
+        result = summarize('attests', ())
+        result['count'] = self.count
+        result['kinds'].update(dict(self.kinds))
+        result['verdicts'].update(dict(self.verdicts))
+        result['latest'].update(self.latest)
+        result['authors'].update(self.authors)
+        result['authorIds'].update(self.author_ids)
+        result['refs'].extend(deepcopy(self.refs))
+        result['activity'] = result['recentActivity'] = self.activity
+        return result
+
 
 class AssignmentContribution(NamedTuple):
     item: str

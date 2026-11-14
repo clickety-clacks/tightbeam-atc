@@ -261,6 +261,68 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual(contributions, model.item_contributions.entries)
         self.assertEqual(before, model.closed_items)
 
+    def test_assignment_projection_new_close_and_reopen_keep_full_model_parity(self):
+        from copy import deepcopy
+        model = ClosedAssignmentFoldTest().model()
+        baseline = deepcopy(model)
+        model.fold_closed_assignments()
+        new = dict(id='new', workItemId='work', state='open', holderKey='author',
+                   openedAt=40, closedAt=None, effectKind='code',
+                   reviewsAssignmentId=None)
+
+        def baseline_projection(row):
+            inventory = baseline.inventory('assignments')
+            merged = dict(inventory.rows.get(row['id'], {}), **row)
+            baseline.detail('assignments', None, Read([merged], True, 1100, 'feed'))
+            inventory.rows = dict(sorted(inventory.rows.items(), key=lambda pair: (
+                pair[1].get('openedAt') is not None, pair[1].get('openedAt') or 0,
+                pair[0]), reverse=True))
+
+        baseline_projection(new)
+        self.assertEqual(set(), model.apply_assignment_projection(new, at=1100, source='feed'))
+        for current in (model, baseline):
+            current.accept('attests', 'new', Read([], True, 1100, 'fixture'))
+        self.assertEqual(baseline.snapshot(1200), model.snapshot(1200))
+        self.assertEqual(0, model.item_contributions.entries['new'].order)
+
+        close = dict(new, state='closed', closedAt=150)
+        baseline_projection(close)
+        released = model.apply_assignment_projection(close, at=1100, source='feed')
+        self.assertEqual({('attests', 'new')}, released)
+        self.assertEqual(baseline.snapshot(1200), model.snapshot(1200))
+        self.assertNotIn('new', model.inventory('assignments').rows)
+        self.assertNotIn(('attests', 'new'), model.inventories)
+
+        # The reopened member has both old attest references and a correction.
+        # Neither is supplied by the assignment projection itself.
+        reopen = dict(id='last', workItemId='work', holderKey='other', state='open',
+                      openedAt=None, closedAt=None, effectKind='spec',
+                      reviewsAssignmentId=None)
+        baseline_projection(reopen)
+        prior = model.item_contributions.entries['last']
+        self.assertEqual(set(), model.apply_assignment_projection(reopen, at=1100, source='feed'))
+        self.assertEqual(baseline.snapshot(1200), model.snapshot(1200))
+        restored = model.inventory('attests', 'last')
+        self.assertEqual({}, restored.rows)
+        self.assertEqual(dict(prior.attests.kinds), dict(restored.folded['kinds']))
+        self.assertEqual(prior.attests.frontier, restored.attest_frontier)
+        self.assertEqual(prior.detail_fingerprint, restored.fingerprint)
+        self.assertEqual(list(prior.corrections),
+                         model.inventory('assignments').rows['last']['commitRefCorrections'])
+        self.assertEqual(2, model.closed_items['work']['count'])
+
+    def test_assignment_projection_does_not_complete_a_partial_item_source(self):
+        from copy import deepcopy
+        model = ClosedAssignmentFoldTest().model()
+        model.fold_closed_assignments()
+        model.hold_item_assignments('work')
+        before = deepcopy(model.snapshot(1200))
+        self.assertIsNone(model.apply_assignment_projection(dict(
+            id='open', workItemId='work', state='closed', closedAt=150),
+            at=1100, source='feed'))
+        self.assertEqual(before, model.snapshot(1200))
+        self.assertIn('work', model.item_assignment_pending)
+
     def test_membership_refresh_cannot_erase_released_attests_and_partial_retry_recovers(self):
         model = ClosedAssignmentFoldTest().model()
         assignment_rows = list(model.inventory('assignments').rows.values())

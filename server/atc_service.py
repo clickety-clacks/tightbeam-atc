@@ -24,7 +24,7 @@ from atc_upstream import ATTEST_FIELDS, Read, attest_row, now_ms
 # Runtime applies them across Gateway builds, with an explicit warning when the
 # connected identity differs; this is not runtime/feed acceptance evidence.
 from atc_payloads import (
-    WORK_ITEM_FIELDS, WORK_ITEM_SUMMARY_FIELDS, CLASSES, has_work_item_summary,
+    WORK_ITEM_FIELDS, WORK_ITEM_SUMMARY_FIELDS, ASSIGNMENT_FIELDS, CLASSES, has_work_item_summary,
     required_fields, policies_for, payload_policy_warning, supports_work_item_summary,
 )
 
@@ -1681,6 +1681,36 @@ class LiveService:
             key = None
         self.reads.schedule(resource, scope, key, priority=True)
 
+    def _apply_assignment_notice(self, notice, key, payload):
+        if (notice.get("op") != "upsert" or not ASSIGNMENT_FIELDS <= payload.keys()
+                or str(payload["id"]) != str(key)
+                or notice.get("class") not in {
+                    "assignment.opened", "assignment.closed", "assignment.reopened"}
+                or not self.model.closed_sources_released or self.cycle):
+            return False
+        wid = payload["workItemId"]
+        # A mutable assignment's timestamp-derived version is not strict
+        # across reopening. This path applies ordered feed projections only
+        # when no independently scheduled source result can overwrite them.
+        # Concurrent item replacement still uses its held publication path.
+        if (wid in self.model.item_assignment_pending
+                or ("assignments", None) in self.reads.active
+                or ("item-assignment-source", wid) in self.reads.active
+                or ("attests", str(key)) in self.reads.active
+                or any(job[:2] == ("attests", str(key))
+                       for job in (*self.reads.pending, *self.read_retries))):
+            return False
+        released = self.model.apply_assignment_projection(
+            payload, at=now_ms(), source="feed:" + notice["class"])
+        if released is None:
+            return False
+        self._forget_scopes(released)
+        self.metrics["payloads"] += 1
+        self._discover_assignment_sessions((payload,))
+        self._discover_histories()
+        self._ensure_retired_activity()
+        return True
+
     def change(self, notice):
         resource = notice.get("resource")
         if resource not in RESOURCE_REFS:
@@ -1696,6 +1726,8 @@ class LiveService:
             scope = payload.get("sessionKey") or refs.get("sessionKey")
         else:
             scope = None
+        if resource == "assignments" and self._apply_assignment_notice(notice, key, payload):
+            return True
         if (resource == "attests" and notice.get("op") == "upsert"
                 and payload.get("kind") and payload.get("bySession")
                 and activity_time(payload.get("ts")) is not None and scope):
