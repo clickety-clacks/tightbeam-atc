@@ -3,6 +3,7 @@
 from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from threading import Lock
 import time
 
 from atc_upstream import Read, now_ms
@@ -30,6 +31,8 @@ class ReadQueue:
         self.active_priorities = {}
         self.epochs = defaultdict(int)
         self.dispatched = 0
+        self.attest_owner_attempts = 0
+        self.attest_owner_counter_lock = Lock()
         self.epoch_discards = 0
         self.epoch_discards_by_resource = defaultdict(int)
 
@@ -74,6 +77,10 @@ class ReadQueue:
     def _read(self, job, keep_ids=()):
         resource, scope, key = job
         try:
+            if resource == "attest-owner":
+                with self.attest_owner_counter_lock:
+                    self.attest_owner_attempts += 1
+                return self.gateway.detail("assignments", scope)
             if resource == "retired-turns":
                 return self._retired_activity(keep_ids)
             if resource == "item-assignment-source":

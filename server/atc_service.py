@@ -13,7 +13,7 @@ import time
 import uuid
 
 from atc_git import GitResolver, reference_digest
-from atc_model import EvidenceModel, latest_time
+from atc_model import EvidenceModel, activity_time, latest_time
 from atc_evidence import combined_evidence, merge_value_for_refs
 from atc_reads import ReadQueue, ItemAssignmentSource
 from atc_reconciliation import ActiveBackstop, RETRY_MS
@@ -124,6 +124,11 @@ class LiveService:
         self.read_failures = set()
         self.assignment_source_unavailable = False
         self.read_retries = {}
+        # Transient unresolved notices, folded by author rather than retained
+        # as rows. A completed resolution leaves no assignment ownership cache.
+        self.attest_activity_pending = {}
+        self.attest_activity_counts = {"triggered": 0, "coalesced": 0,
+                                       "completed": 0, "failures": 0}
         self.retry_in_flight = set()
         self.retry_counters = {"scheduled": 0, "completed": 0, "incomplete": 0,
                                "epochDiscarded": 0}
@@ -541,9 +546,20 @@ class LiveService:
             at, assignment_source_unavailable=self.assignment_source_unavailable))
         self._retain_unproven_removals(data, at)
         old_agents = {row["id"]: row for row in self.current.get("agents", [])}
+        unresolved_activity = {}
+        for pending in self.attest_activity_pending.values():
+            if pending["failedAt"] is not None:
+                for author in pending["authors"]:
+                    unresolved_activity[author] = min(
+                        unresolved_activity.get(author, pending["failedAt"]), pending["failedAt"])
         for agent in data["agents"]:
             key = agent["sessionKey"]
             fact = agent["evidence"]["idleFor"]
+            if key in unresolved_activity:
+                if fact["freshness"] != "stale":
+                    fact["freshness"] = "unconfirmed"
+                fact["unconfirmedSince"] = min(
+                    fact.get("unconfirmedSince") or unresolved_activity[key], unresolved_activity[key])
             previous = old_agents.get(agent["id"])
             if (previous and previous.get("idleSince") == agent.get("idleSince") and
                     (self.state != "live" or fact["freshness"] != "live" or not fact["complete"])):
@@ -1133,6 +1149,8 @@ class LiveService:
         return True
 
     def _read_plan(self, resource, scope):
+        if resource == "attest-owner":
+            return ()
         if (resource == "turns" and self.model.closed_sources_released
                 and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
             # Correlation needs no retained turn inventory. Creating one here
@@ -1146,6 +1164,66 @@ class LiveService:
                 "visibleSessions": {row["sessionKey"] for row in self.model.active_sessions()},
                 "attests": not (self._summary_contract_active() and has_work_item_summary(item)
                                  and not self._summary_needs_review_timing(item))}
+
+    def _queue_attest_activity(self, assignment_id, author, timestamp):
+        """Stage an already eligible-kind notice until ownership is known."""
+        timestamp = activity_time(timestamp)
+        if not assignment_id or not author or timestamp is None:
+            return False
+        pending = self.attest_activity_pending.get(assignment_id)
+        if pending is not None:
+            self.attest_activity_counts["coalesced"] += 1
+        else:
+            pending = {"authors": {}, "observedAt": now_ms(), "failedAt": None}
+            self.attest_activity_pending[assignment_id] = pending
+            self.attest_activity_counts["triggered"] += 1
+        pending["authors"][author] = max(pending["authors"].get(author, 0), timestamp)
+        job = ("attest-owner", assignment_id, None)
+        if job not in self.read_retries:
+            # Do not touch the epoch: notices arriving during this read share
+            # its ownership result and retain their own authors/timestamps.
+            self.reads.schedule(*job, priority=True)
+        return True
+
+    def _attest_activity_owner_done(self, job, result):
+        assignment_id = job[1]
+        pending = self.attest_activity_pending.get(assignment_id)
+        self.retry_in_flight.discard(job)
+        if pending is None:
+            result.rows.clear()
+            self._forget_scopes({job[:2]})
+            return False
+        row = result.rows[0] if result.complete and len(result.rows) == 1 else None
+        usable = (row is not None and row.get("id") == assignment_id
+                  and "workItemId" in row
+                  and (row["workItemId"] is None or
+                       (isinstance(row["workItemId"], str) and bool(row["workItemId"]))))
+        if not usable:
+            if pending["failedAt"] is None:
+                pending["failedAt"] = now_ms()
+            self.attest_activity_counts["failures"] += 1
+            self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, 2)
+            self.retry_counters["scheduled"] += 1
+            result.rows.clear()
+            return True
+        owner = row["workItemId"]
+        item = self.model.work_items().get(owner)
+        eligible = owner is None or (item is not None and not (
+            self._summary_contract_active() and has_work_item_summary(item)
+            and not self._summary_needs_review_timing(item)))
+        # No read row escapes the resolution, including into an inventory.
+        result.rows.clear()
+        del row
+        if eligible:
+            facts = dict(status="known", freshness="live", complete=True,
+                         observedAt=pending["observedAt"], unconfirmedSince=None,
+                         source="cli:attests " + str(assignment_id))
+            for author, timestamp in pending["authors"].items():
+                self.model.fold_session_activity(author, timestamp, "attest", assignment_id, facts)
+        del self.attest_activity_pending[assignment_id]
+        self.attest_activity_counts["completed"] += 1
+        self._forget_scopes({job[:2]})
+        return True
 
     def _item_assignments_done(self, job, result):
         self.retry_in_flight.discard(job)
@@ -1193,6 +1271,8 @@ class LiveService:
             return False
         if resource == "retired-turns":
             return self._retired_activity_done(job, result)
+        if resource == "attest-owner":
+            return self._attest_activity_owner_done(job, result)
         if resource == "item-assignment-source":
             return self._item_assignments_done(job, result)
         assignments = self.model.inventory("assignments")
@@ -1376,7 +1456,13 @@ class LiveService:
             for row in result.rows:
                 if row.get("id") in self.model.item_assignment_pending:
                     self._request_item_assignments(row["id"], changed=True)
-            if key is None or summary_was_active != self._summary_contract_active():
+            summary_changed = summary_was_active != self._summary_contract_active()
+            if key is not None and summary_changed:
+                # An implicit contract change affects the full item scope.
+                # Confirm that collection so the changed item's provenance
+                # and the other items' scope describe the same fresh read.
+                self._refresh("work-items")
+            if key is None or summary_changed:
                 # Without a reported version, summary mode depends on every
                 # item's validity. One detail can change other items' scope.
                 self._reconcile_work_item_attests()
@@ -1650,6 +1736,7 @@ class LiveService:
                     if str(row["id"]) in self.model.item_assignment_pending:
                         self._request_item_assignments(str(row["id"]), changed=True)
                     if summary_was_active != self._summary_contract_active():
+                        self._refresh("work-items")
                         self._reconcile_work_item_attests()
                         self._discover_histories()
                     else:

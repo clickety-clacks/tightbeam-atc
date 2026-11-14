@@ -269,6 +269,7 @@ class ReturningAuthorTest(unittest.TestCase):
                     expected = None if row['rowVersion'] == 2 else 900000
                     self.assertEqual(expected, service.model.session_activity.get('guest-one'))
                     self.assertNotIn(('read', 'assignments', None), gateway.calls)
+                    self.assertEqual(1, gateway.calls.count(('read', 'work-items', None)))
                     assert_publication_equal(self, self.fresh(service).current, service.current,
                         "implicit-summary-" + delivery + "-" + state + "-" + str(row['rowVersion']))
 

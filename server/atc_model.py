@@ -31,6 +31,13 @@ def latest_time(*values):
                 and not isinstance(value, bool) and isfinite(value) and value > 0), default=None)
 
 
+def activity_time(value):
+    """Use the history fold's numeric maximum, including its zero baseline."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value):
+        return max(0, value)
+    return None
+
+
 class ClosedAssignmentFold:
     """Accumulate one item's published closed facts without retaining source rows."""
 
@@ -119,7 +126,7 @@ class EvidenceModel:
         contributor identities. Scope removal and confirmation are separate
         from receiving a positive activity fact.
         """
-        timestamp = latest_time(timestamp)
+        timestamp = activity_time(timestamp)
         if not session or timestamp is None:
             return False
         if kind == "attest":
@@ -145,7 +152,7 @@ class EvidenceModel:
         # combined_evidence retains its scalar confirmation semantics. Only
         # its per-scope source union is replaced by the fixed source contract.
         merged["source"] = sorted(kinds | {winner})
-        latest = latest_time(previous_at, timestamp)
+        latest = timestamp if previous_at is None else max(previous_at, timestamp)
         changed = previous_at != latest or previous != merged
         self.session_activity[session] = latest
         self.session_activity_evidence[session] = merged
