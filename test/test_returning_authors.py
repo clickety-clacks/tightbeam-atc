@@ -194,6 +194,59 @@ class ReturningAuthorTest(unittest.TestCase):
         self.assertEqual(950000,service.current['agents'][0]['idleSince'])
         self.assertEqual(publication(self.fresh(service).current),publication(service.current))
 
+    def test_summary_skip_transition_removes_then_restores_eligible_activity(self):
+        gateway = ReturningReads()
+        service = self.load(gateway)
+        self.returns(service, {'guest-one'}); self.drain(service)
+        original = deepcopy(gateway.rows['work-items', None][0])
+        gateway.rows['work-items', None] = [summarized_work(
+            holders=[], attest_counts={'progress': 2}) | dict(state='closed', closedAt=20)]
+        gateway.calls.clear()
+        with patch.object(service, 'rebuild', side_effect=AssertionError('global rebuild')):
+            service._refresh('work-items'); self.drain(service)
+        self.assertNotIn('guest-one', service.model.session_activity)
+        self.assertNotIn(('read', 'assignments', None), gateway.calls)
+        self.assertNotIn(('read', 'attests', 'assignment'), gateway.calls)
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+        gateway.rows['work-items', None] = [original | dict(rowVersion=3)]
+        gateway.calls.clear()
+        with patch.object(service, 'rebuild', side_effect=AssertionError('global rebuild')):
+            service._refresh('work-items'); self.drain(service)
+        self.assertEqual(900000, service.model.session_activity['guest-one'])
+        self.assertNotIn(('read', 'assignments', None), gateway.calls)
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+
+    def test_partial_item_source_holds_author_until_complete_lower_replacement(self):
+        gateway = ReturningReads()
+        service = self.load(gateway)
+        self.returns(service, {'guest-one', 'guest-two'}); self.drain(service)
+        gateway.rows['attests', 'assignment'][0]['ts'] = 700000
+        gateway.fail_item = True
+        service._request_item_assignments('work', changed=True); self.drain(service)
+        self.assertEqual(900000, service.model.session_activity['guest-one'])
+        self.assertEqual(800000, service.model.session_activity['guest-two'])
+        self.assertIn('work', service.model.item_assignment_pending)
+        gateway.fail_item = False
+        job = ('item-assignment-source', 'work', None)
+        service.read_retries.pop(job)
+        service._request_item_assignments('work'); self.drain(service)
+        self.assertEqual(700000, service.model.session_activity['guest-one'])
+        self.assertEqual(800000, service.model.session_activity['guest-two'])
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+
+    def test_retirement_removes_turn_only_activity(self):
+        gateway = ReturningReads()
+        gateway.rows['attests', 'assignment'] = []
+        guest = gateway.rows['sessions', None][-2]
+        guest['state'] = 'active'
+        gateway.rows['turns', 'guest-one'] = [dict(seq=3, sessionKey='guest-one', endedAt=950000)]
+        service = self.load(gateway)
+        self.assertEqual(950000, service.model.session_activity['guest-one'])
+        guest.update(state='retired', rowVersion=12)
+        service._refresh('sessions'); self.drain(service)
+        self.assertNotIn('guest-one', service.model.session_activity)
+        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+
     def test_returning_live_turn_keeps_existing_attachment_parity(self):
         for assignment in ('assignment',None):
             with self.subTest(assignment=assignment):

@@ -845,10 +845,25 @@ class LiveService:
         self._schedule_finish_time(item)
         if item["id"] in self.model.item_assignment_pending:
             return
-        if not self._summary_contract_active() or not has_work_item_summary(item):
-            return
         assignments = self.model.inventory("assignments")
         timing_needed = self._summary_needs_review_timing(item)
+        summary_active = self._summary_contract_active() and has_work_item_summary(item)
+        skip = summary_active and not timing_needed
+        owned = [row for row in assignments.rows.values()
+                 if row.get("workItemId") == item["id"]]
+        closed = self.model.closed_item(item["id"], owned)
+        if assignments.complete and (
+                (closed is not None and closed["detailsKnown"] == skip)
+                or (skip and any(self.model.inventory("attests", row["id"]).fingerprint
+                                 is not None for row in owned))):
+            # A change into or out of the existing summary-skip set changes
+            # activity eligibility even when the published counts are equal.
+            # Replace the item's whole source through its existing read path;
+            # never treat locally discarded rows as authoritative absence.
+            self._request_item_assignments(item["id"], changed=True)
+            return
+        if not summary_active:
+            return
         if (not assignments.complete
                 or (timing_needed and assignments.evidence()["freshness"] != "live")):
             if timing_needed and self.connected:
@@ -858,8 +873,6 @@ class LiveService:
                 if not pending and not active:
                     self._refresh("assignments")
             return
-        owned = [row for row in assignments.rows.values()
-                 if row.get("workItemId") == item["id"]]
         details_complete = all(
             self.model.inventory("attests", row["id"]).complete for row in owned)
         details_match = self._item_attest_counts_match(item, require_fresh=timing_needed)
