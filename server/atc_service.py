@@ -557,6 +557,7 @@ class LiveService:
         data = deepcopy(self.model.snapshot(
             at, assignment_source_unavailable=self.assignment_source_unavailable))
         self._retain_unproven_removals(data, at)
+        self._resolve_complete_contribution_holds()
         data['items'] = self.assignment_holds.published_items(data['items'])
         old_agents = {row["id"]: row for row in self.current.get("agents", [])}
         unresolved_activity = {}
@@ -1295,11 +1296,46 @@ class LiveService:
         del self.attest_activity_pending[assignment_id]
         self.attest_activity_counts["completed"] += 1
         self._forget_scopes({job[:2]})
-        if owner is not None and item is not None:
-            # The ordinary item-source path still refreshes its board facts;
-            # ownership resolution is not an item-publication substitute.
-            self._request_item_assignments(owner, changed=True)
+        contribution = self.model.item_contributions.entries.get(assignment_id)
+        if (eligible and owner is not None and item is not None
+                and (contribution is None or contribution.item != owner)):
+            # Ownership and one positive attest cannot establish this member's
+            # complete item contribution. Retain only the unresolved condition
+            # and actual publication; existing source flows own recovery.
+            published = next((value for value in self.current.get('items', ())
+                              if value['id'] == owner), None)
+            self.assignment_holds.hold(assignment_id, owner, published, at=now_ms(),
+                                       incomplete_contribution=True)
         return True
+
+    def _resolve_complete_contribution_holds(self):
+        """Observe existing complete source state without scheduling recovery.
+
+        Membership alone and positive partial histories do not qualify. The
+        publication boundary runs after normal fold/disposal, so both current
+        raw inventories and released complete contributions are covered.
+        Mutable read conflicts keep their independent resolution condition.
+        """
+        for aid, held in tuple(self.assignment_holds.assignments.items()):
+            if not held.incomplete_contribution or held.item in self.model.item_assignment_pending:
+                continue
+            contribution = self.model.item_contributions.entries.get(aid)
+            if contribution is None or contribution.item != held.item:
+                continue
+            if (not self._attest_activity_eligible(held.item)
+                    and self.model.assignment_evidence(held.item)['complete']
+                    and self.model.inventory('work-items').evidence_for(held.item)['complete']):
+                # The existing summary contract can make this history
+                # unnecessary. Do not require a new attest read to resolve
+                # already complete, eligible item facts.
+                self.assignment_holds.resolve_contribution(aid)
+                continue
+            if not contribution.evidence.complete:
+                continue
+            inventory = self.model.inventories.get(('attests', aid))
+            if inventory is not None and (inventory.needs_source_read or not inventory.complete):
+                continue
+            self.assignment_holds.resolve_contribution(aid)
 
     def _item_assignments_done(self, job, result, assignment_flight=None):
         try:
@@ -1342,6 +1378,12 @@ class LiveService:
                     conflicts, ((aid, wid) for aid in conflicts), at=now_ms())
                 released = self.model.replace_item_assignments(wid, result)
                 self._resolve_assignment_read_holds(conflicts, item=wid)
+                # This existing covering read establishes complete item facts,
+                # including complete absence. It does not resolve any remaining
+                # mutable conflict by virtue of contribution completeness.
+                for aid, held in tuple(self.assignment_holds.assignments.items()):
+                    if held.item == wid:
+                        self.assignment_holds.resolve_contribution(aid)
                 return released
             flight = self.reads.item_flights.get(wid)
             if flight is not None:
@@ -2001,15 +2043,32 @@ class LiveService:
             scope = None
         if resource == 'assignments':
             held = self.assignment_holds.assignments.get(str(key))
-            if (held is not None and assignment_delivery is not None
+            if (held is not None and held.conflict and assignment_delivery is not None
                     and assignment_delivery <= held.after_delivery):
                 # A queued establishing notice is the other side of the
                 # unresolved pair, not an authoritative next input. Do not
                 # apply it or schedule a replacement read from its fallback.
                 return True
+            if held is not None and held.incomplete_contribution:
+                contribution = self.model.item_contributions.entries.get(str(key))
+                inventory = self.model.inventories.get(('attests', str(key)))
+                existing_complete = (
+                    contribution is not None and contribution.item == held.item
+                    and contribution.evidence.complete)
+                history_complete = (inventory is not None and inventory.complete
+                                    and not inventory.needs_source_read)
+                if not existing_complete and not history_complete:
+                    # A mutable assignment projection carries no attest
+                    # history. Do not turn it into a partial contribution or
+                    # trigger discovery to make this hold's notice complete.
+                    return True
             if self._apply_assignment_notice(notice, key, payload):
                 if assignment_delivery is not None:
                     self.assignment_holds.resolve_notice(str(key), assignment_delivery)
+                return True
+            if held is not None and held.incomplete_contribution:
+                # An incomplete subsequent notice is not a resolver and must
+                # not obtain completeness by falling through to an item read.
                 return True
         if (resource == "attests" and notice.get("op") == "upsert"
                 and payload.get("kind") and payload.get("bySession")
@@ -2040,6 +2099,10 @@ class LiveService:
                 return True
         if resource == "attests" and self._apply_contribution_attest_notice(notice, key, scope, payload):
             return True
+        if resource == 'attests':
+            held = self.assignment_holds.assignments.get(str(scope))
+            if held is not None and held.incomplete_contribution:
+                return True
         owner = (payload.get("workItemId") or refs.get("workItemId") or
                  self.model.inventory("assignments").rows.get(
                      key if resource == "assignments" else scope, {}).get("workItemId"))

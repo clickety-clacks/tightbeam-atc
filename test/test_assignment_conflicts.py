@@ -14,6 +14,40 @@ from atc_upstream import Read
 
 
 class AssignmentConflictsTest(unittest.TestCase):
+    def test_contribution_and_ordering_holds_have_independent_resolvers(self):
+        for contribution_first in (False, True):
+            with self.subTest(contribution_first=contribution_first):
+                holds = AssignmentHolds()
+                prior = {'id': 'item', 'evidence': {}}
+                holds.hold('a', 'item', prior, at=100,
+                           incomplete_contribution=True)
+                self.assertFalse(holds.resolve_notice('a', 9))
+                self.assertFalse(holds.resolve('a'))  # complete membership only
+                holds.hold('a', 'item', None, at=200, after_delivery=10)
+                self.assertIs(prior, holds.items['item'])
+                self.assertFalse(holds.resolve_notice('a', 10))
+                if contribution_first:
+                    self.assertTrue(holds.resolve_contribution('a'))
+                    self.assertTrue(holds.assignments['a'].conflict)
+                    self.assertIs(prior, holds.items['item'])
+                    self.assertTrue(holds.resolve_notice('a', 11))
+                else:
+                    self.assertTrue(holds.resolve_notice('a', 11))
+                    self.assertTrue(holds.assignments['a'].incomplete_contribution)
+                    self.assertIs(prior, holds.items['item'])
+                    self.assertTrue(holds.resolve_contribution('a'))
+                self.assertEqual({}, holds.assignments)
+                self.assertEqual({}, holds.items)
+
+    def test_incomplete_contributor_exit_releases_both_causes_and_prior_absence(self):
+        holds = AssignmentHolds()
+        holds.hold('a', 'item', None, at=100, incomplete_contribution=True)
+        holds.hold('a', 'item', None, at=200, after_delivery=3)
+        self.assertEqual([], holds.published_items([{'id': 'item'}]))
+        holds.retain_items(set())
+        self.assertEqual({}, holds.assignments)
+        self.assertEqual({}, holds.items)
+
     def row(self, state='open', **changes):
         row = dict.fromkeys(ASSIGNMENT_FIELDS)
         row.update(id='a', workItemId='item', openedAt=100, state=state,

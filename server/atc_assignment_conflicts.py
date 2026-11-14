@@ -126,6 +126,8 @@ class _HeldAssignment(NamedTuple):
     item: str
     since: int | float
     after_delivery: int
+    conflict: bool = True
+    incomplete_contribution: bool = False
 
 
 class AssignmentHolds:
@@ -143,7 +145,8 @@ class AssignmentHolds:
         self.assignments = {}
         self.items = {}
 
-    def hold(self, assignment, item, published_item, *, at, after_delivery=0):
+    def hold(self, assignment, item, published_item, *, at, after_delivery=0,
+             incomplete_contribution=False):
         if published_item is not None and published_item.get('id') != item:
             raise ValueError('hold requires the actual published item')
         previous = self.assignments.get(assignment)
@@ -153,31 +156,50 @@ class AssignmentHolds:
             # A repeat conflict preserves the original publication/time, but
             # its establishing delivery is not a subsequent resolver either.
             self.assignments[assignment] = previous._replace(
-                after_delivery=max(previous.after_delivery, after_delivery))
+                after_delivery=max(previous.after_delivery, after_delivery),
+                conflict=previous.conflict or not incomplete_contribution,
+                incomplete_contribution=previous.incomplete_contribution or incomplete_contribution)
             return False
-        self.assignments[assignment] = _HeldAssignment(item, at, after_delivery)
+        self.assignments[assignment] = _HeldAssignment(
+            item, at, after_delivery, not incomplete_contribution, incomplete_contribution)
         self.items.setdefault(item, published_item)
         return True
 
     def resolve(self, assignment):
-        """Caller has accepted a next notice or a qualifying complete read."""
-        previous = self.assignments.pop(assignment, None)
+        """Resolve mutable ordering only; membership is not a complete contribution."""
+        return self._resolve(assignment, conflict=True)
+
+    def resolve_contribution(self, assignment):
+        """Caller has complete contribution facts, not just an ownership row."""
+        return self._resolve(assignment, contribution=True)
+
+    def _resolve(self, assignment, *, conflict=False, contribution=False):
+        previous = self.assignments.get(assignment)
         if previous is None:
             return False
+        remaining = previous._replace(
+            conflict=previous.conflict and not conflict,
+            incomplete_contribution=previous.incomplete_contribution and not contribution)
+        if remaining == previous:
+            return False
+        if remaining.conflict or remaining.incomplete_contribution:
+            self.assignments[assignment] = remaining
+            return True
+        del self.assignments[assignment]
         if not any(value.item == previous.item for value in self.assignments.values()):
             self.items.pop(previous.item)
         return True
 
     def resolve_notice(self, assignment, delivery):
         previous = self.assignments.get(assignment)
-        if previous is None or delivery <= previous.after_delivery:
+        if previous is None or not previous.conflict or delivery <= previous.after_delivery:
             return False
         return self.resolve(assignment)
 
     def retain_items(self, items):
         for assignment, held in tuple(self.assignments.items()):
             if held.item not in items:
-                self.resolve(assignment)
+                self._resolve(assignment, conflict=True, contribution=True)
 
     def since(self, item):
         return min((held.since for held in self.assignments.values() if held.item == item),
