@@ -296,6 +296,23 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.service.change(self.notice(close))
         self.assertIn(scoped, self.service.reads.pending)
         self.assertEqual('closed', self.service.model.item_contributions.entries['new'].state)
+        self.assertIsNone(self.service.model.item_contributions.entries['new'].evidence.observed_at)
+        # This eligible progress was written while open and delivered after
+        # closure, before the already scheduled first attest confirmation.
+        live = dict.fromkeys(ATTEST_FIELDS) | dict(id='new-live', assignmentId='new',
+            kind='progress', bySession='author', ts=4000, commitRefs=[])
+        self.gateway.rows['attests', 'new'].append(deepcopy(live))
+        pending, calls = dict(self.service.reads.pending), list(self.gateway.calls)
+        attest = dict(resource='attests', op='upsert',
+            refs={'attestId': live['id'], 'assignmentId': 'new'}, payload=live,
+            **{'class': 'attest.filed'})
+        self.assertTrue(self.service.change(attest))
+        self.assertTrue(self.service.change(attest))
+        current = self.service.model.item_contributions.entries['new']
+        self.assertEqual(1, current.attests.count)
+        self.assertFalse(current.evidence.complete)
+        self.assertEqual(pending, self.service.reads.pending)
+        self.assertEqual(calls, self.gateway.calls)
         self.assertEqual(epoch, self.service.reads.epochs['item-assignment-source', 'work'])
         self.service._handle(*event)
         self.assertIn('new', self.service.model.item_contributions.entries)

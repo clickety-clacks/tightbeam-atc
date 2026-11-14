@@ -165,6 +165,94 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 assert_replay_current(self, service, baseline,
                                      'b4-flight-count-' + aid + '-' + str(expected) + '-replay')
 
+    def test_reconstructed_closed_scope_keeps_live_notice_through_read_and_retry(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                gateway = ItemReads()
+                service = self.load(gateway)
+                baseline = deepcopy(service.current)
+                prior = service.model.item_contributions.entries['first']
+                gateway.calls.clear()
+                service._refresh('assignments')
+                service.reads.pump()
+                service._handle(*service.events.get(timeout=5))
+                inventory = service.model.inventory('attests', 'first')
+                self.assertFalse(service.model.closed_sources_released)
+                self.assertTrue(inventory.needs_source_read)
+                self.assertEqual(prior.attests.count, inventory.folded['count'])
+                self.assertEqual(prior.detail_fingerprint, inventory.fingerprint)
+                self.assertIn(('attests', 'first', None), service.reads.pending)
+                # The required read also discovers an eligible append whose
+                # notice was missed. Its count must enter current provenance
+                # before the other construction scopes finish.
+                gateway.rows['attests', 'first'].append(dict.fromkeys(ATTEST_FIELDS) | dict(
+                    id='read-only-append', assignmentId='first', kind='progress',
+                    bySession='author', ts=2000, commitRefs=[]))
+                started, release = Event(), Event()
+                self.addCleanup(release.set)
+                original = gateway.read
+                def read(resource, scope=None):
+                    result = original(resource, scope)
+                    if (resource, scope) == ('attests', 'first'):
+                        started.set()
+                        if not release.wait(5):
+                            raise AssertionError('fixture did not release reconstructed scope')
+                        if partial:
+                            return Read([], False, result.at, result.source, 'fixture-partial')
+                    return result
+                with patch.object(gateway, 'read', side_effect=read):
+                    # This prioritizes the already discovered scope; it does
+                    # not add a second read or change its epoch.
+                    service.reads.schedule('attests', 'first', priority=True)
+                    service.reads.pump()
+                    self.assertTrue(started.wait(5))
+                    row = dict.fromkeys(ATTEST_FIELDS) | dict(id='reconstructed-live',
+                        assignmentId='first', kind='progress', bySession='author',
+                        ts=4000, commitRefs=[])
+                    gateway.rows['attests', 'first'].append(deepcopy(row))
+                    notice = dict(resource='attests', op='upsert',
+                        refs={'attestId': row['id'], 'assignmentId': 'first'},
+                        payload=row, **{'class': 'attest.filed'})
+                    pending, epochs = dict(service.reads.pending), dict(service.reads.epochs)
+                    calls = list(gateway.calls)
+                    for _ in range(2):
+                        self.assertTrue(service.change(notice))
+                    self.assertEqual(prior.attests.count + 1, inventory.folded['count'])
+                    self.assertEqual(prior.attests.count + 1,
+                        service.model.item_contributions.entries['first'].attests.count)
+                    self.assertEqual(pending, service.reads.pending)
+                    self.assertEqual(epochs, dict(service.reads.epochs))
+                    self.assertEqual(calls, gateway.calls)
+                    service._publish()
+                    release.set()
+                    service._handle(*service.events.get(timeout=5))
+                expected = prior.attests.count + (1 if partial else 2)
+                self.assertEqual(expected, inventory.folded['count'])
+                self.assertEqual(expected,
+                    service.model.item_contributions.entries['first'].attests.count)
+                self.assertFalse(inventory.needs_source_read)
+                if partial:
+                    self.assertFalse(inventory.complete)
+                    self.assertTrue(inventory.stale)
+                    service._publish()
+                    deadline = service.read_retries['attests', 'first', None][0]
+                    with patch('atc_service.time.monotonic', return_value=deadline + 1):
+                        service._retry_incomplete_reads()
+                self.settle(service)
+                self.assertEqual(prior.attests.count + 2,
+                    service.model.item_contributions.entries['first'].attests.count)
+                self.assertEqual(0, service.reads.epoch_discards)
+                self.assertEqual(2 if partial else 1,
+                    sum(call[:2] == ('read', 'attests') and call[-1] == 'first'
+                        for call in gateway.calls))
+                self.assertFalse([call for call in gateway.calls if call[0] == 'membership'])
+                fresh_gateway = ItemReads()
+                fresh_gateway.rows = deepcopy(gateway.rows)
+                fresh = self.load(fresh_gateway)
+                label = 'b4-reconstructed-scope-' + str(partial)
+                assert_publication_equal(self, fresh.current, service.current, label)
+                assert_replay_current(self, service, baseline, label + '-replay')
+
     def test_failed_item_read_releases_buffer_without_erasing_live_attest(self):
         gateway = ItemReads()
         service = self.load(gateway)

@@ -1010,6 +1010,15 @@ class EvidenceModel:
                     self.closed_items[wid] = part
         self._item_activity_parts.clear()
 
+    def restore_assignment_attests(self, eligible_items):
+        for aid, row in self.inventory('assignments').rows.items():
+            previous = self.item_contributions.entries.get(aid)
+            if (previous is not None and previous.item in eligible_items
+                    and previous.item == row.get('workItemId')):
+                # Restore only final retained construction rows, after R29
+                # selection. A released protected contributor stays compact.
+                self.inventory('attests', aid).restore_attest_contribution(previous)
+
     def accept(self, resource, scope, result, *, activity_eligible=True, assignment_preserved=()):
         inventory = self.inventory(resource, scope)
         held_closed = {}

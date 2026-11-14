@@ -659,7 +659,8 @@ class LiveService:
         closed = {("attests", row["id"]) for row in assignments.rows.values()
                   if row.get("state") != "open"}
         if any(scope in self.reads.active or any(job[:2] == scope for job in self.reads.pending)
-               or (scope in eligible and not self.model.inventory(*scope).complete)
+               or (scope in eligible and (not self.model.inventory(*scope).complete
+                                         or self.model.inventory(*scope).needs_source_read))
                for scope in closed):
             return False
         released = self.model.fold_closed_assignments()
@@ -782,7 +783,8 @@ class LiveService:
             self._state("stale", "active reconciliation budget exceeded")
         elif self.reason == "active reconciliation budget exceeded":
             required = list(BASE_SCOPES) + scopes
-            complete = all(self.model.inventory(*s).complete and not self.model.inventory(*s).stale
+            complete = all(not self.model.inventory(*s).needs_source_read
+                           and self.model.inventory(*s).complete and not self.model.inventory(*s).stale
                            for s in required)
             if self.cycle:
                 self._state("rebuilding", "reading published state: " + self.cycle["mode"])
@@ -1051,14 +1053,15 @@ class LiveService:
         # stale. Re-add those scopes here; completed connected reads stay done.
         for inventory in cycle["seen"]:
             state = self.model.inventory(*inventory)
-            if not state.complete or state.stale or state.budget_stale:
+            if state.needs_source_read or not state.complete or state.stale or state.budget_stale:
                 cycle["pending"].add(inventory)
 
         for inventory in tuple(cycle["pending"]):
             if inventory in waiting_retries or inventory in queued or inventory in active:
                 continue
             state = self.model.inventory(*inventory)
-            if state.complete and not state.stale and not state.budget_stale:
+            if (not state.needs_source_read and state.complete
+                    and not state.stale and not state.budget_stale):
                 cycle["pending"].discard(inventory)
                 continue
             self.reads.schedule(*inventory)
@@ -1089,7 +1092,7 @@ class LiveService:
         scheduled = set(self.rotation)
         self.rotation.extend(s for s in scopes if s in terminal and s not in scheduled)
         # Newly discovered scopes are genuine data gaps, not interval recrawls.
-        missing = [s for s in scopes if self.model.inventory(*s).observed_at is None]
+        missing = [s for s in scopes if self.model.inventory(*s).needs_source_read]
         self._cycle_add(missing)
         for _ in range(min(self.scope_budget, len(self.rotation))):
             scope = self.rotation.popleft()
@@ -1116,7 +1119,8 @@ class LiveService:
         # A failing history remains stale until its next successful rotation;
         # a successful unrelated batch never declares the whole map complete.
         required = list(BASE_SCOPES) + self._history_scopes()
-        complete = all(self.model.inventory(*s).complete and not self.model.inventory(*s).stale
+        complete = all(not self.model.inventory(*s).needs_source_read
+                       and self.model.inventory(*s).complete and not self.model.inventory(*s).stale
                        for s in required)
         if self.metrics["bootstrapReads"] is None:
             self.metrics["bootstrapReads"] = self.gateway.read_count - cycle["reads"]
@@ -1363,7 +1367,8 @@ class LiveService:
             self._settle_cycle()
         elif self.connected and not self.read_failures and not self.model.item_assignment_pending:
             required = list(BASE_SCOPES) + self._history_scopes()
-            if all(self.model.inventory(*s).complete and not self.model.inventory(*s).stale
+            if all(not self.model.inventory(*s).needs_source_read
+                   and self.model.inventory(*s).complete and not self.model.inventory(*s).stale
                    for s in required):
                 self._state("live")
         return True
@@ -1653,6 +1658,12 @@ class LiveService:
             # accepting unaffected rows/absence. Publication is still the last
             # committed frame throughout this model-worker operation.
             self.model.accept_assignment_read_preserving(result, conflicts, arrivals=arrivals)
+            self.model.restore_assignment_attests({wid for wid in self.model.work_items()
+                if self._attest_activity_eligible(wid)})
+            # Membership establishes current contributor identity even before
+            # its first attest read. Empty/unread folds remain incomplete;
+            # valid notices can update them without invalidating that read.
+            self.model.capture_assignment_contributions()
             self._hold_assignment_conflict_deliveries(conflicts,
                 ((str(row['id']), row.get('workItemId')) for row in result.rows), at=now_ms())
             self._resolve_assignment_read_holds(conflicts,
@@ -1664,9 +1675,12 @@ class LiveService:
                 activity_eligible = (assignment is not None and "workItemId" in assignment
                                      and self._attest_activity_eligible(assignment["workItemId"]))
             self.model.accept(resource, scope, result, activity_eligible=activity_eligible)
-            if resource == 'attests' and self.model.closed_sources_released:
+            if resource == 'attests':
                 owner = assignments.rows.get(scope, {}).get('workItemId')
                 if owner is not None:
+                    # Construction can remain open for other scopes after
+                    # this one completes. Its current tuple must already use
+                    # the new fold before a later notice or partial retry.
                     self.model.capture_assignment_contributions(items={owner})
         else:
             self.model.detail(resource, scope, result)
@@ -1724,7 +1738,7 @@ class LiveService:
             # scopes before the next interval. Existing complete scopes stay.
             for nested, holder in self._history_scopes():
                 inventory = self.model.inventory(nested, holder)
-                if inventory.observed_at is None:
+                if inventory.needs_source_read:
                     if self.cycle:
                         self._cycle_add([(nested, holder)])
                     else:
@@ -1740,7 +1754,8 @@ class LiveService:
             self._settle_cycle()
         elif not self.cycle and self.connected and not self.read_failures and not self.correlation_gaps:
             required = list(BASE_SCOPES) + self._history_scopes()
-            if all(self.model.inventory(*s).complete and not self.model.inventory(*s).stale
+            if all(not self.model.inventory(*s).needs_source_read
+                   and self.model.inventory(*s).complete and not self.model.inventory(*s).stale
                    for s in required):
                 self._state("live")
         return True
@@ -1908,7 +1923,7 @@ class LiveService:
 
     def _apply_contribution_attest_notice(self, notice, key, scope, payload):
         """Update held or released provenance without re-reading members."""
-        if (not self.model.closed_sources_released or notice.get("op") != "upsert"
+        if (notice.get("op") != "upsert"
                 or notice.get("class") not in CLASSES["attests"]
                 or self.policies.get("attests") != "immutable"
                 or not set(ATTEST_FIELDS) <= payload.keys()
@@ -1930,8 +1945,6 @@ class LiveService:
             # This source is excluded by the same complete item-summary
             # contract as fresh load. Its notice cannot make it eligible.
             return True
-        if contribution.state != 'open' and contribution.evidence.observed_at is None:
-            return False
         row = attest_row(payload)
         flight = self.reads.item_flights.get(owner)
         if flight is not None:
@@ -1939,9 +1952,9 @@ class LiveService:
         scoped_flight = self.reads.attest_flights.get(str(scope))
         if scoped_flight is not None:
             scoped_flight.notice(str(scope), row)
-        if contribution.state == 'open':
-            assignment = self.model.inventory('assignments').rows.get(str(scope))
-            if assignment is None or assignment.get('workItemId') != owner:
+        assignment = self.model.inventory('assignments').rows.get(str(scope))
+        if assignment is not None:
+            if assignment.get('workItemId') != owner:
                 return False
             inventory = self.model.inventory('attests', str(scope))
             revision = inventory.data_revision
@@ -1957,7 +1970,7 @@ class LiveService:
                     # contributor, not certification of a partial source.
                     self.model.item_contributions.entries[str(scope)] = contribution._replace(
                         attests=updated)
-        elif not self.model.update_closed_attest_contribution(str(scope), row):
+        elif contribution.state == 'open' or not self.model.update_closed_attest_contribution(str(scope), row):
             return False
         self.metrics["payloads"] += 1
         return True
@@ -2152,7 +2165,7 @@ class LiveService:
 
     def _discover_histories(self):
         for resource, scope in self._history_scopes():
-            if self.model.inventory(resource, scope).observed_at is None:
+            if self.model.inventory(resource, scope).needs_source_read:
                 if self.cycle:
                     self._cycle_add([(resource, scope)])
                 else:

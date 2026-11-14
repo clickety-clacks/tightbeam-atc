@@ -25,6 +25,10 @@ class Inventory:
     source: str = ""
     data_revision: int = 0
 
+    @property
+    def needs_source_read(self):
+        return self.observed_at is None
+
     def read(self, rows, *, complete, at, source):
         """A read covers this inventory's entire declared scope.
 
@@ -281,15 +285,50 @@ class HistoryInventory(Inventory):
         self.raw_expiry = None
         self._pruned_keep_ids = None
         self.folded = summarize(resource, ())
+        self._restored_source = False
         if resource == "attests":
             self.attest_frontier = AttestFrontier()
+
+    @property
+    def needs_source_read(self):
+        return self._restored_source or super().needs_source_read
+
+    def restore_attest_contribution(self, contribution):
+        """Restore released facts without completing this scope's discovery.
+
+        A membership read recreates construction rows, not attest observations.
+        Keep the prior actual observation and fold until the already-required
+        scoped read completes. The flag is scheduling state, not confirmation.
+        Never overwrite an observed/partial inventory or an accepted raw row.
+        """
+        if (self.resource != 'attests' or self.observed_at is not None
+                or self.rows or self.folded['count'] or self.fingerprint is not None
+                or contribution.evidence.observed_at is None):
+            return False
+        facts = contribution.evidence.publication()
+        self.folded = contribution.attests.summary()
+        self.attest_frontier = contribution.attests.frontier
+        self.fingerprint = contribution.detail_fingerprint
+        self.complete = facts['complete']
+        self.stale = facts['freshness'] == 'stale'
+        self.observed_at = facts['observedAt']
+        self.confirmed_at = facts['observedAt'] if facts['complete'] else None
+        self.unconfirmed_since = facts.get('unconfirmedSince')
+        self.source = facts['source']
+        self._restored_source = True
+        self.data_revision += 1
+        return True
 
     def read_fold(self, fold, *, complete, at, source):
         from atc_summary import summarize
         previous = self.folded
-        first_read = self.observed_at is None
+        # A notice can establish positive attest facts before any read. A
+        # first partial response cannot overwrite those facts with a subset.
+        first_read = (self.observed_at is None and
+                      not (self.resource == 'attests' and self.data_revision))
         self.keep_ids = fold.keep_ids
         super().read(fold.rows.values(), complete=complete, at=at, source=source)
+        self._restored_source = False
         if complete or first_read:
             self.fingerprint = fold.fingerprint.hexdigest()
             self.folded = fold.summary
