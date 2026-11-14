@@ -96,18 +96,42 @@ class AssignmentContribution(NamedTuple):
     evidence: ContributionEvidence
     detail_fingerprint: str | None
 
+    @staticmethod
+    def current_corrections(rows):
+        return tuple(deepcopy({key: value for key, value in correction.items()
+                               if key not in {'reason', 'note'}})
+                     for correction in rows or ())
+
     @classmethod
     def capture(cls, row, inventory, order):
         # Correction text is never a published contribution. Preserve all
         # remaining current correction fields and their source order.
-        corrections = tuple(deepcopy({key: value for key, value in correction.items()
-                                      if key not in {'reason', 'note'}})
-                            for correction in row.get('commitRefCorrections') or ())
+        corrections = cls.current_corrections(row.get('commitRefCorrections'))
         return cls(row['workItemId'], row.get('holderKey'), row['state'],
                    row.get('openedAt'), row.get('closedAt'), row.get('effectKind'),
                    row.get('reviewsAssignmentId'), order, corrections,
                    AttestContribution.capture(inventory.folded, inventory.attest_frontier),
                    ContributionEvidence.capture(inventory.evidence()), inventory.fingerprint)
+
+    def assignment_update(self, row, *, order=None):
+        """Merge a source-eligible assignment projection into current facts.
+
+        The service must establish notice/read ordering before calling this.
+        Assignment notices do not carry commitRefCorrections or attest history:
+        their absence cannot erase either contribution. An explicit complete
+        correction list from an existing source read can replace that field.
+        """
+        fields = {
+            'item': 'workItemId', 'holder': 'holderKey', 'state': 'state',
+            'opened_at': 'openedAt', 'closed_at': 'closedAt',
+            'effect': 'effectKind', 'reviews': 'reviewsAssignmentId',
+        }
+        changes = {field: row[key] for field, key in fields.items() if key in row}
+        if 'commitRefCorrections' in row:
+            changes['corrections'] = self.current_corrections(row['commitRefCorrections'])
+        if order is not None:
+            changes['order'] = order
+        return self._replace(**changes)
 
 
 class ItemContributions:

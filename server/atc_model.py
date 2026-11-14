@@ -489,6 +489,10 @@ class EvidenceModel:
                      else self.open_assignment_order.get(aid, index))
             inventory = self.inventory("attests", aid)
             contribution = AssignmentContribution.capture(row, inventory, order)
+            if previous is not None and "commitRefCorrections" not in row:
+                # Membership/feed projections without correction history do
+                # not establish that an existing correction ceased to apply.
+                contribution = contribution._replace(corrections=previous.corrections)
             if previous is not None and not inventory.complete:
                 # Reading assignment membership alone does not replace its
                 # released attest contribution. An incomplete attest response

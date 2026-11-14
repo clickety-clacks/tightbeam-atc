@@ -42,6 +42,40 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual(60, last.closed_at)
         self.assertEqual('other', last.holder)
 
+    def test_assignment_close_and_reopen_keep_existing_attest_and_correction_facts(self):
+        original = self.entries()['last']
+        closed = original.assignment_update(dict(
+            state='closed', closedAt=75, subject='not a current contribution'))
+        self.assertEqual(75, closed.closed_at)
+        self.assertIs(original.attests, closed.attests)
+        self.assertIs(original.corrections, closed.corrections)
+        self.assertEqual(original.evidence, closed.evidence)
+        self.assertEqual(original.detail_fingerprint, closed.detail_fingerprint)
+        self.assertNotIn('not a current contribution', repr(closed))
+        # Explicit null terminal time on reopening clears the assignment fact,
+        # while omitted fields in a notice do not clear unrelated contributions.
+        reopened = closed.assignment_update(dict(state='open', closedAt=None))
+        self.assertEqual('open', reopened.state)
+        self.assertIsNone(reopened.closed_at)
+        self.assertIs(original.attests, reopened.attests)
+        self.assertEqual(original.order, reopened.order)
+        self.assertEqual(original.holder, reopened.holder)
+        self.assertEqual(original.corrections, reopened.corrections)
+
+    def test_assignment_source_correction_replaces_only_current_correction_field(self):
+        original = self.entries()['last']
+        changed = original.assignment_update(dict(commitRefCorrections=[dict(
+            id='new-correction', commitRefs=[{'commit': 'new'}],
+            note='discarded text', reason='discarded reason')]), order=4)
+        self.assertEqual(({'id': 'new-correction', 'commitRefs': [{'commit': 'new'}]},),
+                         changed.corrections)
+        self.assertEqual(4, changed.order)
+        self.assertIs(original.attests, changed.attests)
+        self.assertEqual((), changed.assignment_update(
+            {'commitRefCorrections': []}).corrections)
+        self.assertEqual(original.corrections,
+                         original.assignment_update({'closedAt': 90}).corrections)
+
     def test_reduction_keeps_order_corrections_and_authors_after_contributor_removal(self):
         entries = self.entries()
         store = ItemContributions()
@@ -118,6 +152,22 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertTrue(recovered.evidence.complete)
         self.assertEqual('live', recovered.evidence.freshness)
         self.assertEqual(1300, recovered.evidence.observed_at)
+
+    def test_membership_without_corrections_keeps_released_current_correction(self):
+        model = ClosedAssignmentFoldTest().model()
+        rows = [dict(row) for row in model.inventory('assignments').rows.values()]
+        model.fold_closed_assignments()
+        prior = model.item_contributions.entries['last'].corrections
+        for row in rows:
+            row.pop('commitRefCorrections', None)
+        model.accept('assignments', None, Read(rows, False, 1100, 'partial-membership'))
+        model.capture_assignment_contributions()
+        self.assertEqual(prior, model.item_contributions.entries['last'].corrections)
+        for row in rows:
+            row['commitRefCorrections'] = []
+        model.accept('assignments', None, Read(rows, True, 1200, 'complete-source'))
+        model.capture_assignment_contributions()
+        self.assertEqual((), model.item_contributions.entries['last'].corrections)
 
     def test_complete_membership_reorders_existing_open_and_closed_contributions(self):
         model = ClosedAssignmentFoldTest().model()
