@@ -173,6 +173,45 @@ class ItemContributionsTest(unittest.TestCase):
         model.accept('work-items', None, Read([], True, 1200, 'complete'))
         self.assertEqual({}, model.item_contributions.entries)
 
+    def test_newly_closed_raw_member_merges_with_previously_released_closed_members(self):
+        from copy import deepcopy
+        model = ClosedAssignmentFoldTest().model()
+        baseline = deepcopy(model)
+        model.fold_closed_assignments()
+        old_pin = model.closed_items['work']['detailFingerprint']
+        for current in (baseline, model):
+            row = dict(current.inventory('assignments').rows['open'],
+                       state='closed', closedAt=120)
+            current.detail('assignments', None, Read([row], True, 1100, 'detail'))
+        expected = baseline.snapshot(1200)
+        model.fold_closed_assignments()
+        self.assertEqual(expected, model.snapshot(1200))
+        part = model.closed_items['work']
+        self.assertEqual(3, part['count'])
+        self.assertEqual(3, part['summary']['count'])
+        self.assertEqual(120, part['closedAt'])
+        self.assertEqual(90, part['turnActivity'])
+        self.assertTrue(part['attestsRead'])
+        self.assertFalse(part['detailsKnown'])
+        self.assertEqual(old_pin, part['detailFingerprint'])
+        self.assertEqual({}, model.inventory('assignments').rows)
+        self.assertEqual({'first', 'open', 'last'}, set(model.item_contributions.entries))
+
+    def test_new_close_does_not_clear_released_contributors_outage_evidence(self):
+        from copy import deepcopy
+        model = ClosedAssignmentFoldTest().model()
+        baseline = deepcopy(model)
+        model.fold_closed_assignments()
+        for current in (baseline, model):
+            current.mark_unconfirmed(1100)
+            row = dict(current.inventory('assignments').rows['open'],
+                       state='closed', closedAt=120)
+            current.detail('assignments', None, Read([row], True, 1150, 'detail'))
+        model.fold_closed_assignments()
+        self.assertEqual(baseline.snapshot(1200), model.snapshot(1200))
+        self.assertEqual('unconfirmed', model.closed_items['work']['facts']['freshness'])
+        self.assertEqual(1100, model.closed_items['work']['facts']['unconfirmedSince'])
+
     def test_membership_refresh_cannot_erase_released_attests_and_partial_retry_recovers(self):
         model = ClosedAssignmentFoldTest().model()
         assignment_rows = list(model.inventory('assignments').rows.values())

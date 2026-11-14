@@ -523,6 +523,13 @@ class EvidenceModel:
         previous_order = self.open_assignment_order
         raw_closed_items = {row.get("workItemId") for row in assignments.rows.values()
                             if row.get("state") != "open"}
+        carried_items = set()
+        for aid, contribution in self.item_contributions.entries.items():
+            wid = contribution.item
+            if (aid not in assignments.rows and contribution.state != "open"
+                    and wid in raw_closed_items and (items is None or wid in items)):
+                grouped.setdefault(wid, ClosedAssignmentFold()).add_contribution(contribution)
+                carried_items.add(wid)
         self.open_assignment_order = ({} if items is None else dict(previous_order))
         live_ids = {turn.get("assignmentId") for resource, scope in self.inventories
                     if resource == "turns" for turn in self.summary(resource, scope)["live"]}
@@ -531,6 +538,9 @@ class EvidenceModel:
         released = set()
         for order, (aid, row) in enumerate(assignments.rows.items()):
             wid = row.get("workItemId")
+            contribution = self.item_contributions.entries.get(aid)
+            if contribution is not None:
+                order = contribution.order
             position = item_positions[wid]
             item_positions[wid] += 1
             if items is not None and wid not in items:
@@ -551,7 +561,16 @@ class EvidenceModel:
         for wid, fold in grouped.items():
             part = fold.finish()
             previous = self.closed_items.get(wid)
-            if (not part["detailsKnown"] and previous and
+            if wid in carried_items and previous:
+                # Only part of the raw source remains. Retain the last actual
+                # detail observation, never a hash of the incomplete source.
+                # An on-demand read checks it under the publication pin.
+                part["detailFingerprint"] = previous["detailFingerprint"]
+                part["assignmentFingerprint"] = previous["assignmentFingerprint"]
+                part["facts"] = combined_evidence(previous["facts"], part["facts"])
+                part["turnActivity"] = previous["turnActivity"]
+                part["activity"] = latest_time(part["activity"], part["turnActivity"])
+            elif (not part["detailsKnown"] and previous and
                     previous["assignmentFingerprint"] == part["assignmentFingerprint"]):
                 # Summary-backed items intentionally omit some attest reads.
                 # An on-demand pin remains valid until another detail read
