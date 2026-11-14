@@ -222,23 +222,35 @@ class ReturningAuthorTest(unittest.TestCase):
         self.assertNotIn(('read', 'assignments', None), gateway.calls)
         self.assertEqual(publication(self.fresh(service).current), publication(service.current))
 
-    def test_partial_item_source_holds_author_until_complete_lower_replacement(self):
+    def test_partial_item_source_holds_author_until_complete_appended_activity(self):
         gateway = ReturningReads()
+        # Progress attests are inserted on an open assignment. Existing
+        # attest IDs and timestamps remain immutable across this retry.
+        gateway.rows['assignments', None][0].update(state='open', closedAt=None)
         service = self.load(gateway)
         self.returns(service, {'guest-one', 'guest-two'}); self.drain(service)
-        gateway.rows['attests', 'assignment'][0]['ts'] = 700000
+        before = deepcopy(service.current)
+        original = deepcopy(gateway.rows['attests', 'assignment'])
+        gateway.rows['attests', 'assignment'].append(dict(id='appended', assignmentId='assignment',
+            kind='progress', bySession='guest-one', ts=1100000))
         gateway.fail_item = True
         service._request_item_assignments('work', changed=True); self.drain(service)
         self.assertEqual(900000, service.model.session_activity['guest-one'])
         self.assertEqual(800000, service.model.session_activity['guest-two'])
         self.assertIn('work', service.model.item_assignment_pending)
+        held = deepcopy(service.current)
         gateway.fail_item = False
         job = ('item-assignment-source', 'work', None)
         service.read_retries.pop(job)
         service._request_item_assignments('work'); self.drain(service)
-        self.assertEqual(700000, service.model.session_activity['guest-one'])
+        self.assertEqual(1100000, service.model.session_activity['guest-one'])
         self.assertEqual(800000, service.model.session_activity['guest-two'])
-        self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+        self.assertEqual(original, gateway.rows['attests', 'assignment'][:-1])
+        fresh = self.fresh(service).current
+        capture_publication(fresh, service.current, 'partial-item-appended-activity',
+                            before=before, heldDuringFailure=held)
+        assert_publication_equal(self, fresh, service.current, 'partial-item-appended-parity')
+        assert_replay_current(self, service, before, 'partial-item-appended-replay')
 
     def test_one_item_detail_or_payload_changes_implicit_scope_for_other_items(self):
         for delivery, state in (('detail', 'closed'), ('payload', 'closed'),
