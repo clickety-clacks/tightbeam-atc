@@ -112,6 +112,42 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual({'author': 10}, remaining['summary']['authors'])
         self.assertEqual([], remaining['corrections'])
 
+    def test_close_reduction_keeps_old_closed_facts_and_reopen_removes_only_its_part(self):
+        entries = self.entries()
+
+        def reduced():
+            fold = ClosedAssignmentFold()
+            for value in entries.values():
+                if value.state != 'open':
+                    fold.add_contribution(value)
+            return fold.part
+
+        before = reduced()
+        entries['open'] = entries['open'].assignment_update(
+            {'state': 'closed', 'closedAt': 100})
+        closed = reduced()
+        self.assertEqual(3, closed['count'])
+        self.assertEqual(3, closed['summary']['count'])
+        self.assertEqual(100, closed['closedAt'])
+        self.assertEqual(before['corrections'], closed['corrections'])
+        self.assertEqual({'author': 20, 'other': 30}, closed['summary']['authors'])
+        self.assertEqual([{'commit': 'first'}, {'commit': 'open'}, {'commit': 'corrected'}],
+                         [ref for _, _, ref in sorted(closed['refs'], key=lambda x: x[:2])])
+        entries['last'] = entries['last'].assignment_update(
+            {'state': 'open', 'closedAt': None})
+        reopened = reduced()
+        self.assertEqual(2, reopened['count'])
+        self.assertEqual(2, reopened['summary']['count'])
+        self.assertEqual({'author': 20}, reopened['summary']['authors'])
+        self.assertEqual([], reopened['corrections'])
+        self.assertEqual([{'commit': 'first'}, {'commit': 'open'}],
+                         [ref for _, _, ref in sorted(reopened['refs'], key=lambda x: x[:2])])
+        # Reopened source is still current; its correction belongs to the open
+        # contribution, rather than being deleted or counted twice as closed.
+        self.assertEqual(({'id': 'correction', 'commitRefs': [{'commit': 'corrected'}]},),
+                         entries['last'].corrections)
+        self.assertFalse(reopened['detailsKnown'])
+
     def test_model_disposal_preserves_contributions_and_item_exit_drops_them(self):
         model = ClosedAssignmentFoldTest().model()
         before = model.snapshot(1000)
