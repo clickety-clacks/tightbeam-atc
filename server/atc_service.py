@@ -16,6 +16,7 @@ from atc_git import GitResolver, reference_digest
 from atc_model import EvidenceModel, activity_time, latest_time
 from atc_evidence import combined_evidence, merge_value_for_refs
 from atc_reads import ReadQueue, ItemAssignmentSource, replay_attest_read
+from atc_assignment_conflicts import AssignmentHolds
 from atc_reconciliation import ActiveBackstop, RETRY_MS
 from atc_upstream import ATTEST_FIELDS, Read, attest_row, now_ms
 
@@ -123,6 +124,10 @@ class LiveService:
         self.sweep_remaining = set()
         self.read_failures = set()
         self.assignment_source_unavailable = False
+        # Mutable read/feed conflicts retain only the actual published item.
+        # They are not partial item reads and do not keep a recovery cycle open.
+        self.assignment_holds = AssignmentHolds()
+        self.assignment_delivery_consumed = 0
         self.read_retries = {}
         # Transient unresolved notices, folded by author rather than retained
         # as rows. A completed resolution leaves no assignment ownership cache.
@@ -552,6 +557,7 @@ class LiveService:
         data = deepcopy(self.model.snapshot(
             at, assignment_source_unavailable=self.assignment_source_unavailable))
         self._retain_unproven_removals(data, at)
+        data['items'] = self.assignment_holds.published_items(data['items'])
         old_agents = {row["id"]: row for row in self.current.get("agents", [])}
         unresolved_activity = {}
         for pending in self.attest_activity_pending.values():
@@ -1351,6 +1357,25 @@ class LiveService:
         return self.reads.assignment_reads.consume(value[0],
             lambda flight: self._consume_read_done(value, flight))
 
+    def _hold_assignment_conflicts(self, rows, flight, *, complete, at):
+        """Establish holds before a caller commits its selectively merged read.
+
+        This comparison does not apply the read or choose a mutable winner.
+        Callers must preserve the conflicting assignment's existing source
+        state as well as the item's committed publication until resolution.
+        """
+        if flight is None or not complete:
+            return set()
+        conflicts = flight.conflict_deliveries(rows, complete=True)
+        published = {item['id']: item for item in self.current.get('items', ())}
+        for row in rows:
+            aid, wid = str(row['id']), row.get('workItemId')
+            if aid not in conflicts or wid not in published:
+                continue
+            self.assignment_holds.hold(aid, wid, published[wid], at=at,
+                after_delivery=max(conflicts[aid], self.assignment_delivery_consumed))
+        return set(conflicts)
+
     def _consume_read_done(self, value, assignment_flight=None):
         # The R29 equality summary survives through this whole consumption,
         # including queue delay. Its publication merge is integrated here next;
@@ -1884,6 +1909,11 @@ class LiveService:
             # Direct model-owner calls use the same admission as feed delivery.
             # Queued calls pass their ticket and must not register a second time.
             assignment_delivery = self.reads.assignment_reads.admit(notice)
+        if assignment_delivery is not None:
+            # Already-consumed notices cannot retroactively resolve a conflict
+            # discovered by a subsequently consumed read result.
+            self.assignment_delivery_consumed = max(
+                self.assignment_delivery_consumed, assignment_delivery)
         resource = notice.get("resource")
         if resource not in RESOURCE_REFS:
             # Observational events do not imply that every inventory changed.

@@ -245,3 +245,24 @@ class AssignmentConflictsTest(unittest.TestCase):
         self.assertTrue(flight.closed)
         self.assertFalse(reads.pending)
         self.assertEqual(0, reads.epoch_discards)
+
+    def test_publication_overlay_keeps_prior_uncertainty_and_releases_exited_items(self):
+        holds = AssignmentHolds()
+        old = {'id': 'item', 'title': 'Published', 'evidence': {
+            'assignments': dict(status='known', freshness='live', complete=True,
+                                observedAt=90, unconfirmedSince=None, source='assignments'),
+            'attests': dict(status='unknown', freshness='stale', complete=False,
+                           observedAt=80, unconfirmedSince=95, source='attests')}}
+        original = deepcopy(old)
+        holds.hold('a', 'item', old, at=100, after_delivery=3)
+        unrelated = {'id': 'other', 'title': 'Current'}
+        rendered = holds.published_items([{'id': 'item', 'title': 'Unpublished'}, unrelated])
+        self.assertEqual('Published', rendered[0]['title'])
+        self.assertEqual('unconfirmed', rendered[0]['evidence']['assignments']['freshness'])
+        self.assertEqual(100, rendered[0]['evidence']['assignments']['unconfirmedSince'])
+        self.assertEqual(old['evidence']['attests'], rendered[0]['evidence']['attests'])
+        self.assertEqual(original, old)
+        self.assertIs(unrelated, rendered[1])
+        self.assertEqual([unrelated], holds.published_items([unrelated]))
+        self.assertEqual({}, holds.assignments)
+        self.assertEqual({}, holds.items)

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from copy import deepcopy
 from threading import RLock
 from typing import NamedTuple
 
@@ -153,6 +154,32 @@ class AssignmentHolds:
     def since(self, item):
         return min((held.since for held in self.assignments.values() if held.item == item),
                    default=None)
+
+    def published_items(self, items):
+        """Overlay only held items onto a new frame, without mutating old frames.
+
+        The caller supplies the current published item set after its existing
+        incomplete-removal handling. A missing item here has actually left the
+        board; it is not evidence that one failed source read removed it.
+        This neither confirms nor resolves any retained assignment.
+        """
+        self.retain_items({item['id'] for item in items})
+        result = []
+        for item in items:
+            previous = self.items.get(item['id'])
+            if previous is None:
+                result.append(item)
+                continue
+            retained = deepcopy(previous)
+            since = self.since(item['id'])
+            for fact in retained.get('evidence', {}).values():
+                if fact['freshness'] != 'stale':
+                    fact['freshness'] = 'unconfirmed'
+                old_since = fact.get('unconfirmedSince')
+                fact['unconfirmedSince'] = (since if old_since is None
+                                            else min(old_since, since))
+            result.append(retained)
+        return result
 
 
 class AssignmentReadRegistry:
