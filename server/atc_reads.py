@@ -157,6 +157,12 @@ class ReadQueue:
         self.executor = ThreadPoolExecutor(max_workers=workers)
         self.pending = OrderedDict()
         self.active = {}
+        # Model-worker owned registry; each flight synchronizes its own read
+        # worker boundary. Results queued for application still own a flight.
+        self.item_flights = {}
+        self.flight_peak_notices = 0
+        self.flight_maximum_lifetime = 0.0
+        self.flight_maximum_read_duration = 0.0
         # Epoch-invalidated reads must keep their original scheduling urgency.
         self.active_priorities = {}
         self.epochs = defaultdict(int)
@@ -198,13 +204,19 @@ class ReadQueue:
             epoch = self.epochs[inventory]
             self.active[inventory] = job, epoch
             self.active_priorities[inventory] = priority
-            future = self.executor.submit(self._read, job, self.current_ids(*job[:2]))
+            plan = self.current_ids(*job[:2])
+            if job[0] == 'item-assignment-source':
+                flight = AttestReadFlight()
+                self.item_flights[job[1]] = flight
+                future = self.executor.submit(self._read, job, plan, flight)
+            else:
+                future = self.executor.submit(self._read, job, plan)
             future.add_done_callback(
                 lambda done, job=job, epoch=epoch:
                 None if done.cancelled() else
                 self.events.put(("read", (job, epoch, done.result()))))
 
-    def _read(self, job, keep_ids=()):
+    def _read(self, job, keep_ids=(), flight=None):
         resource, scope, key = job
         try:
             if resource == "attest-owner":
@@ -214,7 +226,7 @@ class ReadQueue:
             if resource == "retired-turns":
                 return self._retired_activity(keep_ids)
             if resource == "item-assignment-source":
-                return self._item_assignments(scope, keep_ids)
+                return self._item_assignments(scope, keep_ids, flight)
             if key is None:
                 if hasattr(self.gateway, "read_current"):
                     return self.gateway.read_current(resource, scope, keep_ids=keep_ids)
@@ -361,11 +373,25 @@ class ReadQueue:
         self.active.pop(inventory)
         priority = self.active_priorities.pop(inventory)
         if epoch != self.epochs[job[:2]]:
+            if job[0] == 'item-assignment-source':
+                self.discard_item_flight(job[1])
             self.epoch_discards += 1
             self.epoch_discards_by_resource[job[0]] += 1
             self.schedule(*job, priority=priority == 2, active=priority == 1)
             return False
         return True
 
+    def discard_item_flight(self, wid):
+        flight = self.item_flights.pop(wid, None)
+        if flight is not None:
+            flight.discard()
+            # Bounded maxima only; no completed-attempt history is retained.
+            self.flight_peak_notices = max(self.flight_peak_notices, flight.peak_notice_count)
+            self.flight_maximum_lifetime = max(self.flight_maximum_lifetime, flight.maximum_lifetime)
+            self.flight_maximum_read_duration = max(
+                self.flight_maximum_read_duration, flight.maximum_read_duration)
+
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
+        for wid in tuple(self.item_flights):
+            self.discard_item_flight(wid)

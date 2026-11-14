@@ -1,5 +1,6 @@
 """Ordinary assignment changes must not fan out over released item history."""
 from copy import deepcopy
+from threading import Event
 import unittest
 import sys
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_service import LiveService
 from atc_payloads import ASSIGNMENT_FIELDS
-from atc_upstream import ATTEST_FIELDS
+from atc_upstream import ATTEST_FIELDS, Read
 from test_item_assignment_retry import ItemReads
 from test_service import summarized_work
 from publication_assertions import assert_publication_equal, assert_replay_current
@@ -43,6 +44,157 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                      or (call[:2] == ('read', 'attests') and call[-1] != changed)]
         self.assertEqual([], unrelated, calls)
         self.assertFalse([call for call in calls if call[0] == 'membership'], calls)
+
+    def test_attest_burst_replays_queued_complete_item_result_without_restart(self):
+        cases = [(aid, ids, count) for aid in ('first', 'open')
+                 for ids, count in ((('b', 'c'), 4), (('a', 'c'), 3))]
+        for aid, replay_ids, expected in cases:
+            with self.subTest(assignment=aid, replay_ids=replay_ids):
+                gateway = ItemReads()
+                def row(key, timestamp):
+                    return dict.fromkeys(ATTEST_FIELDS) | dict(id=key, assignmentId=aid,
+                        kind='progress', bySession='author', ts=timestamp, commitRefs=[])
+                initial = [row('m', 1000), row('a', 2000)]
+                gateway.rows['attests', aid] = deepcopy(initial)
+                service = self.load(gateway)
+                baseline = deepcopy(service.current)
+                started, release = Event(), Event()
+                self.addCleanup(release.set)
+                original = gateway.read
+                def read(resource, scope=None):
+                    result = original(resource, scope)
+                    if (resource, scope) == ('attests', aid):
+                        started.set()
+                        if not release.wait(5):
+                            raise AssertionError('fixture did not release captured snapshot')
+                    return result
+                gateway.calls.clear()
+                with patch.object(gateway, 'read', side_effect=read):
+                    service._request_item_assignments('work')
+                    service.reads.pump()
+                    self.assertTrue(started.wait(5))
+                    flight = service.reads.item_flights['work']
+                    self.assertIn(aid, flight.buffers)
+                    epoch = service.reads.epochs['item-assignment-source', 'work']
+                    for identity in replay_ids:
+                        notice_row = row(identity, {'a': 2000, 'b': 3000, 'c': 4000}[identity])
+                        if identity != 'a':
+                            gateway.rows['attests', aid].append(deepcopy(notice_row))
+                        self.assertTrue(service.change(dict(resource='attests', op='upsert',
+                            refs={'attestId': identity, 'assignmentId': aid},
+                            payload=notice_row, **{'class': 'attest.filed'})))
+                        service._publish()
+                    self.assertEqual(expected,
+                        service.model.item_contributions.entries[aid].attests.count)
+                    self.assertEqual(epoch, service.reads.epochs['item-assignment-source', 'work'])
+                    self.assertEqual(2, flight.notice_count)
+                    self.assertFalse(service.reads.pending)
+                    release.set()
+                    kind, result = service.events.get(timeout=5)
+                    # The complete result is queued, not yet locally applied.
+                    self.assertEqual('read', kind)
+                    self.assertTrue(result[2].complete, result[2].error)
+                    self.assertFalse(flight.closed)
+                    self.assertEqual(2, flight.notice_count)
+                    service._handle(kind, result)
+                    self.settle(service)
+                self.assertTrue(flight.closed)
+                self.assertEqual({}, flight.buffers)
+                self.assertNotIn('work', service.reads.item_flights)
+                self.assertEqual(0, service.reads.epoch_discards)
+                self.assertEqual(1, sum(call[0] == 'membership' for call in gateway.calls))
+                self.assertEqual(1, sum(call[:2] == ('read', 'attests') and call[-1] == aid
+                                        for call in gateway.calls))
+                fresh_gateway = ItemReads()
+                fresh_gateway.rows = deepcopy(gateway.rows)
+                fresh = self.load(fresh_gateway)
+                assert_publication_equal(self, fresh.current, service.current,
+                                         'b4-flight-count-' + aid + '-' + str(expected))
+                assert_replay_current(self, service, baseline,
+                                     'b4-flight-count-' + aid + '-' + str(expected) + '-replay')
+
+    def test_failed_item_read_releases_buffer_without_erasing_live_attest(self):
+        gateway = ItemReads()
+        service = self.load(gateway)
+        started, release = Event(), Event()
+        self.addCleanup(release.set)
+        original = gateway.read
+        def read(resource, scope=None):
+            result = original(resource, scope)
+            if (resource, scope) == ('attests', 'first'):
+                started.set()
+                if not release.wait(5):
+                    raise AssertionError('fixture did not release failed snapshot')
+                return Read(result.rows, False, result.at, result.source, 'fixture-partial')
+            return result
+        with patch.object(gateway, 'read', side_effect=read):
+            service._request_item_assignments('work')
+            service.reads.pump()
+            self.assertTrue(started.wait(5))
+            flight = service.reads.item_flights['work']
+            row = dict.fromkeys(ATTEST_FIELDS) | dict(id='live', assignmentId='first',
+                kind='progress', bySession='author', ts=4000, commitRefs=[])
+            gateway.rows['attests', 'first'].append(deepcopy(row))
+            service.change(dict(resource='attests', op='upsert',
+                refs={'attestId': 'live', 'assignmentId': 'first'}, payload=row,
+                **{'class': 'attest.filed'}))
+            live = deepcopy(service.model.item_contributions.entries['first'])
+            self.assertEqual(2, live.attests.count)
+            self.assertEqual(1, flight.notice_count)
+            release.set()
+            service._handle(*service.events.get(timeout=5))
+        self.assertEqual(live, service.model.item_contributions.entries['first'])
+        self.assertEqual(4000, service.model.session_activity['author'])
+        self.assertTrue(flight.closed)
+        self.assertEqual({}, flight.buffers)
+        self.assertNotIn('work', service.reads.item_flights)
+        self.assertIn(('item-assignment-source', 'work', None), service.read_retries)
+        self.assertIn('work', service.model.item_assignment_pending)
+        service._publish()
+        self.assertFalse(service.current['items'][0]['evidence']['assignments']['complete'])
+        # Retry is a distinct attempt and starts from the now-complete source.
+        service.read_retries.clear()
+        service.reads.schedule('item-assignment-source', 'work', priority=True)
+        self.settle(service)
+        fresh_gateway = ItemReads()
+        fresh_gateway.rows = deepcopy(gateway.rows)
+        fresh = self.load(fresh_gateway)
+        assert_publication_equal(self, fresh.current, service.current, 'b4-flight-failure-retry')
+
+    def test_item_exit_releases_protection_before_delayed_read_result(self):
+        gateway = ItemReads()
+        service = self.load(gateway)
+        started, release = Event(), Event()
+        self.addCleanup(release.set)
+        original = gateway.read
+        def read(resource, scope=None):
+            result = original(resource, scope)
+            if (resource, scope) == ('attests', 'first'):
+                started.set()
+                if not release.wait(5):
+                    raise AssertionError('fixture did not release abandoned snapshot')
+            return result
+        with patch.object(gateway, 'read', side_effect=read):
+            service._request_item_assignments('work')
+            service.reads.pump()
+            self.assertTrue(started.wait(5))
+            flight = service.reads.item_flights['work']
+            row = dict.fromkeys(ATTEST_FIELDS) | dict(id='live', assignmentId='first',
+                kind='progress', bySession='author', ts=4000, commitRefs=[])
+            service.change(dict(resource='attests', op='upsert',
+                refs={'attestId': 'live', 'assignmentId': 'first'}, payload=row,
+                **{'class': 'attest.filed'}))
+            self.assertEqual(1, flight.notice_count)
+            service.model.accept('work-items', None, Read([], True, 1000, 'published-read'))
+            service._publish()
+            self.assertTrue(flight.closed)
+            self.assertEqual({}, flight.buffers)
+            self.assertNotIn('work', service.reads.item_flights)
+            release.set()
+            service._handle(*service.events.get(timeout=5))
+        self.assertNotIn(('item-assignment-source', 'work', None), service.read_retries)
+        self.assertNotIn('work', service.model.item_assignment_pending)
+        self.assertEqual([], service.current['items'])
 
     def test_reduced_detail_pin_does_not_change_attest_source_eligibility(self):
         gateway = ItemReads()

@@ -667,8 +667,9 @@ class EvidenceModel:
 
         Source ownership, feed policy and concurrent replacement ordering are
         the caller's responsibility. This changes neither the last source
-        confirmation nor its actual detail fingerprint. Pending replacement
-        facts stay held until the replacement integration can merge the notice.
+        confirmation nor its actual detail fingerprint. A pending complete
+        replacement does not suppress known live effects; its flight must
+        replay these notices before applying the replacement.
         """
         aid = str(aid)
         previous = self.item_contributions.entries.get(aid)
@@ -676,7 +677,7 @@ class EvidenceModel:
             return False
         wid = previous.item
         assignments = self.inventory("assignments")
-        if (wid not in self.work_items() or wid in self.item_assignment_pending
+        if (wid not in self.work_items()
                 or aid in assignments.rows
                 or any(value.get("workItemId") == wid and value.get("state") != "open"
                        for value in assignments.rows.values())):

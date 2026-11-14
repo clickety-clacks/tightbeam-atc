@@ -535,6 +535,7 @@ class LiveService:
         removed = self.model.item_assignment_pending - self.model.work_items().keys()
         self._forget_scopes({("item-assignment-source", wid) for wid in removed})
         for wid in removed:
+            self.reads.discard_item_flight(wid)
             self.model.item_assignment_pending.discard(wid)
             self.model.item_assignment_facts.pop(wid, None)
             self.model.item_assignment_summary.pop(wid, None)
@@ -1258,6 +1259,15 @@ class LiveService:
         return True
 
     def _item_assignments_done(self, job, result):
+        try:
+            return self._apply_item_assignments_done(job, result)
+        finally:
+            # Failure, item exit and success all end this attempt. Required
+            # live notice updates are already in the model; no retry inherits
+            # the attempt's notice history.
+            self.reads.discard_item_flight(job[1])
+
+    def _apply_item_assignments_done(self, job, result):
         self.retry_in_flight.discard(job)
         wid = job[1]
         if wid not in self.model.work_items():
@@ -1267,7 +1277,23 @@ class LiveService:
             self._forget_scopes({job[:2]})
             return True
         if result.complete:
-            released = self.model.replace_item_assignments(wid, result)
+            flight = self.reads.item_flights.get(wid)
+            if flight is not None:
+                def replace(notices):
+                    # Stage validation/replay precedes any live replacement.
+                    # The model worker publishes only after this whole event.
+                    try:
+                        result.folded.replay_attests(notices)
+                    except ValueError:
+                        return None
+                    return self.model.replace_item_assignments(wid, result)
+                released = flight.apply(replace)
+                if released is None:
+                    result = Read([], False, result.at, result.source,
+                                  'invalid-complete-attest-frontier')
+            else:
+                released = self.model.replace_item_assignments(wid, result)
+        if result.complete:
             self._forget_scopes(released | {job[:2]})
             if not self.connected:
                 self.model.item_assignment_facts[wid]["freshness"] = "stale"
@@ -1711,9 +1737,9 @@ class LiveService:
         self._ensure_retired_activity()
         return True
 
-    def _apply_released_attest_notice(self, notice, key, scope, payload):
-        """Update established current provenance without re-reading members."""
-        if (self.cycle or notice.get("op") != "upsert"
+    def _apply_contribution_attest_notice(self, notice, key, scope, payload):
+        """Update held or released provenance without re-reading members."""
+        if (self.cycle or not self.model.closed_sources_released or notice.get("op") != "upsert"
                 or notice.get("class") not in CLASSES["attests"]
                 or self.policies.get("attests") != "immutable"
                 or not set(ATTEST_FIELDS) <= payload.keys()
@@ -1721,16 +1747,14 @@ class LiveService:
                 or str(payload["assignmentId"]) != str(scope)):
             return False
         contribution = self.model.item_contributions.entries.get(str(scope))
-        if contribution is None or contribution.state == "open":
+        if contribution is None:
             return False
         owner = contribution.item
         refs = notice.get("refs") or {}
         if any("workItemId" in value and value["workItemId"] != owner
                for value in (payload, refs)):
             return False
-        if (owner in self.model.item_assignment_pending
-                or ("assignments", None) in self.reads.active
-                or ("item-assignment-source", owner) in self.reads.active
+        if (("assignments", None) in self.reads.active
                 or ("attests", str(scope)) in self.reads.active
                 or any(job[:2] == ("attests", str(scope))
                        for job in (*self.reads.pending, *self.read_retries))):
@@ -1739,9 +1763,31 @@ class LiveService:
             # This source is excluded by the same complete item-summary
             # contract as fresh load. Its notice cannot make it eligible.
             return True
-        if contribution.evidence.observed_at is None:
+        if contribution.state != 'open' and contribution.evidence.observed_at is None:
             return False
-        if not self.model.update_closed_attest_contribution(str(scope), attest_row(payload)):
+        row = attest_row(payload)
+        flight = self.reads.item_flights.get(owner)
+        if flight is not None:
+            flight.notice(str(scope), row)
+        if contribution.state == 'open':
+            assignment = self.model.inventory('assignments').rows.get(str(scope))
+            if assignment is None or assignment.get('workItemId') != owner:
+                return False
+            inventory = self.model.inventory('attests', str(scope))
+            revision = inventory.data_revision
+            if not inventory.payload(row, at=now_ms(), source='feed:' + notice['class'],
+                                     policy='immutable'):
+                return False
+            if inventory.data_revision != revision:
+                self.model.details_revision += 1
+                updated = contribution.attests.notice(row)
+                if updated is not None:
+                    # Membership capture deliberately skips a pending item.
+                    # This is a positive immutable update to its established
+                    # contributor, not certification of a partial source.
+                    self.model.item_contributions.entries[str(scope)] = contribution._replace(
+                        attests=updated)
+        elif not self.model.update_closed_attest_contribution(str(scope), row):
             return False
         self.metrics["payloads"] += 1
         return True
@@ -1790,7 +1836,7 @@ class LiveService:
                          source="cli:attests " + str(scope)), owner=activity_owner)
             if activity_owner is None and held is None:
                 return True
-        if resource == "attests" and self._apply_released_attest_notice(notice, key, scope, payload):
+        if resource == "attests" and self._apply_contribution_attest_notice(notice, key, scope, payload):
             return True
         owner = (payload.get("workItemId") or refs.get("workItemId") or
                  self.model.inventory("assignments").rows.get(

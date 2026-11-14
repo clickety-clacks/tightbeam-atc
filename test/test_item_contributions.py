@@ -303,9 +303,14 @@ class ItemContributionsTest(unittest.TestCase):
                 self.assertEqual(revision + 1, model.details_revision)
                 self.assertEqual(before, model.snapshot(1700))
                 model.hold_item_assignments('work')
-                self.assertFalse(model.update_closed_attest_contribution(
+                # R27 does not suppress valid delivered notices during an
+                # independently required read. Failure must retain this live
+                # effect; success replays it onto the complete snapshot.
+                self.assertTrue(model.update_closed_attest_contribution(
                     'first', dict(notice, id='newer', ts=1800)))
-                self.assertEqual(current, model.item_contributions.entries['first'])
+                self.assertEqual(current.attests.count + 1,
+                                 model.item_contributions.entries['first'].attests.count)
+                self.assertIn('work', model.item_assignment_pending)
 
     def test_assignment_projection_new_close_and_reopen_keep_full_model_parity(self):
         from copy import deepcopy
