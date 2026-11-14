@@ -13,7 +13,7 @@ from atc_evidence import (
     turn_state, merge_value_for_refs,
 )
 from atc_payloads import has_work_item_summary
-from atc_contributions import AssignmentContribution, ItemContributions
+from atc_contributions import AssignmentContribution, ContributionEvidence, ItemContributions
 
 
 KEYS = {"sessions": "sessionKey", "roles": "name", "turns": "seq",
@@ -100,34 +100,46 @@ class ClosedAssignmentFold:
 
     def add(self, row, inventory, *, order, position):
         part = self.part
-        summary = inventory.folded
-        facts = inventory.evidence()
         part["detailFingerprint"].add(row, inventory.fingerprint, position)
         part["assignmentFingerprint"].add(row, None, position)
-        part["detailsKnown"] &= inventory.fingerprint is not None
+        details_known = part["detailsKnown"] and inventory.fingerprint is not None
+        self.add_contribution(AssignmentContribution.capture(row, inventory, order))
+        part["detailsKnown"] = details_known
+
+    def add_contribution(self, contribution):
+        """Reduce current facts; source detail pins remain a separate input.
+
+        A caller rebuilding from released contributions must not treat this as
+        a reconstruction of the discarded assignment/attest detail text.
+        ``add`` captures those pins while the source rows are still available.
+        """
+        part = self.part
+        part["detailsKnown"] = False
+        summary = contribution.attests
+        facts = contribution.evidence.publication()
+        order = contribution.order
         part["count"] += 1
-        close = row.get("closedAt")
+        close = contribution.closed_at
         if isinstance(close, (int, float)):
             part["closedAt"] = max(part["closedAt"], close) if part["closedAt"] is not None else close
-        part["activity"] = latest_time(part["activity"], row.get("openedAt"), close, summary["activity"])
-        part["code"] |= row.get("effectKind") in {"code", "release", "live_mutation"}
-        part["unknownEffect"] |= not bool(row.get("effectKind"))
-        corrections = row.get("commitRefCorrections") or []
-        refs = (corrections[-1].get("commitRefs") or []) if corrections else summary["refs"]
+        part["activity"] = latest_time(part["activity"], contribution.opened_at, close, summary.activity)
+        part["code"] |= contribution.effect in {"code", "release", "live_mutation"}
+        part["unknownEffect"] |= not bool(contribution.effect)
+        corrections = contribution.corrections
+        refs = (corrections[-1].get("commitRefs") or []) if corrections else summary.refs
         part["refs"].extend((order, i, ref) for i, ref in enumerate(refs))
-        if not row.get("reviewsAssignmentId"):
+        if not contribution.reviews:
             part["code"] |= bool(refs)
-        part["corrections"].extend((order, i, {k: v for k, v in correction.items()
-                                  if k not in {"reason", "note"}})
+        part["corrections"].extend((order, i, correction)
                                   for i, correction in enumerate(corrections))
         folded = part["summary"]
-        folded["count"] += summary["count"]
-        folded["kinds"].update(summary["kinds"])
-        folded["verdicts"].update(summary["verdicts"])
+        folded["count"] += summary.count
+        folded["kinds"].update(dict(summary.kinds))
+        folded["verdicts"].update(dict(summary.verdicts))
         for field in ("latest", "authors"):
-            for key, at in summary[field].items():
+            for key, at in getattr(summary, field):
                 folded[field][key] = max(folded[field].get(key, 0), at)
-        folded["authorIds"].update(summary["authorIds"])
+        folded["authorIds"].update(summary.author_ids)
         part["facts"] = combined_evidence(part["facts"], facts) if part["facts"] else combined_evidence(facts)
 
     def finish(self):
@@ -468,8 +480,21 @@ class EvidenceModel:
                     or (items is not None and wid not in items)):
                 continue
             order = self.open_assignment_order.get(aid, index)
-            self.item_contributions.entries[aid] = AssignmentContribution.capture(
-                row, self.inventory("attests", aid), order)
+            inventory = self.inventory("attests", aid)
+            contribution = AssignmentContribution.capture(row, inventory, order)
+            previous = self.item_contributions.entries.get(aid)
+            if previous is not None and not inventory.complete:
+                # Reading assignment membership alone does not replace its
+                # released attest contribution. An incomplete attest response
+                # can mark it unconfirmed, but cannot establish absent facts.
+                facts = previous.evidence
+                if inventory.observed_at is not None:
+                    facts = ContributionEvidence.capture(combined_evidence(
+                        facts.publication(), inventory.evidence()))
+                contribution = contribution._replace(
+                    attests=previous.attests, evidence=facts,
+                    detail_fingerprint=previous.detail_fingerprint)
+            self.item_contributions.entries[aid] = contribution
 
     def fold_closed_assignments(self, *, items=None):
         """Fold a settled assignment read into per-item board facts."""

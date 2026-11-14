@@ -5,6 +5,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_contributions import AssignmentContribution, ItemContributions
+from atc_model import ClosedAssignmentFold
 from atc_upstream import Read
 from test_closed_folding import ClosedAssignmentFoldTest
 
@@ -35,10 +36,47 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual(1, first.attests.count)
         self.assertEqual((('author', 10),), first.attests.authors)
         self.assertEqual(({'commit': 'first'},), first.attests.refs)
-        self.assertEqual(({'commitRefs': [{'commit': 'corrected'}]},), last.corrections)
+        self.assertEqual(({'commitRefs': [{'commit': 'corrected'}], 'id': 'correction'},),
+                         last.corrections)
         self.assertNotIn('discard', repr(entries))
         self.assertEqual(60, last.closed_at)
         self.assertEqual('other', last.holder)
+
+    def test_reduction_keeps_order_corrections_and_authors_after_contributor_removal(self):
+        entries = self.entries()
+        store = ItemContributions()
+        store.replace_item('work', entries, complete=True)
+
+        def reduced():
+            fold = ClosedAssignmentFold()
+            # Iteration order must not change the published reference order.
+            for value in reversed(tuple(store.entries.values())):
+                if value.state != 'open':
+                    fold.add_contribution(value)
+            return fold.part
+
+        part = reduced()
+        self.assertEqual(2, part['count'])
+        self.assertEqual(60, part['closedAt'])
+        self.assertEqual(2, part['summary']['count'])
+        self.assertEqual({'progress': 2}, part['summary']['kinds'])
+        self.assertEqual({'author': 10, 'other': 30}, part['summary']['authors'])
+        self.assertEqual([{'commit': 'first'}, {'commit': 'corrected'}],
+                         [ref for _, _, ref in sorted(part['refs'], key=lambda entry: entry[:2])])
+        self.assertEqual([(2, 0, {'commitRefs': [{'commit': 'corrected'}], 'id': 'correction'})],
+                         part['corrections'])
+        self.assertFalse(part['detailsKnown'])
+        # Partial omission preserves the other author's timing and correction.
+        store.replace_item('work', {'first': entries['first']}, complete=False)
+        self.assertEqual(part['corrections'], reduced()['corrections'])
+        self.assertEqual(part['summary']['authors'], reduced()['summary']['authors'])
+        # Complete removal releases those contributions; it is not a max-only merge.
+        store.replace_item('work', {'first': entries['first']}, complete=True)
+        remaining = reduced()
+        self.assertEqual(1, remaining['count'])
+        self.assertEqual(50, remaining['closedAt'])
+        self.assertEqual({'author': 10}, remaining['summary']['authors'])
+        self.assertEqual([], remaining['corrections'])
 
     def test_model_disposal_preserves_contributions_and_item_exit_drops_them(self):
         model = ClosedAssignmentFoldTest().model()
@@ -52,3 +90,31 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual(previous, model.item_contributions.entries)
         model.accept('work-items', None, Read([], True, 1200, 'complete'))
         self.assertEqual({}, model.item_contributions.entries)
+
+    def test_membership_refresh_cannot_erase_released_attests_and_partial_retry_recovers(self):
+        model = ClosedAssignmentFoldTest().model()
+        assignment_rows = list(model.inventory('assignments').rows.values())
+        source_attests = list(model.inventory('attests', 'first').rows.values())
+        model.fold_closed_assignments()
+        prior = model.item_contributions.entries['first']
+        model.accept('assignments', None, Read(assignment_rows, True, 1100, 'membership'))
+        model.capture_assignment_contributions()
+        current = model.item_contributions.entries['first']
+        self.assertEqual(prior.attests, current.attests)
+        self.assertEqual(prior.evidence, current.evidence)
+        self.assertEqual(prior.detail_fingerprint, current.detail_fingerprint)
+
+        model.accept('attests', 'first', Read([], False, 1200, 'partial', 'unavailable'))
+        model.capture_assignment_contributions()
+        incomplete = model.item_contributions.entries['first']
+        self.assertEqual(prior.attests, incomplete.attests)
+        self.assertFalse(incomplete.evidence.complete)
+        self.assertEqual('stale', incomplete.evidence.freshness)
+
+        model.accept('attests', 'first', Read(source_attests, True, 1300, 'confirmed'))
+        model.capture_assignment_contributions()
+        recovered = model.item_contributions.entries['first']
+        self.assertEqual(prior.attests, recovered.attests)
+        self.assertTrue(recovered.evidence.complete)
+        self.assertEqual('live', recovered.evidence.freshness)
+        self.assertEqual(1300, recovered.evidence.observed_at)
