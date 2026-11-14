@@ -402,10 +402,10 @@ class EvidenceModel:
         for resource, session in released:
             if resource == "turns":
                 self.release_turn_activity(session, at)
-                for aid, at in self.summary(resource, session)["assignmentActivity"].items():
+                for aid, activity_at in self.summary(resource, session)["assignmentActivity"].items():
                     wid = assignments.get(aid, {}).get("workItemId")
                     if wid:
-                        activity[wid] = max(activity.get(wid, 0), at)
+                        activity[wid] = max(activity.get(wid, 0), activity_at)
         self.fold_retired_activity(activity)
         for key in released:
             del self.inventories[key]
