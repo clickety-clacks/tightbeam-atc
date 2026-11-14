@@ -24,6 +24,59 @@ class ItemAssignmentSource:
     absent_activity_winners: set = field(default_factory=set)
     contributions: dict = field(default_factory=dict)
 
+    def replay_attests(self, notices):
+        """Prepare a complete item stage for atomic replacement plus replay.
+
+        Only the complete-read application path may call this, with eligible
+        per-contribution buffers. The caller still owns flight boundaries and
+        buffer disposal. No live model or source reads are touched here.
+        """
+        from atc_model import ClosedAssignmentFold, fold_session_activity_record, latest_time
+
+        # Validate and reduce every buffer before changing any staged fields.
+        # An absent member needs the assignment-notice path, not an invented
+        # empty contribution inferred from an attest alone.
+        changed = {}
+        for aid, rows in notices.items():
+            previous = self.contributions[aid]
+            updated = previous.attests.replay_complete(rows)
+            if updated is not previous.attests:
+                changed[aid] = previous._replace(attests=updated)
+
+        self.contributions.update(changed)
+        closed_changed = False
+        for aid, contribution in changed.items():
+            if aid in self.open_attests:
+                inventory = self.open_attests[aid]
+                inventory.folded = contribution.attests.summary()
+                inventory.attest_frontier = contribution.attests.frontier
+                inventory.data_revision += 1
+                # fingerprint still identifies the actual read, not the
+                # replayed projection. No raw detail hash is fabricated.
+            else:
+                closed_changed = True
+            for author, timestamp in contribution.attests.authors:
+                fold_session_activity_record(self.session_activity, self.session_evidence,
+                    author, timestamp, 'attest', aid, contribution.evidence.publication(),
+                    owner=contribution.item)
+
+        if closed_changed:
+            original = self.closed
+            fold = ClosedAssignmentFold()
+            for contribution in self.contributions.values():
+                if contribution.state != 'open':
+                    fold.add_contribution(contribution)
+            updated = fold.finish()
+            # The original source pins are retained as pins, not claimed to
+            # describe added notices. On-demand detail reconciliation owns
+            # obtaining a new exact pin; the compact reduction stays unknown.
+            updated['detailFingerprint'] = original['detailFingerprint']
+            updated['assignmentFingerprint'] = original['assignmentFingerprint']
+            updated['turnActivity'] = original['turnActivity']
+            updated['activity'] = latest_time(updated['activity'], original['turnActivity'])
+            self.closed = updated
+        return bool(changed)
+
 
 class ReadQueue:
     def __init__(self, gateway, events, workers, current_ids=None):

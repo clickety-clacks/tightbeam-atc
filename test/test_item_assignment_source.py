@@ -13,6 +13,8 @@ from atc_reads import ReadQueue
 from atc_service import LiveService
 from atc_upstream import Gateway
 from test_closed_folding import ClosedAssignmentFoldTest
+from atc_contributions import AttestFrontier
+from publication_assertions import assert_publication_equal
 
 
 class ItemAssignmentSourceTest(unittest.TestCase):
@@ -133,6 +135,65 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         self.assertTrue(result.complete)
         self.assertIsNone(result.folded.closed)
         self.assertEqual({}, result.folded.open_rows)
+
+    def test_replayed_stage_matches_fresh_open_closed_corrections_and_authors(self):
+        snapshot = self.result()
+        self.assertTrue(snapshot.complete, snapshot.error)
+        stage = snapshot.folded
+        old_closed_pin = stage.closed['detailFingerprint']
+        old_open_pin = stage.open_attests['open'].fingerprint
+        notices = {
+            'first': [dict(id='new-first', kind='progress', ts=200,
+                           bySession='other', commitRefs=[{'commit': 'later-first'}])],
+            'open': [dict(id='new-open', kind='verdict', verdictKind='reviewed-clean',
+                          ts=300, bySession='author', commitRefs=[])],
+            'last': [dict(id='new-last', kind='progress', ts=400,
+                         bySession='other', commitRefs=[{'commit': 'still-corrected'}])],
+        }
+        # No global/item/member read is performed by staging replay.
+        before_calls = list(self.calls)
+        self.assertTrue(stage.replay_attests(notices))
+        self.assertEqual(before_calls, self.calls)
+        self.assertEqual(old_closed_pin, stage.closed['detailFingerprint'])
+        self.assertFalse(stage.closed['detailsKnown'])
+        self.assertEqual(old_open_pin, stage.open_attests['open'].fingerprint)
+        self.assertEqual(2, stage.open_attests['open'].folded['count'])
+        self.assertEqual({'author': 300, 'other': 400}, stage.session_activity)
+        self.assertEqual(['first', 'later-first', 'corrected'],
+                         [ref['commit'] for _, _, ref in stage.closed['refs']])
+        before_duplicate = deepcopy(stage)
+        self.assertFalse(stage.replay_attests(notices))
+        self.assertEqual(before_duplicate.contributions, stage.contributions)
+        self.assertEqual(before_duplicate.closed, stage.closed)
+
+        for aid, rows in notices.items():
+            self.attests[aid].extend(rows)
+        fresh_result = self.result()
+        self.assertTrue(fresh_result.complete, fresh_result.error)
+        fresh = deepcopy(self.model)
+        for model, result in ((fresh, fresh_result), (self.model, snapshot)):
+            model.hold_item_assignments('work')
+            model.replace_item_assignments('work', result)
+        assert_publication_equal(self, fresh.snapshot(1000), self.model.snapshot(1000),
+                                 'r27-replayed-stage-open-closed')
+
+    def test_invalid_second_buffer_does_not_partially_change_staging(self):
+        result = self.result()
+        self.assertTrue(result.complete, result.error)
+        stage = result.folded
+        value = stage.contributions['last']
+        stage.contributions['last'] = value._replace(
+            attests=value.attests._replace(frontier=AttestFrontier()))
+        before = deepcopy(stage)
+        with self.assertRaisesRegex(ValueError, 'no usable frontier'):
+            stage.replay_attests({
+                'first': [dict(id='new', kind='progress', ts=200, bySession='author')],
+                'last': [],
+            })
+        self.assertEqual(before.contributions, stage.contributions)
+        self.assertEqual(before.closed, stage.closed)
+        self.assertEqual(before.session_activity, stage.session_activity)
+        self.assertEqual(before.open_attests['open'].folded, stage.open_attests['open'].folded)
 
     def test_detail_page_preserves_collection_fields_before_and_after_targeted_reread(self):
         self.model.accept('assignments', None, self.gateway.read('assignments'))
