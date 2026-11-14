@@ -894,8 +894,6 @@ class LiveService:
                 self._refresh(*job)
 
     def _reconcile_work_item_attests(self):
-        if not self._summary_contract_active():
-            return
         for item in self.model.work_items().values():
             self._reconcile_item_attests(item)
 
@@ -1361,6 +1359,7 @@ class LiveService:
             else:
                 self._state("stale", "uncorrelated " + resource + " change")
             return True
+        summary_was_active = self._summary_contract_active() if resource == "work-items" else None
         if key is None:
             self.model.accept(resource, scope, result)
         else:
@@ -1379,9 +1378,11 @@ class LiveService:
             for row in result.rows:
                 if row.get("id") in self.model.item_assignment_pending:
                     self._request_item_assignments(row["id"], changed=True)
-            if key is None:
-                for row in result.rows:
-                    self._reconcile_item_attests(row)
+            if key is None or summary_was_active != self._summary_contract_active():
+                # Without a reported version, summary mode depends on every
+                # item's validity. One detail can change other items' scope.
+                self._reconcile_work_item_attests()
+                self._discover_histories()
             else:
                 row = next((row for row in result.rows if row.get("id") == key), None)
                 if row:
@@ -1637,6 +1638,7 @@ class LiveService:
             row = attest_row(payload) if resource == "attests" else payload
             previous = inventory.rows.get(str(row[inventory.key]))
             if resource == "work-items":
+                summary_was_active = self._summary_contract_active()
                 applied = self.model.payload_work_item(
                     row, at=now_ms(), source="feed:" + notice["class"], policy=policy)
             else:
@@ -1649,7 +1651,11 @@ class LiveService:
                 if resource == "work-items":
                     if str(row["id"]) in self.model.item_assignment_pending:
                         self._request_item_assignments(str(row["id"]), changed=True)
-                    self._reconcile_item_attests(self.model.work_items()[str(row[inventory.key])])
+                    if summary_was_active != self._summary_contract_active():
+                        self._reconcile_work_item_attests()
+                        self._discover_histories()
+                    else:
+                        self._reconcile_item_attests(self.model.work_items()[str(row[inventory.key])])
         if not applied:
             if resource == "roles":
                 self._refresh(normalized, scope)

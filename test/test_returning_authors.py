@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_service import LiveService
 from atc_payloads import SESSION_FIELDS, PAYLOAD_POLICIES
 from atc_upstream import Read
-from test_service import PublishedReads, summarized_work
+from test_service import PublishedReads, summarized_work, work
 from test_assignment_source_failure import publication
 
 
@@ -233,6 +233,40 @@ class ReturningAuthorTest(unittest.TestCase):
         self.assertEqual(700000, service.model.session_activity['guest-one'])
         self.assertEqual(800000, service.model.session_activity['guest-two'])
         self.assertEqual(publication(self.fresh(service).current), publication(service.current))
+
+    def test_one_item_detail_or_payload_changes_implicit_scope_for_other_items(self):
+        for delivery, state in (('detail', 'closed'), ('payload', 'closed'),
+                                ('detail', 'open'), ('payload', 'open')):
+            with self.subTest(delivery=delivery, state=state):
+                gateway = ReturningReads()
+                gateway.rows['assignments', None][0]['state'] = state
+                gateway.rows['work-items', None] = [
+                    summarized_work(holders=[], attest_counts={'progress': 2}) |
+                    dict(state='closed', closedAt=20),
+                    work() | dict(id='other')]
+                service = self.load(gateway)
+                self.returns(service, {'guest-one'}); self.drain(service)
+                service.policies = PAYLOAD_POLICIES
+                self.assertEqual(900000, service.model.session_activity['guest-one'])
+                changes = [summarized_work(version=2, holders=[], attest_counts={}) |
+                           dict(id='other'), work(version=3) | dict(id='other')]
+                for row in changes:
+                    gateway.rows['work-items', None][1] = row
+                    gateway.calls.clear()
+                    with patch.object(service, 'rebuild', side_effect=AssertionError('global rebuild')):
+                        if delivery == 'detail':
+                            service._refresh('work-items', key='other')
+                        else:
+                            before = service.metrics['payloads']
+                            service.change(dict(resource='work-items', op='upsert',
+                                **{'class': 'work_item.updated'}, refs={'workItemId': 'other'},
+                                payload=deepcopy(row)))
+                            self.assertEqual(before + 1, service.metrics['payloads'])
+                        self.drain(service)
+                    expected = None if row['rowVersion'] == 2 else 900000
+                    self.assertEqual(expected, service.model.session_activity.get('guest-one'))
+                    self.assertNotIn(('read', 'assignments', None), gateway.calls)
+                    self.assertEqual(publication(self.fresh(service).current), publication(service.current))
 
     def test_retirement_removes_turn_only_activity(self):
         gateway = ReturningReads()
