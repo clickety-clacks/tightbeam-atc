@@ -186,25 +186,34 @@ class EvidenceModel:
                                          facts, owner=owner)
         return changed
 
-    def fold_activity_inventory(self, resource, scope):
+    def fold_activity_inventory(self, resource, scope, *, releasing=False):
         if resource not in {"attests", "turns"}:
             return
         inventory = self.inventory(resource, scope)
         if resource == "attests" and not getattr(inventory, "activity_eligible", True):
             return
         summary = inventory.folded
+        # The rows establish positive activity even when the scoped walk is
+        # incomplete. Its temporary completeness/staleness stays on the held
+        # inventory and is combined at publication, so a successful retry can
+        # clear only that scope's warning. Existing outage marks on the fixed
+        # record are not reset here.
+        observation = inventory.evidence()
+        if not releasing:
+            observation = dict(observation, status="known", complete=True,
+                               freshness="live", unconfirmedSince=None)
         if resource == "attests":
             assignment = self.inventory("assignments").rows.get(str(scope))
             if assignment is None or "workItemId" not in assignment:
                 return
             for author, timestamp in summary["authors"].items():
-                self.fold_session_activity(author, timestamp, "attest", scope, inventory.evidence(),
+                self.fold_session_activity(author, timestamp, "attest", scope, observation,
                                            owner=assignment["workItemId"])
         else:
             if inventory.complete and summary["activity"] is None:
                 self.release_turn_activity(scope, inventory.observed_at)
             elif summary["activity"] is not None:
-                self.fold_session_activity(scope, summary["activity"], "turn", scope, inventory.evidence())
+                self.fold_session_activity(scope, summary["activity"], "turn", scope, observation)
 
     def release_turn_activity(self, session, at):
         record = self.session_activity_evidence.get(session)
@@ -230,9 +239,10 @@ class EvidenceModel:
             if owner is not None and owner not in eligible_items:
                 facts.setdefault("_retainedAt", at)
 
-    def session_activity_facts(self, session, turn_facts):
+    def session_activity_facts(self, session, turn_facts, attest_facts=None):
         record = self.session_activity_evidence.get(session)
-        facts = combined_evidence(turn_facts, *([record] if record else []))
+        facts = combined_evidence(turn_facts, *(fact for fact in (record, attest_facts)
+                                               if fact is not None))
         facts["source"] = list(record["source"]) if record else []
         if record and "_retainedAt" in record:
             facts.update(status="unknown", freshness="unconfirmed", complete=False,
@@ -472,7 +482,7 @@ class EvidenceModel:
                 self.open_assignment_order[aid] = (order if wid in raw_closed_items else
                                                     previous_order.get(aid, order))
                 continue
-            self.fold_activity_inventory("attests", aid)
+            self.fold_activity_inventory("attests", aid, releasing=True)
             if wid is not None:
                 fold = grouped.setdefault(wid, ClosedAssignmentFold())
                 fold.add(row, self.inventory("attests", aid), order=order, position=position)
@@ -858,6 +868,20 @@ class EvidenceModel:
         item_turn_facts = dict(all_turn_facts, observedAt=None, source=["turns"])
 
         authored_at = defaultdict(dict)
+        # Temporary scalar reductions of already-retained scopes, not a
+        # contributor ledger. Closed sources are folded only once complete;
+        # open/partial sources keep their current warning until their retry.
+        activity_scope_facts = {}
+        for (resource, _scope), inventory in self.inventories.items():
+            if resource != "attests" or not getattr(inventory, "activity_eligible", True):
+                continue
+            scope_facts = dict(inventory.evidence(), source=[])
+            for author in inventory.folded["authors"]:
+                if author not in ids:
+                    continue
+                previous = activity_scope_facts.get(author)
+                activity_scope_facts[author] = combined_evidence(
+                    *([previous] if previous is not None else []), scope_facts)
         for assignment in assignments.rows.values():
             wid = assignment.get("workItemId")
             summary = self.summary("attests", assignment["id"])
@@ -903,7 +927,8 @@ class EvidenceModel:
                 "evidence": {
                     "identity": facts, "parent": parent_facts,
                     "turn": turn_inventory.evidence(),
-                    "idleFor": self.session_activity_facts(key, turn_inventory.evidence()),
+                    "idleFor": self.session_activity_facts(key, turn_inventory.evidence(),
+                                                            activity_scope_facts.get(key)),
                 },
             })
 

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from atc_service import LiveService
-from publication_assertions import assert_publication_equal, capture_publication
+from publication_assertions import assert_publication_equal, assert_replay_current, capture_publication
 from test_service import PublishedReads
 
 
@@ -95,6 +95,57 @@ class ActivityObservationBoundTest(unittest.TestCase):
                         self.assertTrue(agent["evidence"]["idleFor"]["complete"])
                         self.assertIsNone(agent["evidence"]["idleFor"]["unconfirmedSince"])
                     assert_publication_equal(self, fresh.current, warm.current, label + "-parity")
+
+    def test_scoped_retries_clear_only_their_own_activity_warning(self):
+        with patch("atc_service.now_ms", return_value=6000):
+            gateway = ObservationReads(2000)
+            gateway.rows["turns", "S"] = [dict(seq=1, sessionKey="S", createdAt=700000,
+                                                startedAt=750000, endedAt=800000)]
+            gateway.rows["sessions", None].append(dict(sessionKey="unaffected", state="active"))
+            service = self.load(gateway)
+            baseline = deepcopy(service.current)
+            prior_other = next(a for a in baseline["agents"] if a["sessionKey"] == "unaffected")
+            gateway.partial.update({("attests", "A"), ("turns", "S")})
+            with patch.object(service, "rebuild", side_effect=AssertionError("unexpected recovery scan")):
+                service._refresh("attests", "A")
+                service._refresh("turns", "S")
+                self.drain(service)
+                failed = deepcopy(service.current)
+                subject = next(a for a in failed["agents"] if a["sessionKey"] == "S")
+                self.assertEqual(1000000, subject["idleSince"])
+                self.assertEqual("stale", subject["evidence"]["idleFor"]["freshness"])
+                self.assertFalse(subject["evidence"]["idleFor"]["complete"])
+
+                gateway.partial.remove(("attests", "A"))
+                gateway.observation_times["attests", "A"] = 5000
+                service.read_retries.pop(("attests", "A", None))
+                service._refresh("attests", "A")
+                self.drain(service)
+                one_recovered = deepcopy(service.current)
+                subject = next(a for a in one_recovered["agents"] if a["sessionKey"] == "S")
+                self.assertEqual("stale", subject["evidence"]["idleFor"]["freshness"])
+                self.assertFalse(subject["evidence"]["idleFor"]["complete"])
+
+                gateway.partial.remove(("turns", "S"))
+                service.read_retries.pop(("turns", "S", None))
+                service._refresh("turns", "S")
+                self.drain(service)
+            subject = next(a for a in service.current["agents"] if a["sessionKey"] == "S")
+            self.assertEqual(1000000, subject["idleSince"])
+            self.assertEqual("known", subject["evidence"]["idleFor"]["status"])
+            self.assertEqual("live", subject["evidence"]["idleFor"]["freshness"])
+            self.assertTrue(subject["evidence"]["idleFor"]["complete"])
+            self.assertIsNone(subject["evidence"]["idleFor"]["unconfirmedSince"])
+            for frame in (failed, one_recovered, service.current):
+                self.assertEqual(prior_other,
+                    next(a for a in frame["agents"] if a["sessionKey"] == "unaffected"))
+            fresh_gateway = ObservationReads(2000, reread=True)
+            fresh_gateway.rows = deepcopy(gateway.rows)
+            fresh = self.load(fresh_gateway)
+            capture_publication(fresh.current, service.current, "scoped-activity-retry",
+                initialWarm=baseline, failed=failed, oneRecovered=one_recovered)
+            assert_publication_equal(self, fresh.current, service.current, "scoped-activity-retry-parity")
+            assert_replay_current(self, service, baseline, "scoped-activity-retry-replay")
 
 
 if __name__ == "__main__":
