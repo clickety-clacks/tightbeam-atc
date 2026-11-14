@@ -1,7 +1,44 @@
 """Compact current assignment contributions; never retain source rows here."""
 
 from copy import deepcopy
+from math import isfinite
 from typing import NamedTuple
+
+
+class AttestFrontier(NamedTuple):
+    """Counted IDs at the maximum only, under the pinned append-only source.
+
+    Complete attest snapshots and ordered post-commit notices establish that
+    lower timestamps are already counted. A backward source clock invalidates
+    that premise; this is the recorded R25 limit, not a monotonic clock claim.
+    """
+
+    maximum: int | float | None = None
+    ids: frozenset = frozenset()
+
+    @staticmethod
+    def usable(row):
+        timestamp = row.get('ts')
+        return (row.get('id') is not None and isinstance(timestamp, (int, float))
+                and not isinstance(timestamp, bool) and isfinite(timestamp))
+
+    def includes(self, row):
+        if not self.usable(row) or self.maximum is None:
+            return False
+        return (row['ts'] < self.maximum or
+                (row['ts'] == self.maximum and str(row['id']) in self.ids))
+
+    def observe(self, row):
+        # Source fold counts are authoritative; this stores only the current
+        # maximum's identities, independent of page boundaries or row order.
+        if not self.usable(row):
+            return self
+        timestamp, identity = row['ts'], str(row['id'])
+        if self.maximum is None or timestamp > self.maximum:
+            return AttestFrontier(timestamp, frozenset((identity,)))
+        if timestamp == self.maximum and identity not in self.ids:
+            return AttestFrontier(timestamp, self.ids | {identity})
+        return self
 
 
 class ContributionEvidence(NamedTuple):
@@ -35,13 +72,14 @@ class AttestContribution(NamedTuple):
     author_ids: tuple
     refs: tuple
     activity: int | None
+    frontier: AttestFrontier
 
     @classmethod
-    def capture(cls, summary):
+    def capture(cls, summary, frontier):
         return cls(summary['count'], tuple(summary['kinds'].items()),
                    tuple(summary['verdicts'].items()), tuple(summary['latest'].items()),
                    tuple(summary['authors'].items()), tuple(sorted(summary['authorIds'])),
-                   tuple(deepcopy(summary['refs'])), summary['activity'])
+                   tuple(deepcopy(summary['refs'])), summary['activity'], frontier)
 
 
 class AssignmentContribution(NamedTuple):
@@ -68,7 +106,7 @@ class AssignmentContribution(NamedTuple):
         return cls(row['workItemId'], row.get('holderKey'), row['state'],
                    row.get('openedAt'), row.get('closedAt'), row.get('effectKind'),
                    row.get('reviewsAssignmentId'), order, corrections,
-                   AttestContribution.capture(inventory.folded),
+                   AttestContribution.capture(inventory.folded, inventory.attest_frontier),
                    ContributionEvidence.capture(inventory.evidence()), inventory.fingerprint)
 
 

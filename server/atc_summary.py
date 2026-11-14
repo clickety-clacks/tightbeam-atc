@@ -3,6 +3,7 @@
 from collections import Counter
 import hashlib
 import json
+from atc_contributions import AttestFrontier
 
 
 class DetailFingerprint:
@@ -111,6 +112,8 @@ class HistoryFold:
         self.keep_ids = set(keep_ids)
         self.summary = summarize(resource, ())
         self.rows = {}
+        if resource == "attests":
+            self.attest_frontier = AttestFrontier()
         self.fingerprint = hashlib.blake2b(digest_size=16)
 
     def add(self, rows):
@@ -119,6 +122,8 @@ class HistoryFold:
         key, timestamp = HISTORY_KEYS[resource], HISTORY_TIMES[resource]
         summarize(resource, rows, into=self.summary, now=self.now)
         for row in rows:
+            if resource == "attests":
+                self.attest_frontier = self.attest_frontier.observe(row)
             self.fingerprint.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode())
             self.fingerprint.update(b"\n")
             at = row.get(timestamp)

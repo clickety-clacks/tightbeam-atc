@@ -273,6 +273,7 @@ class HistoryInventory(Inventory):
 
     def __init__(self, resource):
         from atc_summary import HISTORY_KEYS, summarize
+        from atc_contributions import AttestFrontier
         super().__init__(HISTORY_KEYS[resource])
         self.resource = resource
         self.keep_ids = set()
@@ -280,6 +281,8 @@ class HistoryInventory(Inventory):
         self.raw_expiry = None
         self._pruned_keep_ids = None
         self.folded = summarize(resource, ())
+        if resource == "attests":
+            self.attest_frontier = AttestFrontier()
 
     def read_fold(self, fold, *, complete, at, source):
         from atc_summary import summarize
@@ -290,6 +293,8 @@ class HistoryInventory(Inventory):
         if complete or first_read:
             self.fingerprint = fold.fingerprint.hexdigest()
             self.folded = fold.summary
+            if self.resource == "attests":
+                self.attest_frontier = fold.attest_frontier
         else:
             # A partial walk cannot subtract previously established facts or
             # add its counts to them: the walks overlap. Keep counted evidence
@@ -369,6 +374,8 @@ class HistoryInventory(Inventory):
             return True
         if old is None:
             summarize(self.resource, (row,), into=self.folded, now=at)
+            if self.resource == "attests":
+                self.attest_frontier = self.attest_frontier.observe(row)
         elif self.resource in {"turns", "wakes"}:
             current = summarize(self.resource, self.rows.values(), now=at)
             self.folded["live"] = current["live"]
