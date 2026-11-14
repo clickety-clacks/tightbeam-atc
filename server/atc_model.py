@@ -38,6 +38,48 @@ def activity_time(value):
     return None
 
 
+def fold_session_activity_record(values, records, session, timestamp, kind, scope, facts, *, owner=None):
+    """Fold into two fixed per-session maps, including temporary read staging."""
+    timestamp = activity_time(timestamp)
+    if not session or timestamp is None:
+        return False
+    if kind == "attest":
+        source = "cli:attests " + str(scope)
+    elif kind == "turn":
+        source = "/api/sessions/" + quote(str(session), safe="") + "/turns"
+    else:
+        raise ValueError("session activity requires attest or turn")
+    previous_at = values.get(session)
+    previous = records.get(session)
+    kinds = {kind}
+    winner = source
+    winner_owner = owner if kind == "attest" else None
+    if previous is not None:
+        kinds.update(s for s in previous["source"] if s in {"attest", "turn"})
+        previous_source = next((s for s in previous["source"]
+                                if s not in {"attest", "turn"}), None)
+        if previous_source is not None and previous_at is not None:
+            if previous_at > timestamp:
+                winner = previous_source
+                winner_owner = previous.get("_owner")
+            elif previous_at == timestamp:
+                winner = min(previous_source, source)
+                if winner != source:
+                    winner_owner = previous.get("_owner")
+    merged = combined_evidence(*(fact for fact in (previous, facts) if fact is not None))
+    # combined_evidence retains its scalar confirmation semantics. Only
+    # its per-scope source union is replaced by the fixed source contract.
+    merged["source"] = sorted(kinds | {winner})
+    merged["_owner"] = winner_owner
+    if previous and "_retainedAt" in previous and previous_at > timestamp:
+        merged["_retainedAt"] = previous["_retainedAt"]
+    latest = timestamp if previous_at is None else max(previous_at, timestamp)
+    changed = previous_at != latest or previous != merged
+    values[session] = latest
+    records[session] = merged
+    return changed
+
+
 class ClosedAssignmentFold:
     """Accumulate one item's published closed facts without retaining source rows."""
 
@@ -46,7 +88,7 @@ class ClosedAssignmentFold:
             "count": 0, "closedAt": None, "activity": None, "turnActivity": None,
             "code": False, "unknownEffect": False, "refs": [],
             "corrections": [], "summary": summarize("attests", ()),
-            "facts": None, "authorFacts": {}, "detailFingerprint": DetailFingerprint(),
+            "facts": None, "detailFingerprint": DetailFingerprint(),
             "assignmentFingerprint": DetailFingerprint(), "detailsKnown": True,
         }
 
@@ -80,9 +122,6 @@ class ClosedAssignmentFold:
             for key, at in summary[field].items():
                 folded[field][key] = max(folded[field].get(key, 0), at)
         folded["authorIds"].update(summary["authorIds"])
-        for author in summary["authorIds"]:
-            existing = part["authorFacts"].get(author)
-            part["authorFacts"][author] = combined_evidence(existing, facts) if existing else combined_evidence(facts)
         part["facts"] = combined_evidence(part["facts"], facts) if part["facts"] else combined_evidence(facts)
 
     def finish(self):
@@ -106,6 +145,7 @@ class EvidenceModel:
         self.retired_item_activity = {}
         self.session_activity = {}
         self.session_activity_evidence = {}
+        self.activity_refresh = None
         self.retired_activity_revision = 0
         self.closed_items = {}
         self.closed_revision = 0
@@ -119,44 +159,79 @@ class EvidenceModel:
         self._work_item_order = []
         self.older_item_sources_released = False
 
-    def fold_session_activity(self, session, timestamp, kind, scope, facts):
-        """Fold one eligible contribution; eligibility belongs to the caller.
+    def begin_activity_refresh(self):
+        self.activity_refresh = ({}, {})
 
-        Keep only a maximum and its compact evidence, never losing routes or
-        contributor identities. Scope removal and confirmation are separate
-        from receiving a positive activity fact.
-        """
-        timestamp = activity_time(timestamp)
-        if not session or timestamp is None:
-            return False
-        if kind == "attest":
-            source = "cli:attests " + str(scope)
-        elif kind == "turn":
-            source = "/api/sessions/" + quote(str(session), safe="") + "/turns"
-        else:
-            raise ValueError("session activity requires attest or turn")
-        previous_at = self.session_activity.get(session)
-        previous = self.session_activity_evidence.get(session)
-        kinds = {kind}
-        winner = source
-        if previous is not None:
-            kinds.update(s for s in previous["source"] if s in {"attest", "turn"})
-            previous_source = next((s for s in previous["source"]
-                                    if s not in {"attest", "turn"}), None)
-            if previous_source is not None and previous_at is not None:
-                if previous_at > timestamp:
-                    winner = previous_source
-                elif previous_at == timestamp:
-                    winner = min(previous_source, source)
-        merged = combined_evidence(*(fact for fact in (previous, facts) if fact is not None))
-        # combined_evidence retains its scalar confirmation semantics. Only
-        # its per-scope source union is replaced by the fixed source contract.
-        merged["source"] = sorted(kinds | {winner})
-        latest = timestamp if previous_at is None else max(previous_at, timestamp)
-        changed = previous_at != latest or previous != merged
-        self.session_activity[session] = latest
-        self.session_activity_evidence[session] = merged
+    def finish_activity_refresh(self):
+        if self.activity_refresh is not None:
+            values, records = self.activity_refresh
+            for session, facts in self.session_activity_evidence.items():
+                if ("_retainedAt" in facts and self.session_activity[session] >
+                        values.get(session, -1)):
+                    values[session] = self.session_activity[session]
+                    records[session] = facts
+            self.session_activity, self.session_activity_evidence = self.activity_refresh
+            self.activity_refresh = None
+
+    def fold_session_activity(self, session, timestamp, kind, scope, facts, *, owner=None):
+        changed = fold_session_activity_record(self.session_activity, self.session_activity_evidence,
+            session, timestamp, kind, scope, facts, owner=owner)
+        if self.activity_refresh is not None and facts.get("complete"):
+            fold_session_activity_record(*self.activity_refresh, session, timestamp, kind, scope,
+                                         facts, owner=owner)
         return changed
+
+    def fold_activity_inventory(self, resource, scope):
+        if resource not in {"attests", "turns"}:
+            return
+        inventory = self.inventory(resource, scope)
+        if resource == "attests" and not getattr(inventory, "activity_eligible", True):
+            return
+        summary = inventory.folded
+        if resource == "attests":
+            assignment = self.inventory("assignments").rows.get(str(scope))
+            if assignment is None or "workItemId" not in assignment:
+                return
+            for author, timestamp in summary["authors"].items():
+                self.fold_session_activity(author, timestamp, "attest", scope, inventory.evidence(),
+                                           owner=assignment["workItemId"])
+        else:
+            # A complete turn-only replacement has no losing attest value
+            # to reconstruct. Partial reads cannot establish absence.
+            record = self.session_activity_evidence.get(scope)
+            if inventory.complete and record and "attest" not in record["source"]:
+                self.session_activity.pop(scope, None)
+                self.session_activity_evidence.pop(scope, None)
+            if summary["activity"] is not None:
+                self.fold_session_activity(scope, summary["activity"], "turn", scope, inventory.evidence())
+
+    def release_turn_activity(self, session):
+        record = self.session_activity_evidence.get(session)
+        if record is None or "turn" not in record["source"]:
+            return
+        if "attest" not in record["source"]:
+            self.session_activity.pop(session, None)
+            self.session_activity_evidence.pop(session, None)
+        elif not any(source.startswith("/api/sessions/") for source in record["source"]):
+            # The surviving attest winner is already exact; remove only the
+            # retired turn kind. A losing attest behind a turn winner needs
+            # source-scope disposition before this branch can be finalized.
+            record["source"].remove("turn")
+
+    def retain_exited_activity(self, eligible_items, at):
+        for facts in self.session_activity_evidence.values():
+            owner = facts.get("_owner")
+            if owner is not None and owner not in eligible_items:
+                facts.setdefault("_retainedAt", at)
+
+    def session_activity_facts(self, session, turn_facts):
+        record = self.session_activity_evidence.get(session)
+        facts = combined_evidence(turn_facts, *([record] if record else []))
+        facts["source"] = list(record["source"]) if record else []
+        if record and "_retainedAt" in record:
+            facts.update(status="unknown", freshness="unconfirmed", complete=False,
+                         unconfirmedSince=record["_retainedAt"])
+        return facts
 
     @staticmethod
     def item_fingerprint(row):
@@ -318,6 +393,7 @@ class EvidenceModel:
         activity = {}
         for resource, session in released:
             if resource == "turns":
+                self.release_turn_activity(session)
                 for aid, at in self.summary(resource, session)["assignmentActivity"].items():
                     wid = assignments.get(aid, {}).get("workItemId")
                     if wid:
@@ -342,12 +418,13 @@ class EvidenceModel:
                 fact["unconfirmedSince"] = at
                 if fact["freshness"] != "stale":
                     fact["freshness"] = "unconfirmed"
-        for part in self.closed_items.values():
-            for fact in (part["facts"], *part["authorFacts"].values()):
-                if fact["complete"] and fact.get("unconfirmedSince") is None:
-                    fact["unconfirmedSince"] = at
-                    if fact["freshness"] != "stale":
-                        fact["freshness"] = "unconfirmed"
+        facts = [part["facts"] for part in self.closed_items.values()]
+        facts.extend(self.session_activity_evidence.values())
+        for fact in facts:
+            if fact["complete"] and fact.get("unconfirmedSince") is None:
+                fact["unconfirmedSince"] = at
+                if fact["freshness"] != "stale":
+                    fact["freshness"] = "unconfirmed"
 
     def release_auxiliary_sources(self):
         for (resource, _scope), inventory in self.inventories.items():
@@ -385,8 +462,10 @@ class EvidenceModel:
                 self.open_assignment_order[aid] = (order if wid in raw_closed_items else
                                                     previous_order.get(aid, order))
                 continue
-            fold = grouped.setdefault(wid, ClosedAssignmentFold())
-            fold.add(row, self.inventory("attests", aid), order=order, position=position)
+            self.fold_activity_inventory("attests", aid)
+            if wid is not None:
+                fold = grouped.setdefault(wid, ClosedAssignmentFold())
+                fold.add(row, self.inventory("attests", aid), order=order, position=position)
             if aid in live_ids:
                 self.live_assignment_items[aid] = wid
             released.add(aid)
@@ -411,9 +490,10 @@ class EvidenceModel:
             for aid in tuple(linked):
                 if aid in released:
                     wid = assignments.rows[aid].get("workItemId")
-                    part = self.closed_items[wid]
-                    part["turnActivity"] = latest_time(part["turnActivity"], linked[aid])
-                    part["activity"] = latest_time(part["activity"], linked[aid])
+                    if wid is not None:
+                        part = self.closed_items[wid]
+                        part["turnActivity"] = latest_time(part["turnActivity"], linked[aid])
+                        part["activity"] = latest_time(part["activity"], linked[aid])
                     del linked[aid]
         for aid in released:
             assignments.rows.pop(aid)
@@ -421,6 +501,7 @@ class EvidenceModel:
             self.inventories.pop(("attests", aid), None)
             self.summaries.pop(("attests", aid), None)
         self.closed_revision += 1
+        self.closed_items.pop(None, None)
         self.closed_sources_released = True
         self._item_activity_parts.clear()
         return {("attests", aid) for aid in released}
@@ -452,6 +533,11 @@ class EvidenceModel:
         if not result.complete or result.folded is None:
             raise ValueError("item assignment replacement must be complete")
         staged = result.folded
+        for author, timestamp in staged.session_activity.items():
+            facts = staged.session_evidence[author]
+            source = next(value for value in facts["source"] if value.startswith("cli:attests "))
+            self.fold_session_activity(author, timestamp, "attest", source[len("cli:attests "):],
+                                       facts, owner=wid)
         assignments = self.inventory("assignments")
         old = {aid for aid, row in assignments.rows.items() if row.get("workItemId") == wid}
         released = {("attests", aid) for aid in old - staged.open_rows.keys()}
@@ -503,7 +589,7 @@ class EvidenceModel:
         self._item_activity_parts.clear()
         return released
 
-    def accept(self, resource, scope, result):
+    def accept(self, resource, scope, result, *, activity_eligible=True):
         inventory = self.inventory(resource, scope)
         held_closed = {}
         if resource == "assignments" and result.complete and self.item_assignment_pending:
@@ -516,6 +602,7 @@ class EvidenceModel:
             result.rows.extend(row for row in inventory.rows.values()
                                if row.get("workItemId") in self.item_assignment_pending)
         if isinstance(inventory, HistoryInventory):
+            inventory.activity_eligible = activity_eligible
             fold = result.folded
             if fold is None:
                 fold = HistoryFold(resource, result.at, self.current_ids(resource, scope))
@@ -523,6 +610,7 @@ class EvidenceModel:
             if resource == "attests" and inventory.fingerprint != fold.fingerprint.hexdigest():
                 self.details_revision += 1
             inventory.read_fold(fold, complete=result.complete, at=result.at, source=result.source)
+            self.fold_activity_inventory(resource, scope)
             return
         if resource in {"attests", "assignments", "work-items"}:
             incoming = {str(row[inventory.key]): row for row in result.rows}
@@ -597,8 +685,9 @@ class EvidenceModel:
         for fact in self.item_assignment_facts.values():
             fact["freshness"] = "stale"
         for part in self.closed_items.values():
-            for fact in (part["facts"], *part["authorFacts"].values()):
-                fact["freshness"] = "stale"
+            part["facts"]["freshness"] = "stale"
+        for fact in self.session_activity_evidence.values():
+            fact["freshness"] = "stale"
 
     def active_sessions(self):
         holders = {a.get("holderKey") for a in self.inventory("assignments").rows.values()
@@ -733,14 +822,11 @@ class EvidenceModel:
 
         turns, wakes, messages = [], {}, []
         turn_evidence = []
-        activity = {}
         for session in visible:
             key = session["sessionKey"]
             turn_evidence.append(self.inventory("turns", key).evidence())
             summary = self.summary("turns", key)
             turns.extend(summary["live"])
-            if summary["activity"] is not None:
-                activity[key] = summary["activity"]
             # Only live-turn wake references need historical wake lookup.
             wake_rows = self.inventory("wakes", key).rows
             for turn in summary["live"]:
@@ -756,31 +842,21 @@ class EvidenceModel:
         item_turn_facts = dict(all_turn_facts, observedAt=None, source=["turns"])
 
         authored_at = defaultdict(dict)
-        activity_evidence = defaultdict(list)
         for assignment in assignments.rows.values():
             wid = assignment.get("workItemId")
             summary = self.summary("attests", assignment["id"])
             for key, at in summary["authors"].items():
-                activity[key] = max(activity.get(key, 0), at)
                 authored_at[key][wid] = max(authored_at[key].get(wid, 0), at)
-            facts = self.inventory("attests", assignment["id"]).evidence()
-            for author in summary["authorIds"]:
-                activity_evidence[author].append(facts)
         for wid in self.closed_items:
             closed = self.closed_item(wid, by_item[wid])
             if closed is None:
                 continue
             for author, at in closed["summary"]["authors"].items():
-                activity[author] = max(activity.get(author, 0), at)
                 authored_at[author][wid] = max(authored_at[author].get(wid, 0), at)
-            for author, facts in closed["authorFacts"].items():
-                activity_evidence[author].append(facts)
 
-        # Recompute from the existing current-source folds, not prior maxima:
-        # complete source replacement can lower a value or remove its key.
-        # Turns enter only for selected sessions; all eligible attest authors
-        # enter even when they are not currently rendered (including null items).
-        self.session_activity = activity
+        # Source reads and eligible notices fold the fixed session records.
+        # Item attachment facts above are not the source of idle publication.
+        activity = self.session_activity
         agents = []
         for session in visible:
             key = session["sessionKey"]
@@ -811,8 +887,7 @@ class EvidenceModel:
                 "evidence": {
                     "identity": facts, "parent": parent_facts,
                     "turn": turn_inventory.evidence(),
-                    "idleFor": combined_evidence(
-                        turn_inventory.evidence(), *activity_evidence[key]),
+                    "idleFor": self.session_activity_facts(key, turn_inventory.evidence()),
                 },
             })
 

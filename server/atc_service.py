@@ -542,6 +542,11 @@ class LiveService:
             classified = False
         if not classified:
             self._update_backstop(at)
+        if self.model.inventory("work-items").complete:
+            eligible_activity_items = {wid for wid, item in self.model.work_items().items()
+                if not (self._summary_contract_active() and has_work_item_summary(item)
+                        and not self._summary_needs_review_timing(item))}
+            self.model.retain_exited_activity(eligible_activity_items, at)
         data = deepcopy(self.model.snapshot(
             at, assignment_source_unavailable=self.assignment_source_unavailable))
         self._retain_unproven_removals(data, at)
@@ -960,6 +965,7 @@ class LiveService:
         """
         if recovery and not resume:
             self.retired_activity_marker = None
+            self.model.begin_activity_refresh()
         if self.cycle is not None:
             if recovery:
                 self.cycle["mode"] = "recovery"
@@ -1099,6 +1105,7 @@ class LiveService:
             # incomplete after a later recovery cycle finishes successfully.
             self.metrics["bootstrapComplete"] = True
         if cycle["mode"] != "interval" and complete:
+            self.model.finish_activity_refresh()
             self.last_complete = self.last_sweep = now_ms()
             self.sweep_remaining = set(self._history_scopes())
             # A resumed recovery can settle without reading anything when all
@@ -1185,6 +1192,14 @@ class LiveService:
             self.reads.schedule(*job, priority=True)
         return True
 
+    def _attest_activity_eligible(self, owner):
+        if owner is None:
+            return True
+        item = self.model.work_items().get(owner)
+        return item is not None and not (
+            self._summary_contract_active() and has_work_item_summary(item)
+            and not self._summary_needs_review_timing(item))
+
     def _attest_activity_owner_done(self, job, result):
         assignment_id = job[1]
         pending = self.attest_activity_pending.get(assignment_id)
@@ -1208,9 +1223,7 @@ class LiveService:
             return True
         owner = row["workItemId"]
         item = self.model.work_items().get(owner)
-        eligible = owner is None or (item is not None and not (
-            self._summary_contract_active() and has_work_item_summary(item)
-            and not self._summary_needs_review_timing(item)))
+        eligible = self._attest_activity_eligible(owner)
         # No read row escapes the resolution, including into an inventory.
         result.rows.clear()
         del row
@@ -1219,10 +1232,15 @@ class LiveService:
                          observedAt=pending["observedAt"], unconfirmedSince=None,
                          source="cli:attests " + str(assignment_id))
             for author, timestamp in pending["authors"].items():
-                self.model.fold_session_activity(author, timestamp, "attest", assignment_id, facts)
+                self.model.fold_session_activity(author, timestamp, "attest", assignment_id, facts,
+                                                 owner=owner)
         del self.attest_activity_pending[assignment_id]
         self.attest_activity_counts["completed"] += 1
         self._forget_scopes({job[:2]})
+        if owner is not None and item is not None:
+            # The ordinary item-source path still refreshes its board facts;
+            # ownership resolution is not an item-publication substitute.
+            self._request_item_assignments(owner, changed=True)
         return True
 
     def _item_assignments_done(self, job, result):
@@ -1295,7 +1313,8 @@ class LiveService:
             if result.complete and self.assignment_source_unavailable:
                 self.assignment_source_unavailable = False
                 LOG.info("assignments source recovered")
-        if resource == "assignments" and key is not None and self.model.closed_sources_released:
+        if (resource == "assignments" and key is not None and self.model.closed_sources_released
+                and (key not in assignments.rows or assignments.rows[key].get("workItemId") is not None)):
             row = result.rows[0] if result.complete and len(result.rows) == 1 else None
             wid = (row or assignments.rows.get(key, {})).get("workItemId")
             if wid and self._request_item_assignments(wid, changed=True):
@@ -1304,6 +1323,9 @@ class LiveService:
             elif wid and self.model.inventory("work-items").complete:
                 # A successfully correlated assignment outside the current
                 # server item set has no pending item source to repair.
+                self.read_retries.pop(job, None)
+                self.retry_in_flight.discard(job)
+            elif row is not None and "workItemId" in row and row["workItemId"] is None:
                 self.read_retries.pop(job, None)
                 self.retry_in_flight.discard(job)
             else:
@@ -1323,7 +1345,7 @@ class LiveService:
                 # owns the incompleteness, without retaining the partial rows.
                 self._forget_scopes({job[:2]})
                 return True
-            if self.model.closed_sources_released and owner is None:
+            if self.model.closed_sources_released and scope not in assignments.rows:
                 self._refresh("assignments", key=scope)
                 return True
         if resource == "assignments" and key is None and not result.complete:
@@ -1439,7 +1461,12 @@ class LiveService:
             return True
         summary_was_active = self._summary_contract_active() if resource == "work-items" else None
         if key is None:
-            self.model.accept(resource, scope, result)
+            activity_eligible = True
+            if resource == "attests":
+                assignment = assignments.rows.get(scope)
+                activity_eligible = (assignment is not None and "workItemId" in assignment
+                                     and self._attest_activity_eligible(assignment["workItemId"]))
+            self.model.accept(resource, scope, result, activity_eligible=activity_eligible)
         else:
             self.model.detail(resource, scope, result)
         if resource == "turns" and scope is not None and result.complete:
@@ -1655,6 +1682,26 @@ class LiveService:
             scope = payload.get("sessionKey") or refs.get("sessionKey")
         else:
             scope = None
+        if (resource == "attests" and notice.get("op") == "upsert"
+                and payload.get("kind") and payload.get("bySession")
+                and activity_time(payload.get("ts")) is not None and scope):
+            held = self.model.inventory("assignments").rows.get(str(scope))
+            if "workItemId" in payload:
+                activity_owner, owner_known = payload["workItemId"], True
+            elif "workItemId" in refs:
+                activity_owner, owner_known = refs["workItemId"], True
+            elif held is not None and "workItemId" in held:
+                activity_owner, owner_known = held["workItemId"], True
+            else:
+                activity_owner, owner_known = None, False
+            if not owner_known:
+                return self._queue_attest_activity(str(scope), payload["bySession"], payload["ts"])
+            if self._attest_activity_eligible(activity_owner):
+                self.model.fold_session_activity(payload["bySession"], payload["ts"], "attest", scope,
+                    dict(status="known", freshness="live", complete=True, observedAt=now_ms(),
+                         unconfirmedSince=None, source="cli:attests " + str(scope)), owner=activity_owner)
+            if activity_owner is None and held is None:
+                return True
         owner = (payload.get("workItemId") or refs.get("workItemId") or
                  self.model.inventory("assignments").rows.get(
                      key if resource == "assignments" else scope, {}).get("workItemId"))
@@ -1729,6 +1776,8 @@ class LiveService:
                 applied = inventory.payload(row, at=now_ms(), source="feed:" + notice["class"],
                                             policy=policy)
             if applied:
+                if resource == "turns":
+                    self.model.fold_activity_inventory(resource, scope)
                 self.metrics["payloads"] += 1
                 if resource == "attests" and previous != inventory.rows.get(str(row[inventory.key])):
                     self.model.details_revision += 1

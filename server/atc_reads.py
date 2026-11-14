@@ -18,6 +18,8 @@ class ItemAssignmentSource:
     live_items: dict = field(default_factory=dict)
     closed: dict | None = None
     activity: int | float | None = None
+    session_activity: dict = field(default_factory=dict)
+    session_evidence: dict = field(default_factory=dict)
 
 
 class ReadQueue:
@@ -96,7 +98,7 @@ class ReadQueue:
 
     def _item_assignments(self, wid, live_ids):
         from atc_evidence import HistoryInventory
-        from atc_model import ClosedAssignmentFold
+        from atc_model import ClosedAssignmentFold, fold_session_activity_record
         from atc_summary import HistoryFold
 
         read_attests, visible = True, None
@@ -146,6 +148,9 @@ class ReadQueue:
                     fold = HistoryFold("attests", result.at)
                     fold.add(result.rows)
                 inventory.read_fold(fold, complete=True, at=result.at, source=result.source)
+                for author, timestamp in inventory.folded["authors"].items():
+                    fold_session_activity_record(staged.session_activity, staged.session_evidence,
+                        author, timestamp, "attest", aid, inventory.evidence(), owner=wid)
                 at = result.at
             if row.get("state") == "open":
                 staged.open_rows[aid] = row

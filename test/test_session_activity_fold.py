@@ -38,6 +38,40 @@ class SessionActivityFoldTest(unittest.TestCase):
         self.assertEqual(["/api/sessions/author%20key/turns", "attest", "turn"],
                          model.session_activity_evidence["author key"]["source"])
 
+    def test_winner_item_exit_retains_observation_until_newer_activity(self):
+        for remaining in (None, 950000):
+            with self.subTest(remaining=remaining):
+                model = EvidenceModel()
+                if remaining is not None:
+                    model.fold_session_activity("author", remaining, "attest", "null", self.facts())
+                model.fold_session_activity("author", 1000000, "attest", "winner", self.facts(), owner="item")
+                model.fold_session_activity("unaffected", 800000, "attest", "other", self.facts())
+                model.retain_exited_activity(set(), 1200000)
+                self.assertEqual(1000000, model.session_activity["author"])
+                facts = model.session_activity_facts("author", self.facts())
+                self.assertEqual(["attest", "cli:attests winner"], facts["source"])
+                self.assertFalse(facts["complete"])
+                self.assertEqual("unconfirmed", facts["freshness"])
+                self.assertEqual(1200000, facts["unconfirmedSince"])
+                self.assertNotIn("_retainedAt", model.session_activity_evidence["unaffected"])
+                model.fold_session_activity("author", 1100000, "attest", "next", self.facts())
+                self.assertNotIn("_retainedAt", model.session_activity_evidence["author"])
+                self.assertEqual(1100000, model.session_activity["author"])
+                self.assertTrue(model.session_activity_facts("author", self.facts())["complete"])
+
+    def test_turn_only_retirement_removes_record_and_attest_winner_keeps_value(self):
+        model = EvidenceModel()
+        model.fold_session_activity("turn-only", 950000, "turn", "turn-only", self.facts())
+        model.fold_session_activity("mixed", 900000, "turn", "mixed", self.facts())
+        model.fold_session_activity("mixed", 950000, "attest", "winner", self.facts())
+        model.release_turn_activity("turn-only")
+        model.release_turn_activity("mixed")
+        self.assertNotIn("turn-only", model.session_activity)
+        self.assertNotIn("turn-only", model.session_activity_evidence)
+        self.assertEqual(950000, model.session_activity["mixed"])
+        self.assertEqual(["attest", "cli:attests winner"],
+                         model.session_activity_evidence["mixed"]["source"])
+
     def test_folding_does_not_erase_incomplete_or_stale_evidence(self):
         model = EvidenceModel()
         model.fold_session_activity("author", 950000, "attest", "winner", self.facts(
