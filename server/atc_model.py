@@ -13,7 +13,7 @@ from atc_evidence import (
     turn_state, merge_value_for_refs,
 )
 from atc_payloads import has_work_item_summary
-from atc_contributions import AssignmentContribution, ContributionEvidence, ItemContributions
+from atc_contributions import AttestContribution, AssignmentContribution, ContributionEvidence, ItemContributions
 
 
 KEYS = {"sessions": "sessionKey", "roles": "name", "turns": "seq",
@@ -450,6 +450,12 @@ class EvidenceModel:
     def mark_unconfirmed(self, at):
         for inventory in self.inventories.values():
             inventory.mark_unconfirmed(at)
+        for aid, contribution in self.item_contributions.entries.items():
+            facts = contribution.evidence
+            if facts.complete and facts.unconfirmed_since is None:
+                self.item_contributions.entries[aid] = contribution._replace(evidence=facts._replace(
+                    unconfirmed_since=at,
+                    freshness='stale' if facts.freshness == 'stale' else 'unconfirmed'))
         for fact in self.item_assignment_facts.values():
             if fact["complete"] and fact.get("unconfirmedSince") is None:
                 fact["unconfirmedSince"] = at
@@ -638,20 +644,22 @@ class EvidenceModel:
         self.details_revision += 1
         return True
 
-    def _reduce_current_closed_item(self, wid, source_part):
+    def _reduce_current_closed_item(self, wid, source_part, *, preserve_facts=True):
         fold = ClosedAssignmentFold()
         for contribution in self.item_contributions.entries.values():
             if contribution.item == wid and contribution.state != "open":
                 fold.add_contribution(contribution)
         if fold.part["count"]:
             part = fold.finish()
-            # No source text was read. Preserve its actual last pin and any
-            # outage rather than inventing a complete detail fingerprint or
-            # reconfirming attest scopes from an assignment projection.
+            # A contribution reduction cannot reconstruct the complete item's
+            # detail text. Keep its actual last pin. Ordinary projections also
+            # preserve aggregate warnings; a scoped confirmation instead uses
+            # each contributor's current evidence, including outage marks.
             if source_part:
                 part["detailFingerprint"] = source_part["detailFingerprint"]
                 part["assignmentFingerprint"] = source_part["assignmentFingerprint"]
-                part["facts"] = combined_evidence(source_part["facts"], part["facts"])
+                if preserve_facts:
+                    part["facts"] = combined_evidence(source_part["facts"], part["facts"])
                 part["turnActivity"] = source_part["turnActivity"]
                 part["activity"] = latest_time(part["activity"], part["turnActivity"])
             self.closed_items[wid] = part
@@ -661,6 +669,44 @@ class EvidenceModel:
                 self.fold_retired_activity({wid: source_part["turnActivity"]})
         self.closed_revision += 1
         self._item_activity_parts.clear()
+
+    def accept_closed_attest_read(self, aid, result, *, connected):
+        """Apply a complete scoped snapshot to its current closed contribution.
+
+        The caller has replayed notices through the read flight. The read
+        confirms attests only: current assignment state, corrections and order
+        survive, and the item's last actual detail pin stays revision guarded.
+        No discarded assignment row or raw attest inventory is recreated.
+        """
+        previous = self.item_contributions.entries.get(str(aid))
+        if (not result.complete or previous is None or previous.state == 'open'
+                or previous.item not in self.work_items()
+                or previous.item in self.item_assignment_pending
+                or str(aid) in self.inventory('assignments').rows):
+            return False
+        fold = result.folded
+        if fold is None:
+            fold = HistoryFold('attests', result.at, ())
+            fold.add(result.rows)
+        facts = dict(status='known', freshness='live' if connected else 'stale',
+                     observedAt=result.at, source=result.source,
+                     complete=True, unconfirmedSince=None)
+        current = previous._replace(
+            attests=AttestContribution.capture(fold.summary, fold.attest_frontier),
+            evidence=ContributionEvidence.capture(facts),
+            detail_fingerprint=fold.fingerprint.hexdigest())
+        self.item_contributions.entries[str(aid)] = current
+        # Outage state is retained per contribution, so reconfirming this one
+        # does not clear another member's warning or latch its old warning.
+        self._reduce_current_closed_item(previous.item, self.closed_items.get(previous.item),
+                                         preserve_facts=False)
+        observation = dict(facts, freshness='live')
+        for author, timestamp in current.attests.authors:
+            self.fold_session_activity(author, timestamp, 'attest', aid, observation,
+                                       owner=previous.item)
+        if current != previous:
+            self.details_revision += 1
+        return True
 
     def update_closed_attest_contribution(self, aid, row):
         """Fold a validated notice into one released current contribution.
@@ -962,6 +1008,9 @@ class EvidenceModel:
     def invalidate(self):
         for inventory in self.inventories.values():
             inventory.invalidate()
+        for aid, contribution in self.item_contributions.entries.items():
+            self.item_contributions.entries[aid] = contribution._replace(
+                evidence=contribution.evidence._replace(freshness='stale'))
         for fact in self.item_assignment_facts.values():
             fact["freshness"] = "stale"
         for part in self.closed_items.values():

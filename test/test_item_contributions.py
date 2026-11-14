@@ -245,6 +245,46 @@ class ItemContributionsTest(unittest.TestCase):
                 self.assertTrue(model.update_closed_assignment_contribution(projection))
                 self.assertEqual(revision + 1, model.details_revision)
 
+    def test_closed_scoped_confirmation_preserves_other_contributors_warnings(self):
+        from copy import deepcopy
+        from publication_assertions import assert_publication_equal
+        for warning in ('none', 'unconfirmed', 'stale'):
+            with self.subTest(warning=warning):
+                model = ClosedAssignmentFoldTest().model()
+                baseline = deepcopy(model)
+                model.fold_closed_assignments()
+                for current in (model, baseline):
+                    if warning == 'unconfirmed':
+                        current.mark_unconfirmed(1100)
+                    elif warning == 'stale':
+                        current.invalidate()
+                old = model.item_contributions.entries['first']
+                pin = model.closed_items['work']['detailFingerprint']
+                rows = list(baseline.inventory('attests', 'first').rows.values())
+                rows.append(dict(id='new', kind='progress', ts=1200,
+                                 bySession='author', commitRefs=[{'commit': 'new'}]))
+                result = Read(rows, True, 1250, 'fixture')
+                baseline.accept('attests', 'first', deepcopy(result))
+                self.assertTrue(model.accept_closed_attest_read('first', result, connected=True))
+                current = model.item_contributions.entries['first']
+                self.assertEqual(2, current.attests.count)
+                self.assertEqual('live', current.evidence.freshness)
+                self.assertEqual(old.corrections, current.corrections)
+                self.assertEqual(old.closed_at, current.closed_at)
+                self.assertEqual(pin, model.closed_items['work']['detailFingerprint'])
+                self.assertFalse(model.closed_items['work']['detailsKnown'])
+                self.assertNotIn(('attests', 'first'), model.inventories)
+                self.assertEqual('live' if warning == 'none' else warning,
+                                 model.closed_items['work']['facts']['freshness'])
+                assert_publication_equal(self, baseline.snapshot(1300), model.snapshot(1300),
+                                         'r28-closed-scope-confirmation-' + warning)
+                # Partial data must neither replace live facts nor certify
+                # this closed scope. Its caller owns the existing retry path.
+                before = dict(model.item_contributions.entries)
+                self.assertFalse(model.accept_closed_attest_read(
+                    'first', Read([], False, 1350, 'fixture'), connected=True))
+                self.assertEqual(before, model.item_contributions.entries)
+
     def test_released_projection_cannot_override_pending_or_different_item_source(self):
         from copy import deepcopy
         model = ClosedAssignmentFoldTest().model()

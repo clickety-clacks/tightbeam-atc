@@ -1339,6 +1339,7 @@ class LiveService:
 
     def _finished_read(self, job, result, priority, retry, attest_notices=None):
         resource, scope, key = job
+        accepted_closed_attests = False
         if resource == "retired-turns":
             return self._retired_activity_done(job, result)
         if resource == "attest-owner":
@@ -1393,7 +1394,15 @@ class LiveService:
                 except ValueError:
                     result = Read([], False, result.at, result.source,
                                   'invalid-complete-attest-frontier')
+            contribution = self.model.item_contributions.entries.get(str(scope))
             owner = assignments.rows.get(scope, {}).get("workItemId")
+            if scope not in assignments.rows and contribution is not None:
+                owner = contribution.item
+            if (self.model.closed_sources_released and contribution is not None
+                    and (owner not in self.model.work_items()
+                         or not self._attest_activity_eligible(owner))):
+                self._forget_scopes({job[:2]})
+                return True
             if owner in self.model.item_assignment_pending:
                 # The independently required complete item replacement owns
                 # this scope. A redundant scoped result must not restart it
@@ -1410,8 +1419,11 @@ class LiveService:
                 self._forget_scopes({job[:2]})
                 return True
             if self.model.closed_sources_released and scope not in assignments.rows:
-                self._refresh("assignments", key=scope)
-                return True
+                accepted_closed_attests = self.model.accept_closed_attest_read(
+                    scope, result, connected=self.connected)
+                if not accepted_closed_attests:
+                    self._refresh("assignments", key=scope)
+                    return True
         if resource == "assignments" and key is None and not result.complete:
             # Unidentified items retain their last complete current facts; only
             # the contributors present in this partial response need rereads.
@@ -1524,7 +1536,9 @@ class LiveService:
                 self._state("stale", "uncorrelated " + resource + " change")
             return True
         summary_was_active = self._summary_contract_active() if resource == "work-items" else None
-        if key is None:
+        if accepted_closed_attests:
+            pass
+        elif key is None:
             activity_eligible = True
             if resource == "attests":
                 assignment = assignments.rows.get(scope)
@@ -1566,7 +1580,7 @@ class LiveService:
                 row = next((row for row in result.rows if row.get("id") == key), None)
                 if row:
                     self._reconcile_item_attests(row)
-        if not self.connected:
+        if not self.connected and not accepted_closed_attests:
             self.model.inventory(resource, scope).invalidate()
         if result.complete:
             self.read_failures.discard(job[:2])
@@ -1745,14 +1759,13 @@ class LiveService:
         wid = payload["workItemId"]
         # A mutable assignment's timestamp-derived version is not strict
         # across reopening. This path applies ordered feed projections only
-        # when no independently scheduled source result can overwrite them.
-        # Concurrent item replacement still uses its held publication path.
+        # when no assignment source result can overwrite them. A scoped
+        # attest result changes only attest facts on the current contribution,
+        # so it cannot roll back a close or reopen. Concurrent item replacement
+        # still uses its held publication path.
         if (wid in self.model.item_assignment_pending
                 or ("assignments", None) in self.reads.active
-                or ("item-assignment-source", wid) in self.reads.active
-                or ("attests", str(key)) in self.reads.active
-                or any(job[:2] == ("attests", str(key))
-                       for job in (*self.reads.pending, *self.read_retries))):
+                or ("item-assignment-source", wid) in self.reads.active):
             return False
         released = self.model.apply_assignment_projection(
             payload, at=now_ms(), source="feed:" + notice["class"])

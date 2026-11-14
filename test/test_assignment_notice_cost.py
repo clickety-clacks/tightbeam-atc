@@ -223,6 +223,72 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 assert_replay_current(self, service, baseline,
                                      'b4-scoped-flight-' + str(expected) + '-replay')
 
+    def test_scoped_attest_read_survives_close_and_reopen_without_member_reads(self):
+        for states in (('closed',), ('closed', 'open'), ('closed', 'open', 'closed')):
+            with self.subTest(states=states):
+                gateway = ItemReads()
+                gateway.rows['assignments', None] = [dict.fromkeys(ASSIGNMENT_FIELDS) | row
+                    for row in gateway.rows['assignments', None]]
+                service = self.load(gateway)
+                baseline = deepcopy(service.current)
+                assignment = next(row for row in gateway.rows['assignments', None]
+                                  if row['id'] == 'open')
+                started, release = Event(), Event()
+                self.addCleanup(release.set)
+                original = gateway.read
+                def read(resource, scope=None):
+                    result = original(resource, scope)
+                    if (resource, scope) == ('attests', 'open'):
+                        started.set()
+                        if not release.wait(5):
+                            raise AssertionError('fixture did not release closing scope read')
+                    return result
+                gateway.calls.clear()
+                with patch.object(gateway, 'read', side_effect=read):
+                    service.reads.schedule('attests', 'open')
+                    service.reads.pump()
+                    self.assertTrue(started.wait(5))
+                    flight = service.reads.attest_flights['open']
+                    epoch = service.reads.epochs['attests', 'open']
+                    for position, state in enumerate(states):
+                        assignment.update(state=state, closedAt=100 + position if state == 'closed' else None)
+                        payload = deepcopy(assignment)
+                        payload.pop('commitRefCorrections', None)
+                        service.change(dict(resource='assignments', op='upsert',
+                            refs={'assignmentId': 'open', 'workItemId': 'work'}, payload=payload,
+                            **{'class': 'assignment.closed' if state == 'closed' else 'assignment.reopened'}))
+                        service._publish()
+                        self.assertEqual(set(), service.model.item_assignment_pending)
+                        self.assertEqual(epoch, service.reads.epochs['attests', 'open'])
+                    notice = dict.fromkeys(ATTEST_FIELDS) | dict(id='after-transition',
+                        assignmentId='open', kind='progress', bySession='author',
+                        ts=4000, commitRefs=[{'commit': 'new-ref'}])
+                    gateway.rows['attests', 'open'].append(deepcopy(notice))
+                    service.change(dict(resource='attests', op='upsert', payload=notice,
+                        refs={'attestId': notice['id'], 'assignmentId': 'open'},
+                        **{'class': 'attest.filed'}))
+                    service._publish()
+                    self.assertEqual(2, service.model.item_contributions.entries['open'].attests.count)
+                    self.assertEqual(1, flight.notice_count)
+                    release.set()
+                    service._handle(*service.events.get(timeout=5))
+                    self.settle(service)
+                self.assertEqual([('read', 'attests', 'open')], gateway.calls)
+                self.assertEqual(0, service.reads.epoch_discards)
+                self.assertEqual({}, service.reads.attest_flights)
+                contribution = service.model.item_contributions.entries['open']
+                self.assertEqual(states[-1], contribution.state)
+                self.assertEqual(2, contribution.attests.count)
+                if states[-1] == 'closed':
+                    self.assertNotIn(('attests', 'open'), service.model.inventories)
+                    self.assertNotIn('open', service.model.inventory('assignments').rows)
+                fresh_gateway = ItemReads()
+                fresh_gateway.rows = deepcopy(gateway.rows)
+                fresh = self.load(fresh_gateway)
+                label = 'b4-scoped-transition-' + '-'.join(states)
+                assert_publication_equal(self, fresh.current, service.current, label)
+                assert_replay_current(self, service, baseline, label + '-replay')
+
     def test_item_exit_releases_protection_before_delayed_read_result(self):
         gateway = ItemReads()
         service = self.load(gateway)
