@@ -14,7 +14,7 @@ from atc_service import LiveService
 from atc_upstream import Gateway
 from test_closed_folding import ClosedAssignmentFoldTest
 from atc_contributions import AttestFrontier
-from publication_assertions import assert_publication_equal
+from publication_assertions import assert_publication_equal, assert_replay_current
 
 
 class ItemAssignmentSourceTest(unittest.TestCase):
@@ -194,6 +194,70 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         self.assertEqual(before.closed, stage.closed)
         self.assertEqual(before.session_activity, stage.session_activity)
         self.assertEqual(before.open_attests['open'].folded, stage.open_attests['open'].folded)
+
+    def assert_staged_replay_publication(self, snapshot, fresh_result, label):
+        """Exercise publication/replay separately from the unwired flight owner."""
+        with patch('atc_service.now_ms', return_value=1000):
+            warm = LiveService(self.gateway)
+            fresh = LiveService(self.gateway)
+            self.addCleanup(warm.stop)
+            self.addCleanup(fresh.stop)
+            warm.model, fresh.model = deepcopy(self.model), deepcopy(self.model)
+            warm._publish()
+            baseline = deepcopy(warm.current)
+            for service, result in ((warm, snapshot), (fresh, fresh_result)):
+                service.model.hold_item_assignments('work')
+                service.model.replace_item_assignments('work', result)
+                service._publish()
+            assert_publication_equal(self, fresh.current, warm.current, label)
+            assert_replay_current(self, warm, baseline, label + '-replay')
+
+    def test_overlap_histories_have_distinct_exact_item_counts_and_full_replay(self):
+        # R27 H1/H2: the same snapshot must not be added to the old warm
+        # count or replaced by only the maximum-timestamp notice.
+        member = next(row for row in self.assignments if row['id'] == 'open')
+        member.update(effectKind='code', reviewsAssignmentId=None)
+        def row(identity, timestamp):
+            return dict(id=identity, kind='progress', ts=timestamp,
+                        bySession='author', commitRefs=[])
+        m, a, b, c = [row(key, at) for key, at in
+                      [('M', 1000), ('A', 2000), ('B', 3000), ('C', 4000)]]
+        for buffered, expected, count in (([b, c], [m, a, b, c], 4),
+                                           ([a, c], [m, a, c], 3)):
+            with self.subTest(count=count):
+                self.attests['open'] = [m, a]
+                snapshot = self.result()
+                self.assertTrue(snapshot.complete, snapshot.error)
+                calls = list(self.calls)
+                snapshot.folded.replay_attests({'open': buffered})
+                self.assertEqual(calls, self.calls)
+                self.assertEqual(count, snapshot.folded.contributions['open'].attests.count)
+                self.assertEqual(4000, snapshot.folded.session_activity['author'])
+                self.attests['open'] = expected
+                fresh = self.result()
+                self.assertTrue(fresh.complete, fresh.error)
+                self.assert_staged_replay_publication(snapshot, fresh, 'r27-stage-count-' + str(count))
+
+    def test_same_time_buffer_replay_preserves_both_item_reference_histories(self):
+        for left, right, expected in ((['A'], ['B'], ['A', 'C', 'B']),
+                                       ([], ['A', 'B'], ['C', 'A', 'B'])):
+            with self.subTest(left=left):
+                def row(identity, refs):
+                    return dict(id=identity, kind='progress', ts=2000,
+                        bySession='author', commitRefs=[{'commit': ref} for ref in refs])
+                b, c, d = row('b', left), row('c', ['C']), row('d', right)
+                self.attests['first'] = [b, d]
+                snapshot = self.result()
+                self.assertTrue(snapshot.complete, snapshot.error)
+                snapshot.folded.replay_attests({'first': [b, c, c, d]})
+                contribution = snapshot.folded.contributions['first'].attests
+                self.assertEqual(3, contribution.count)
+                self.assertEqual(expected, [ref['commit'] for ref in contribution.refs])
+                self.attests['first'] = [b, c, d]
+                fresh = self.result()
+                self.assertTrue(fresh.complete, fresh.error)
+                self.assert_staged_replay_publication(snapshot, fresh,
+                    'r27-stage-groups-' + ('nonempty' if left else 'empty'))
 
     def test_detail_page_preserves_collection_fields_before_and_after_targeted_reread(self):
         self.model.accept('assignments', None, self.gateway.read('assignments'))
