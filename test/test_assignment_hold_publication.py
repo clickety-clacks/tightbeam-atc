@@ -11,7 +11,7 @@ from atc_payloads import ASSIGNMENT_FIELDS
 from atc_service import LiveService
 from atc_upstream import ATTEST_FIELDS
 from test_item_assignment_retry import ItemReads
-from publication_assertions import assert_publication_equal, assert_replay_current
+from publication_assertions import assert_publication_equal, assert_replay_current, capture_publication
 
 
 class AssignmentHoldPublicationTest(unittest.TestCase):
@@ -85,13 +85,51 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         rows[index] = deepcopy(row)
 
     def assert_first_discovery_hold(self, baseline, wid, unpublished, label):
-        expected = deepcopy(self.fresh().current)
-        if unpublished:
-            expected['items'] = [item for item in expected['items'] if item['id'] != wid]
-            self.assertIsNone(self.service.assignment_holds.items[wid])
-        else:
-            retained = deepcopy(self.item(baseline, wid))
-            since = self.service.assignment_holds.since(wid)
+        self.assertEqual(unpublished, self.service.assignment_holds.items[wid] is None)
+        return self.assert_held_publication(baseline, label)
+
+    def assert_held_publication(self, baseline, label):
+        fresh = self.fresh()
+        expected = deepcopy(fresh.current)
+        holds = self.service.assignment_holds
+        scope_sets = {
+            'historyScopes': (set(self.service._history_scopes()), set(fresh._history_scopes())),
+            'active.scopeCount': (set(self.service.backstop.active), set(fresh.backstop.active)),
+        }
+        accounting = {name: dict(warm=sorted(warm), fresh=sorted(cold),
+                                retainedOnly=sorted(warm - cold), freshOnly=sorted(cold - warm))
+                      for name, (warm, cold) in scope_sets.items()}
+        # Capture actual complete frames and identity accounting before any
+        # assertion or adjustment. No field is removed from the evidence.
+        capture_publication(fresh.current, self.service.current, label + '-scope-evidence',
+                            heldAssignments=sorted(holds.assignments), scopeAccounting=accounting)
+        permitted = {('attests', aid) for aid in holds.assignments}
+        differences = {}
+        for name, (warm, cold) in scope_sets.items():
+            self.assertEqual(set(), cold - warm, name)
+            self.assertTrue(warm - cold <= permitted, (name, accounting[name]))
+            self.assertLessEqual(len(warm - cold), len(holds.assignments), name)
+            left = expected['freshness']['reconciliation']
+            right = self.service.current['freshness']['reconciliation']
+            if name == 'active.scopeCount':
+                left, right, field = left['active'], right['active'], 'scopeCount'
+            else:
+                field = name
+            self.assertEqual(len(cold), left[field], name)
+            self.assertEqual(len(warm), right[field], name)
+            differences[name] = len(warm - cold)
+            self.assertEqual(differences[name], right[field] - left[field], name)
+            # R31 permits exactly this scope-derived difference, never a
+            # blanket offset for every hold or another reconciliation field.
+            left[field] += differences[name]
+        for wid, actual_prior in holds.items.items():
+            if actual_prior is None:
+                self.assertNotIn(wid, {item['id'] for item in baseline['items']})
+                expected['items'] = [item for item in expected['items'] if item['id'] != wid]
+                continue
+            self.assertEqual(self.item(baseline, wid), actual_prior)
+            retained = deepcopy(actual_prior)
+            since = holds.since(wid)
             for fact in retained['evidence'].values():
                 if fact['freshness'] != 'stale':
                     fact['freshness'] = 'unconfirmed'
@@ -99,9 +137,10 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
                 fact['unconfirmedSince'] = since if prior is None else min(prior, since)
             expected['items'] = [retained if item['id'] == wid else item
                                  for item in expected['items']]
-        # R30 permits only the named item's publication/absence. In
-        # particular do not omit agents, links, board health or other items.
+        # R30/R31 allow only held item publication/absence and the two exact
+        # counts above. Agents, links, health and all other fields stay exact.
         assert_publication_equal(self, expected, self.service.current, label)
+        return differences, fresh
 
     def first_discovery(self, resource, *, unpublished, resolution='notice'):
         baseline = deepcopy(self.service.current)
@@ -132,7 +171,7 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.service._queue_feed_change(self.notice(closed))
         if resolution == 'notice':
             self.service._queue_feed_change(self.notice(row))
-        else:
+        elif resolution != 'late-notice':
             self.set_source_assignment(closed)
         self.service._handle(*event)
         self.service._publish()
@@ -161,16 +200,32 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
             # a mutable assignment hold.
             self.settle()
             self.assertIn('discovered', self.service.assignment_holds.assignments)
-            self.assert_first_discovery_hold(baseline, wid, unpublished, label + '-full-held')
+            differences, fresh = self.assert_first_discovery_hold(
+                baseline, wid, unpublished, label + '-full-held')
+            expected_difference = 0 if resolution == 'late-notice' else 1
+            self.assertEqual(dict.fromkeys(('historyScopes', 'active.scopeCount'),
+                                          expected_difference), differences)
+            self.assertEqual(8, self.service.current['freshness']['reconciliation']['historyScopes'])
+            self.assertEqual(8, self.service.current['freshness']['reconciliation']['active']['scopeCount'])
+            self.assertEqual(8 - expected_difference,
+                             fresh.current['freshness']['reconciliation']['historyScopes'])
+            self.assertEqual(8 - expected_difference,
+                             fresh.current['freshness']['reconciliation']['active']['scopeCount'])
             if resolution == 'held':
                 return baseline, row, wid, label
-            self.assertEqual('clean', resolution)
-            clean = self.queued_source(resource, wid)
-            self.service._handle(*clean)
+            if resolution == 'late-notice':
+                calls = list(self.gateway.calls)
+                self.service._queue_feed_change(self.notice(row))
+                self.service._handle(*self.service.events.get(timeout=5))
+                self.assertEqual(calls, self.gateway.calls)
+            else:
+                self.assertEqual('clean', resolution)
+                clean = self.queued_source(resource, wid)
+                self.service._handle(*clean)
         self.assertNotIn('discovered', self.service.assignment_holds.assignments)
         self.settle()
         self.assertIn(wid, {item['id'] for item in self.service.current['items']})
-        attempts = 1 if resolution == 'notice' else 2
+        attempts = 1 if resolution in {'notice', 'late-notice'} else 2
         self.assertEqual(attempts if resource == 'item-assignment-source' else 0,
                          sum(call[0] == 'membership' for call in self.gateway.calls))
         self.assertEqual(attempts if resource == 'assignments' else 0,
@@ -190,6 +245,64 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
 
     def test_item_first_discovery_holds_prior_absence(self):
         self.first_discovery('item-assignment-source', unpublished=True)
+
+    def test_global_reopened_source_has_no_held_scope_offset(self):
+        self.first_discovery('assignments', unpublished=False, resolution='late-notice')
+
+    def test_item_reopened_source_has_no_held_scope_offset(self):
+        self.first_discovery('item-assignment-source', unpublished=False, resolution='late-notice')
+
+    def test_global_reopened_source_keeps_absence_without_scope_offset(self):
+        self.first_discovery('assignments', unpublished=True, resolution='late-notice')
+
+    def test_item_reopened_source_keeps_absence_without_scope_offset(self):
+        self.first_discovery('item-assignment-source', unpublished=True, resolution='late-notice')
+
+    def test_resolving_shared_scope_hold_keeps_other_scope_difference_accountable(self):
+        baseline = deepcopy(self.service.current)
+        rows = [dict(self.opened, id=aid, workItemId=wid, openedAt=90,
+                     reviewsAssignmentId=None, effectKind='spec')
+                for aid, wid in (('held-closed', 'work'), ('held-reopened', 'unaffected-item'))]
+        for row in rows:
+            self.gateway.rows['assignments', None].append(deepcopy(row))
+            self.gateway.rows['attests', row['id']] = []
+        closed = [dict(row, state='closed', closedAt=95) for row in rows]
+        event = self.queued_source('assignments')
+        self.set_source_assignment(closed[0])  # H1: only this scope differs.
+        for row in closed:
+            self.service._queue_feed_change(self.notice(row))
+        self.service._handle(*event)
+        for _ in closed:
+            self.service._handle(*self.service.events.get(timeout=5))
+        self.settle()
+        self.assertEqual({'held-closed', 'held-reopened'},
+                         set(self.service.assignment_holds.assignments))
+        differences, fresh = self.assert_held_publication(baseline, 'r31-two-holds')
+        self.assertEqual({'historyScopes': 1, 'active.scopeCount': 1}, differences)
+        self.assertEqual(9, self.service.current['freshness']['reconciliation']['historyScopes'])
+        self.assertEqual(8, fresh.current['freshness']['reconciliation']['historyScopes'])
+        assert_replay_current(self, self.service, baseline, 'r31-two-holds-replay')
+
+        calls = list(self.gateway.calls)
+        self.service._queue_feed_change(self.notice(rows[1]))
+        self.service._handle(*self.service.events.get(timeout=5))
+        self.settle()
+        self.assertEqual(calls, self.gateway.calls)
+        self.assertEqual({'held-closed'}, set(self.service.assignment_holds.assignments))
+        differences, _fresh = self.assert_held_publication(baseline, 'r31-one-hold-remains')
+        self.assertEqual({'historyScopes': 1, 'active.scopeCount': 1}, differences)
+        assert_replay_current(self, self.service, baseline, 'r31-one-hold-remains-replay')
+
+        self.service._queue_feed_change(self.notice(closed[0]))
+        self.service._handle(*self.service.events.get(timeout=5))
+        self.settle()
+        self.assertEqual(calls, self.gateway.calls)
+        self.assertFalse(self.service.assignment_holds.assignments)
+        self.assertFalse(self.service.assignment_holds.items)
+        self.assertEqual(0, self.service.reads.epoch_discards)
+        assert_publication_equal(self, self.fresh().current, self.service.current,
+                                 'r31-both-resolved')
+        assert_replay_current(self, self.service, baseline, 'r31-both-resolved-replay')
 
     def test_global_first_discovery_clean_read_resolves_published_item(self):
         self.first_discovery('assignments', unpublished=False, resolution='clean')
