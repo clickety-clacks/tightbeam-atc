@@ -1413,6 +1413,113 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertFalse(self.service.assignment_holds.assignments)
         self._assert_producer_recovery_fresh_and_replayed(baseline, 'r37-source-shaped-close')
 
+    def test_unapplied_terminal_notice_without_producer_holds_without_item_read(self):
+        # B6 / R30-R32, lane245; custodian agreement art_cb3f8f6b.
+        # This is an unapplied first discovery, not F1's applied ordinary close.
+        for published in (True, False):
+            with self.subTest(published=published):
+                review, _producer = self._producer_recovery_fixture(published=published)
+                baseline = deepcopy(self.service.current)
+                discovered = dict(review, id='discovered-terminal', openedAt=12,
+                    state='closed', closedAt=17, effectKind='code', reviewsAssignmentId=None)
+                self.gateway.rows['assignments', None].append(discovered)
+                self.gateway.rows['attests', discovered['id']] = []
+                epochs = dict(self.service.reads.epochs)
+                with patch.object(self.service, '_request_reviewed_producer',
+                                  wraps=self.service._request_reviewed_producer) as requested:
+                    self.assertTrue(self.service.change(self._assignment_close_notice(discovered)))
+                requested.assert_not_called()
+                self.assertEqual([], self.gateway.calls)
+                self.assertFalse(self.service.reads.pending)
+                self.assertFalse(self.service.reads.active)
+                self.assertEqual(epochs, self.service.reads.epochs)
+                self.assertNotIn(discovered['id'], self.service.model.inventory('assignments').rows)
+                self.assertNotIn(discovered['id'], self.service.model.item_contributions.entries)
+                held = self.service.assignment_holds.assignments[discovered['id']]
+                self.assertTrue(held.incomplete_contribution)
+                self.assertFalse(held.producer_recovery)
+                self.assertFalse(held.conflict)
+                self.service._publish()
+                label = 'b6-first-discovery-no-producer-' + str(published)
+                self._assert_producer_hold_publication(baseline, label)
+                if not published:
+                    self.assertIsNone(self.service.assignment_holds.items['work'])
+                    self.assertFalse(self.service.current['items'])
+
+                # Explicit fixture delivery of an independently scheduled
+                # covering source; the notice must not schedule this read.
+                self.service._request_item_assignments('work')
+                self.drain()
+                self.service._publish()
+                self.assertEqual(1, len([call for call in self.gateway.calls
+                                         if call[0] == 'membership']))
+                self.assertFalse(self.service.assignment_holds.assignments)
+                self._assert_producer_recovery_fresh_and_replayed(baseline, label + '-resolved')
+
+    def test_applied_incomplete_close_reads_producer_and_keeps_contribution_hold(self):
+        # R20 establishes an eligible missing-contribution hold without keeping
+        # its lookup row. The later full close can then apply under R32/R36.
+        # This is separate from the unapplied first-discovery F2 case.
+        from atc_upstream import ATTEST_FIELDS
+        review, producer = self._producer_recovery_fixture()
+        baseline = deepcopy(self.service.current)
+        discovered = dict(review, id='incomplete-review', openedAt=12,
+                          state='closed', closedAt=17)
+        self.gateway.rows['assignments', None].append(discovered)
+        progress = dict.fromkeys(ATTEST_FIELDS) | dict(id='incomplete-progress',
+            assignmentId=discovered['id'], kind='progress', ts=15,
+            bySession='agent s_author', commitRefs=[])
+        self.gateway.rows['attests', discovered['id']] = [progress]
+        returned = []
+        original = self.gateway.detail
+        def captured(resource, key, scope=None):
+            result = original(resource, key, scope)
+            if resource == 'assignments':
+                result.rows[0].pop('files', None)
+                result.rows[0]['reopenings'] = []
+                returned.append(result)
+            return result
+        self.gateway.detail = captured
+        self.assertTrue(self.service.change(dict(resource='attests', op='upsert',
+            refs={'attestId': progress['id'], 'assignmentId': discovered['id']},
+            payload=deepcopy(progress), **{'class': 'attest.filed'})))
+        self.drain()
+        self.assertEqual([('detail', 'assignments', None, discovered['id'])], self.gateway.calls)
+        self.assertEqual([], returned[0].rows)
+        self.assertNotIn(discovered['id'], self.service.model.inventory('assignments').rows)
+        self.assertNotIn(discovered['id'], self.service.model.item_contributions.entries)
+        self.assertTrue(self.service.assignment_holds.assignments[discovered['id']].incomplete_contribution)
+
+        # The hidden producer closure belongs only to this qualifying applied
+        # close case. No relation is erased from an established A projection.
+        producer.update(state='closed', closedAt=16)
+        with patch.object(self.service, '_request_reviewed_producer',
+                          wraps=self.service._request_reviewed_producer) as requested:
+            self.assertTrue(self.service.change(self._assignment_close_notice(discovered)))
+        requested.assert_called_once_with(discovered['id'], 'work', 'producer')
+        self.assertEqual(discovered,
+                         self.service.model.inventory('assignments').rows[discovered['id']])
+        self.assertEqual({('reviewed-producer', 'producer', None)}, set(self.service.reads.pending))
+        self.drain()
+        self.assertEqual([('detail', 'assignments', None, discovered['id']),
+                          ('detail', 'assignments', None, 'producer')], self.gateway.calls)
+        self.assertTrue(all(not result.rows for result in returned))
+        self.assertNotIn('producer', self.service.model.inventory('assignments').rows)
+        self.assertEqual('closed', self.service.model.item_contributions.entries['producer'].state)
+        held = self.service.assignment_holds.assignments[discovered['id']]
+        self.assertTrue(held.incomplete_contribution)
+        self.assertFalse(held.producer_recovery)
+        self.service._publish()
+        self._assert_producer_hold_publication(baseline, 'r37-applied-incomplete-producer-resolved')
+        self.assertFalse(self.service.reads.pending)
+
+        self.service._request_item_assignments('work')  # existing scheduled covering route
+        self.drain()
+        self.service._publish()
+        self.assertFalse(self.service.assignment_holds.assignments)
+        self.assertEqual(1, len([call for call in self.gateway.calls if call[0] == 'membership']))
+        self._assert_producer_recovery_fresh_and_replayed(baseline, 'r37-applied-incomplete-covered')
+
     def test_first_discovery_close_supplies_producer_identity_only_in_notice(self):
         # Source-shaped first discovery, separately labeled from fully loaded
         # recovery. No prior relation is erased to manufacture this case.

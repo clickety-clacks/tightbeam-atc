@@ -2255,6 +2255,22 @@ class LiveService:
                 # An incomplete subsequent notice is not a resolver and must
                 # not obtain completeness by falling through to an item read.
                 return True
+            if (notice.get('op') == 'upsert' and notice.get('class') == 'assignment.closed'
+                    and ASSIGNMENT_FIELDS <= payload.keys() and key is not None
+                    and payload['id'] == key and payload['state'] == 'closed'
+                    and payload['workItemId'] in self.model.work_items()
+                    and str(key) not in self.model.inventory('assignments').rows
+                    and str(key) not in self.model.item_contributions.entries):
+                # A terminal projection cannot establish the missing attest
+                # contribution. Keep actual publication (or absence), as for
+                # owner resolution, without turning acknowledgment into an
+                # exceptional membership read or a fabricated contribution.
+                wid = payload['workItemId']
+                published = next((item for item in self.current.get('items', ())
+                                  if item['id'] == wid), None)
+                self.assignment_holds.hold(str(key), wid, published, at=now_ms(),
+                                           incomplete_contribution=True)
+                return True
         if (resource == "attests" and notice.get("op") == "upsert"
                 and payload.get("kind") and payload.get("bySession")
                 and activity_time(payload.get("ts")) is not None and scope):
