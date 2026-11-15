@@ -1187,7 +1187,7 @@ class LiveService:
         return True
 
     def _read_plan(self, resource, scope):
-        if resource == "attest-owner":
+        if resource in {"attest-owner", "reviewed-producer"}:
             return ()
         if (resource == "turns" and self.model.closed_sources_released
                 and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
@@ -1341,6 +1341,90 @@ class LiveService:
                 continue
             self.assignment_holds.resolve_contribution(aid)
 
+    def _request_reviewed_producer(self, assignment, item, producer):
+        """R36: called only after applying a qualifying close projection.
+
+        This condition is distinct from mutable ordering and missing attest
+        contribution holds. Neither a later A notice nor an attest confirmation
+        establishes the producer's hidden assignment state.
+        """
+        if item not in self.model.work_items():
+            return
+        published = next((value for value in self.current.get('items', ())
+                          if value['id'] == item), None)
+        producer = producer if isinstance(producer, str) and producer else None
+        self.assignment_holds.hold(str(assignment), item, published, at=now_ms(),
+                                   producer_recovery=True, producer=producer)
+        if producer is not None:
+            job = ('reviewed-producer', producer, None)
+            if job not in self.read_retries:
+                # ReadQueue coalesces both active and queued results. No
+                # shared assignment epoch changes or item discovery follows.
+                self.reads.schedule(*job, priority=True)
+
+    def _reviewed_producer_done(self, job, result, flight):
+        producer = job[1]
+        waiting = [(aid, held) for aid, held in self.assignment_holds.assignments.items()
+                   if held.producer_recovery and held.producer == producer
+                   and held.item in self.model.work_items()]
+        self.retry_in_flight.discard(job)
+        try:
+            if not waiting:
+                self._forget_scopes({job[:2]})
+                return False
+            row = result.rows[0] if result.complete and len(result.rows) == 1 else None
+            required = ASSIGNMENT_FIELDS - {'files', 'derivedStatus', 'rowVersion'}
+            usable = (row is not None and row.get('id') == producer
+                      and required <= row.keys() and row.get('state') in {'open', 'closed'}
+                      and isinstance(row.get('commitRefCorrections'), list))
+            if not usable:
+                # The same identified detail transport retries with existing
+                # bounded backoff; failure cannot request another source kind.
+                self.read_failures.add(job[:2])
+                self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, 2)
+                self.retry_counters['scheduled'] += 1
+                outcome = (Read([], False, result.at, result.source,
+                                'invalid-complete-producer-assignment')
+                           if result.complete else result)
+                self.last_incomplete_read = self._read_outcome(*job, outcome)
+                return True
+            conflicts = self._hold_assignment_conflicts(
+                result.rows, flight, complete=True, at=now_ms())
+            if conflicts:
+                # Do not choose a read/notice winner or restart the read.
+                # The independent R29 condition and producer hold wait for
+                # their existing source/resolution events.
+                self._forget_scopes({job[:2]})
+                return True
+            current = self.model.item_contributions.entries.get(producer)
+            raw = self.model.inventory('assignments').rows.get(producer)
+            owner = raw.get('workItemId') if raw is not None else current.item if current else None
+            if ((raw is None and current is None) or owner != row['workItemId']
+                    or owner not in self.model.work_items()):
+                # Assignment-get alone cannot manufacture a complete item
+                # contribution. A scheduled covering source still owns that.
+                self._forget_scopes({job[:2]})
+                return True
+            # Assignment-get also carries reopening history. Retain only its
+            # current projection/corrections through the normal model seam.
+            projection = {key: row[key] for key in ASSIGNMENT_FIELDS if key in row}
+            projection['commitRefCorrections'] = row['commitRefCorrections']
+            released = self.model.apply_assignment_projection(
+                projection, at=result.at, source=result.source, allow_pending=True)
+            if released is None:
+                self._forget_scopes({job[:2]})
+                return True
+            self._forget_closed_assignment_scopes(released)
+            self._forget_scopes({job[:2]})
+            for aid, _held in waiting:
+                self.assignment_holds.resolve_producer(aid)
+            return True
+        finally:
+            # No returned row or ownership result survives this consumer.
+            # Compact current contributions/normal open projections own only
+            # their existing published facts, not this read object.
+            result.rows.clear()
+
     def _item_assignments_done(self, job, result, assignment_flight=None):
         try:
             return self._apply_item_assignments_done(job, result, assignment_flight)
@@ -1361,6 +1445,11 @@ class LiveService:
             return True
         if result.complete:
             stage = result.folded
+            covered_producers = set(stage.assignment_fingerprints)
+            covered_producers.update(aid for aid, value in self.model.item_contributions.entries.items()
+                                     if value.item == wid)
+            covered_producers.update(aid for aid, row in self.model.inventory('assignments').rows.items()
+                                     if row.get('workItemId') == wid)
             conflicts = (assignment_flight.conflict_fingerprints(
                 stage.assignment_fingerprints.items(), complete=True)
                 if assignment_flight is not None else {})
@@ -1368,6 +1457,8 @@ class LiveService:
                 stage.assignment_fingerprints, self.model.item_contributions.entries,
                 consumed=self.assignment_delivery_consumed)
                 if assignment_flight is not None else set())
+            protected = set(conflicts) | self._reviewed_producer_dependencies(
+                set(conflicts) | arrivals, stage.assignment_fingerprints)
             def replace(notices):
                 # Validate/replay before creating holds or changing live state.
                 # Closed membership rows have already been released; their
@@ -1375,13 +1466,14 @@ class LiveService:
                 # used for the equality comparison above.
                 try:
                     stage.replay_attests(notices)
-                    stage.preserve_assignments(self.model, conflicts, arrivals=arrivals)
+                    stage.preserve_assignments(self.model, protected, arrivals=arrivals)
                 except ValueError:
                     return None
                 self._hold_assignment_conflict_deliveries(
                     conflicts, ((aid, wid) for aid in conflicts), at=now_ms())
                 released = self.model.replace_item_assignments(wid, result)
-                self._resolve_assignment_read_holds(conflicts, item=wid)
+                self._resolve_assignment_read_holds(conflicts, item=wid,
+                    covered_producers=covered_producers, producer_uncovered=arrivals)
                 # This existing covering read establishes complete item facts,
                 # including complete absence. It does not resolve any remaining
                 # mutable conflict by virtue of contribution completeness.
@@ -1445,7 +1537,27 @@ class LiveService:
             self.assignment_holds.hold(aid, wid, published.get(wid), at=at,
                 after_delivery=max(conflicts[aid], self.assignment_delivery_consumed))
 
-    def _resolve_assignment_read_holds(self, conflicts, *, item=None, excluded_items=()):
+    def _reviewed_producer_dependencies(self, assignments, present):
+        """Keep a recovered P with the current A protected by this old read.
+
+        A close can trigger a successful P lookup before an older whole-source
+        result is consumed. Preserving A but replacing P from that result would
+        undo the same recovery. Use only the current relation and current P
+        projection; no synthetic P notice, new row or source generation.
+        Complete absence still follows the existing membership/creation rules.
+        """
+        rows = self.model.inventory('assignments').rows
+        current = self.model.item_contributions.entries
+        dependencies = set()
+        for aid in assignments:
+            producer = (rows[aid].get('reviewsAssignmentId') if aid in rows else
+                        current[aid].reviews if aid in current else None)
+            if producer in present and (producer in rows or producer in current):
+                dependencies.add(producer)
+        return dependencies
+
+    def _resolve_assignment_read_holds(self, conflicts, *, item=None, excluded_items=(),
+                                       covered_producers=(), producer_uncovered=()):
         """Called only after committing a clean complete read of this scope.
 
         A global read does not commit R10-held item sources; those holds must
@@ -1456,6 +1568,18 @@ class LiveService:
             if (aid not in conflicts and held.item not in excluded_items
                     and (item is None or held.item == item)):
                 self.assignment_holds.resolve(aid)
+                if (held.producer_recovery and aid not in producer_uncovered
+                        and held.producer not in conflicts
+                        and (item is None or held.producer is None
+                             or held.producer in covered_producers)):
+                    self.assignment_holds.resolve_producer(aid)
+                    if held.producer is not None and not any(
+                            value.producer_recovery and value.producer == held.producer
+                            for value in self.assignment_holds.assignments.values()):
+                        # A scheduled covering source may beat the targeted
+                        # lookup. Drop its pending/retry state; an active result
+                        # is discarded by its no-waiter consumer when delivered.
+                        self._forget_scopes({('reviewed-producer', held.producer)})
 
     def _consume_read_done(self, value, assignment_flight=None):
         # R29 equality summaries survive queue delay and stay locked through
@@ -1468,6 +1592,15 @@ class LiveService:
         priority = self.reads.active_priorities.get(job[:2], 0)
         retry = job in self.retry_in_flight
         if not self.reads.finish(job, epoch):
+            if resource == 'reviewed-producer':
+                result.rows.clear()
+                if not any(held.producer_recovery and held.producer == scope
+                           and held.item in self.model.work_items()
+                           for held in self.assignment_holds.assignments.values()):
+                    # A covering read or item exit can retire this lookup
+                    # while its stale result is queued. Cancel the generic
+                    # same-scope reschedule before it can dispatch.
+                    self._forget_scopes({job[:2]})
             if retry:
                 self.retry_counters["epochDiscarded"] += 1
                 self.last_retry_outcome = {
@@ -1498,9 +1631,21 @@ class LiveService:
             return self._retired_activity_done(job, result)
         if resource == "attest-owner":
             return self._attest_activity_owner_done(job, result)
+        if resource == "reviewed-producer":
+            return self._reviewed_producer_done(job, result, assignment_flight)
         if resource == "item-assignment-source":
             return self._item_assignments_done(job, result, assignment_flight)
         assignments = self.model.inventory("assignments")
+        if resource == 'assignments' and key is not None and result.complete:
+            conflicts = self._hold_assignment_conflicts(
+                result.rows, assignment_flight, complete=True, at=now_ms())
+            if conflicts:
+                # An older keyed read conflicting with a delivered close is
+                # already covered by R29. It cannot bypass that hold through
+                # the released-detail fallback or restart the whole item.
+                self.read_retries.pop(job, None)
+                self.retry_in_flight.discard(job)
+                return True
         if resource == "assignments" and key is None:
             if not result.complete and not result.rows:
                 # No data identifies an item. Keep the complete source facts
@@ -1698,10 +1843,12 @@ class LiveService:
                 {str(row['id']) for row in result.rows}, self.model.item_contributions.entries,
                 consumed=self.assignment_delivery_consumed)
                 if assignment_flight is not None else set())
+            protected = set(conflicts) | self._reviewed_producer_dependencies(
+                set(conflicts) | arrivals, {str(row['id']) for row in result.rows})
             # The model validates the protected current projections before
             # accepting unaffected rows/absence. Publication is still the last
             # committed frame throughout this model-worker operation.
-            self.model.accept_assignment_read_preserving(result, conflicts, arrivals=arrivals)
+            self.model.accept_assignment_read_preserving(result, protected, arrivals=arrivals)
             self.model.restore_assignment_attests({wid for wid in self.model.work_items()
                 if self._attest_activity_eligible(wid)})
             # Membership establishes current contributor identity even before
@@ -1711,7 +1858,7 @@ class LiveService:
             self._hold_assignment_conflict_deliveries(conflicts,
                 ((str(row['id']), row.get('workItemId')) for row in result.rows), at=now_ms())
             self._resolve_assignment_read_holds(conflicts,
-                excluded_items=self.model.item_assignment_pending)
+                excluded_items=self.model.item_assignment_pending, producer_uncovered=arrivals)
         elif key is None:
             activity_eligible = True
             if resource == "attests":
@@ -1829,7 +1976,8 @@ class LiveService:
         return error if isinstance(error, str) and error.isidentifier() else "read-failed"
 
     def _read_outcome(self, resource, scope, key, result):
-        return {"resource": resource, "readKind": self._read_kind(scope, key),
+        return {"resource": resource,
+                "readKind": "detail" if resource == 'reviewed-producer' else self._read_kind(scope, key),
                 "page": result.page, "complete": result.complete,
                 "error": self._error_category(result.error), "at": result.at}
 
@@ -1954,6 +2102,14 @@ class LiveService:
             # Discovery must not turn this incomplete notice into extra reads.
             self.metrics["payloads"] += 1
             return True
+        self._forget_closed_assignment_scopes(released)
+        self.metrics["payloads"] += 1
+        self._discover_assignment_sessions((payload,))
+        self._discover_histories()
+        self._ensure_retired_activity()
+        return True
+
+    def _forget_closed_assignment_scopes(self, released):
         # Closing does not cancel an independently required confirmation,
         # including a refresh of previously complete facts. Its existing
         # scoped consumer applies attest facts to the current closed/reopened
@@ -1965,11 +2121,6 @@ class LiveService:
                  or any(job[:2] == scope for job in self.reads.pending)
                  or any(job[:2] == scope for job in self.read_retries))}
         self._forget_scopes(released - confirming)
-        self.metrics["payloads"] += 1
-        self._discover_assignment_sessions((payload,))
-        self._discover_histories()
-        self._ensure_retired_activity()
-        return True
 
     def _buffer_attest_notice(self, notice, key, scope, payload, *, owner=None):
         """Preserve a delivered full notice in already-open snapshot flights."""
@@ -2070,6 +2221,11 @@ class LiveService:
         else:
             scope = None
         if resource == 'assignments':
+            previous = self.model.inventory('assignments').rows.get(str(key))
+            contribution = self.model.item_contributions.entries.get(str(key))
+            producer = (payload.get('reviewsAssignmentId')
+                        or (previous or {}).get('reviewsAssignmentId')
+                        or (contribution.reviews if contribution is not None else None))
             held = self.assignment_holds.assignments.get(str(key))
             defer_contribution = False
             if (held is not None and held.conflict and assignment_delivery is not None
@@ -2092,6 +2248,8 @@ class LiveService:
                                              defer_contribution=defer_contribution):
                 if assignment_delivery is not None:
                     self.assignment_holds.resolve_notice(str(key), assignment_delivery)
+                if notice.get('class') == 'assignment.closed' and payload.get('state') == 'closed':
+                    self._request_reviewed_producer(str(key), payload['workItemId'], producer)
                 return True
             if held is not None and held.incomplete_contribution:
                 # An incomplete subsequent notice is not a resolver and must
@@ -2245,19 +2403,8 @@ class LiveService:
             self._discover_histories()
         if resource in {"sessions", "assignments", "work-items"} and applied:
             self._ensure_retired_activity()
-        if resource == "attests":
-            assignment = self.model.inventory("assignments").rows.get(str(scope))
-            # Completion can close the holder, and a review verdict can settle
-            # its producer. The attest projection contains neither new row.
-            affected = set()
-            if assignment is None or payload.get("kind") in {None, "completion"}:
-                affected.add(str(scope))
-            if payload.get("kind") in {None, "verdict"} and assignment and assignment.get("reviewsAssignmentId"):
-                affected.add(assignment["reviewsAssignmentId"])
-            if affected:
-                self.reads.touch("assignments", None)
-                for assignment_id in affected:
-                    self._refresh("assignments", key=assignment_id)
+        # R36 recovery is triggered only by an applied assignment close above.
+        # Attest kind/verdict alone grants no assignment side-effect read.
         return True
 
     def _discover_histories(self):
@@ -2292,7 +2439,7 @@ class LiveService:
                 # their next complete read.
                 for resource, scope in tuple(self.reads.active):
                     self.reads.touch(resource, scope)
-                    if resource != "attest-owner":
+                    if resource not in {"attest-owner", "reviewed-producer"}:
                         self.model.inventory(resource, scope).invalidate()
                 # Start or resume one recovery cycle. Repeated lost events do
                 # not reset epochs or bypass retry deadlines.

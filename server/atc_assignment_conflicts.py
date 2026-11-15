@@ -280,7 +280,8 @@ class AssignmentReadRegistry:
         with self.lock:
             if self.closed or job in self.flights:
                 raise ValueError('assignment read outside a new attempt')
-            self.flights[job] = AssignmentReadConflicts(detail=job[0] == 'reviewed-producer')
+            self.flights[job] = AssignmentReadConflicts(
+                detail=job[0] == 'reviewed-producer' or (job[0] == 'assignments' and job[2] is not None))
 
     def admit(self, notice, enqueue=None):
         with self.lock:

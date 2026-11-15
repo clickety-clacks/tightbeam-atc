@@ -971,22 +971,88 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual(row, self.service.model.inventory("attests", "assignment").rows[row["id"]])
         self.assertTrue(self.service.model.inventory("attests", "assignment").complete)
 
-    def test_completion_payload_reads_only_assignment_side_effect(self):
-        from atc_payloads import PAYLOAD_POLICIES
-        from atc_upstream import ATTEST_FIELDS
-        self.service.policies = PAYLOAD_POLICIES
-        row = dict.fromkeys(ATTEST_FIELDS) | {
-            "id": "completed", "assignmentId": "assignment", "kind": "completion",
-            "ts": 15, "bySession": "agent s_author", "commitRefs": [],
-        }
-        self.gateway.rows[("assignments", None)][0]["state"] = "closed"
-        self.gateway.calls.clear()
-        self.service.change({"resource": "attests", "class": "attest.filed", "op": "upsert",
-                             "refs": {"attestId": "completed"}, "payload": row})
+    def _producer_recovery_fixture(self, *, identified=True, published=True, workers=1):
+        from atc_payloads import ASSIGNMENT_FIELDS
+        review = dict.fromkeys(ASSIGNMENT_FIELDS) | dict(
+            id='assignment', workItemId='work', holderKey='agent s_author',
+            state='open', openedAt=1, files=[], effectKind='review',
+            reviewsAssignmentId='producer' if identified else None)
+        producer = dict.fromkeys(ASSIGNMENT_FIELDS) | dict(
+            id='producer', workItemId='work', holderKey='agent s_author',
+            state='open', openedAt=0, files=[], effectKind='code')
+        self.gateway.rows['assignments', None] = [review, producer]
+        self.gateway.rows['attests', 'producer'] = []
+        self.service.stop()
+        self.service = LiveService(self.gateway, workers=workers)
+        version = {'version': '0.1.9', 'build': 2908, 'sha': '8433d22f'}
+        self.service._handle('ready', version)
         self.drain()
-        self.assertEqual([("detail", "assignments", None, "assignment")], self.gateway.calls)
-        self.assertEqual("closed", self.service.model.inventory("assignments").rows["assignment"]["state"])
-        self.assertIn("completed", self.service.model.inventory("attests", "assignment").rows)
+        if published:
+            self.service._publish()
+        self.gateway.calls.clear()
+        return review, producer
+
+    @staticmethod
+    def _assignment_close_notice(row):
+        return dict(resource='assignments', op='upsert',
+                    refs={'assignmentId': row['id']}, payload=deepcopy(row),
+                    **{'class': 'assignment.closed'})
+
+    def _assert_producer_recovery_fresh_and_replayed(self, baseline, label):
+        from publication_assertions import assert_publication_equal, assert_replay_current
+        gateway = PublishedReads()
+        gateway.rows = deepcopy(self.gateway.rows)
+        fresh = LiveService(gateway)
+        self.addCleanup(fresh.stop)
+        fresh._handle('ready', self.service.version)
+        self.drain(fresh)
+        fresh._publish()
+        assert_publication_equal(self, fresh.current, self.service.current, label)
+        assert_replay_current(self, self.service, baseline, label + '-replay')
+
+    def test_completion_payload_reads_only_assignment_side_effect(self):
+        # Record45 owner mapping art_762b0bdd; PO att_e33b4539, R23/R36:
+        # completion attest alone grants no read. Its real associated close,
+        # with no identified P, holds prior publication until a covering read.
+        from atc_upstream import ATTEST_FIELDS
+        review, _producer = self._producer_recovery_fixture(identified=False)
+        baseline = deepcopy(self.service.current)
+        row = dict.fromkeys(ATTEST_FIELDS) | {
+            'id': 'completed', 'assignmentId': 'assignment', 'kind': 'completion',
+            'ts': 15, 'bySession': 'agent s_author', 'commitRefs': [],
+        }
+        self.gateway.rows['attests', 'assignment'].append(deepcopy(row))
+        self.service.change(dict(resource='attests', op='upsert',
+            refs={'attestId': row['id'], 'assignmentId': 'assignment'}, payload=row,
+            **{'class': 'attest.filed'}))
+        self.assertFalse(self.service.reads.pending)
+        self.assertEqual([], self.gateway.calls)
+        review.update(state='closed', closedAt=15, closingAttestId=row['id'])
+        self.assertTrue(self.service.change(self._assignment_close_notice(review)))
+        self.service._publish()
+        self.assertFalse(self.service.reads.pending)
+        self.assertEqual([], self.gateway.calls)
+        held = self.service.assignment_holds.assignments['assignment']
+        self.assertTrue(held.producer_recovery)
+        self.assertIsNone(held.producer)
+        expected = deepcopy(baseline['items'])
+        for item in expected:
+            for fact in item.get('evidence', {}).values():
+                if fact['freshness'] != 'stale':
+                    fact['freshness'] = 'unconfirmed'
+                fact['unconfirmedSince'] = min(fact.get('unconfirmedSince') or 20, 20)
+        self.assertEqual(expected, self.service.current['items'])
+        # This is an explicitly supplied already-scheduled covering read,
+        # not a new schedule introduced by either delivered notice.
+        self.service._refresh('assignments')
+        self.drain()
+        self.service._publish()
+        self.assertFalse(self.service.assignment_holds.assignments)
+        self.assertFalse([call for call in self.gateway.calls if call[0] in {'detail', 'membership'}])
+        contribution = self.service.model.item_contributions.entries['assignment']
+        self.assertEqual('closed', contribution.state)
+        self.assertEqual(2, contribution.attests.count)
+        self._assert_producer_recovery_fresh_and_replayed(baseline, 'r36-no-producer')
 
     def test_gateway_payload_policy_preserves_topology_and_order(self):
         from atc_payloads import PAYLOAD_POLICIES, SESSION_FIELDS
@@ -1008,50 +1074,235 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual([], self.gateway.calls)
 
     def test_review_attest_reads_producer_assignment_without_recrawling_evidence(self):
-        from atc_payloads import PAYLOAD_POLICIES
+        # Record48: verdict-only is a negative permission check. The actual
+        # assignment.closed notice identifies P. Owner art_762b0bdd agrees
+        # this explicit mapping under PO att_e33b4539, R23 and bound R36.
         from atc_upstream import ATTEST_FIELDS
-        self.service.policies = PAYLOAD_POLICIES
-        self.service.model.inventory("assignments").rows["assignment"]["reviewsAssignmentId"] = "producer"
+        review, producer = self._producer_recovery_fixture()
+        baseline = deepcopy(self.service.current)
         row = dict.fromkeys(ATTEST_FIELDS) | {
-            "id": "review", "assignmentId": "assignment", "kind": "verdict",
-            "verdictKind": "reviewed-clean", "ts": 15, "commitRefs": [],
+            'id': 'review', 'assignmentId': 'assignment', 'kind': 'verdict',
+            'verdictKind': 'reviewed-clean', 'ts': 15, 'bySession': 'agent s_author',
+            'commitRefs': [],
         }
-        self.service.change({"resource": "attests", "op": "upsert", "class": "attest.filed",
-                             "refs": {"attestId": "review"}, "payload": row})
-        self.assertEqual({("assignments", None, "producer")}, set(self.service.reads.pending))
-        self.assertIn("review", self.service.model.inventory("attests", "assignment").rows)
+        self.gateway.rows['attests', 'assignment'].append(deepcopy(row))
+        self.service.change(dict(resource='attests', op='upsert',
+            refs={'attestId': row['id'], 'assignmentId': 'assignment'}, payload=row,
+            **{'class': 'attest.filed'}))
+        self.assertFalse(self.service.reads.pending)
+        self.assertEqual([], self.gateway.calls)
+        producer.update(state='closed', closedAt=16)
+        review.update(state='closed', closedAt=17, closingAttestId='review')
+        self.assertTrue(self.service.change(self._assignment_close_notice(review)))
+        self.assertEqual({('reviewed-producer', 'producer', None)}, set(self.service.reads.pending))
+        self.drain()
+        self.service._publish()
+        self.assertEqual([('detail', 'assignments', None, 'producer')], self.gateway.calls)
+        self.assertFalse(self.service.assignment_holds.assignments)
+        self.assertFalse(self.service.reads.assignment_reads.flights)
+        self.assertEqual('closed', self.service.model.item_contributions.entries['producer'].state)
+        self.assertEqual(16, self.service.model.item_contributions.entries['producer'].closed_at)
+        self.assertNotIn('producer', self.service.model.inventory('assignments').rows)
+        self._assert_producer_recovery_fresh_and_replayed(baseline, 'r36-known-producer')
 
     def test_attest_side_effect_invalidates_an_older_assignment_read(self):
-        from atc_payloads import PAYLOAD_POLICIES
-        from atc_upstream import ATTEST_FIELDS
-        self.service.policies = PAYLOAD_POLICIES
+        # Record44 retains the original blocked keyed read of A. R29 compares
+        # its actual old row with the close; R36 does not permit a shared epoch
+        # restart. Owner art_762b0bdd / PO att_e33b4539 / R23 / R36.
+        review, producer = self._producer_recovery_fixture()
+        baseline = deepcopy(self.service.current)
         entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
         original = self.gateway.detail
-
         def captured(resource, key, scope=None):
             result = original(resource, key, scope)
-            entered.set()
-            if not release.wait(5):
-                raise TimeoutError("test did not release read")
+            if key == 'assignment':
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError('test did not release read')
             return result
-
         self.gateway.detail = captured
-        self.service._refresh("assignments", key="assignment")
+        self.service._refresh('assignments', key='assignment')
         self.service.reads.pump()
         self.assertTrue(entered.wait(2))
-        row = dict.fromkeys(ATTEST_FIELDS) | {
-            "id": "completed", "assignmentId": "assignment", "kind": "completion",
-            "ts": 15, "commitRefs": [],
-        }
-        self.gateway.rows[("assignments", None)][0]["state"] = "closed"
-        self.service.change({"resource": "attests", "op": "upsert", "class": "attest.filed",
-                             "refs": {"attestId": "completed"}, "payload": row})
+        epochs = dict(self.service.reads.epochs)
+        from atc_upstream import ATTEST_FIELDS
+        completion = dict.fromkeys(ATTEST_FIELDS) | dict(id='completed',
+            assignmentId='assignment', kind='completion', ts=15,
+            bySession='agent s_author', commitRefs=[])
+        self.gateway.rows['attests', 'assignment'].append(deepcopy(completion))
+        self.service.change(dict(resource='attests', op='upsert',
+            refs={'attestId': 'completed', 'assignmentId': 'assignment'},
+            payload=completion, **{'class': 'attest.filed'}))
+        self.assertFalse(self.service.reads.pending)
+        producer.update(state='closed', closedAt=16)
+        review.update(state='closed', closedAt=17)
+        self.assertEqual('producer', self.service.model.inventory('assignments').rows[
+            'assignment']['reviewsAssignmentId'])
+        self.service.change(self._assignment_close_notice(review))
+        self.assertEqual(epochs.get(('assignments', None), 0),
+                         self.service.reads.epochs.get(('assignments', None), 0))
         release.set()
         kind, value = self.service.events.get(timeout=2)
-        self.assertEqual("read", kind)
-        self.assertFalse(self.service._read_done(value))
+        self.assertEqual('read', kind)
+        self.assertTrue(self.service._read_done(value))
+        self.assertTrue(self.service.assignment_holds.assignments['assignment'].conflict)
         self.drain()
-        self.assertEqual("closed", self.service.model.inventory("assignments").rows["assignment"]["state"])
+        self.service._publish()
+        self.assertEqual(0, self.service.reads.epoch_discards)
+        self.assertEqual([('detail', 'assignments', None, 'assignment'),
+                          ('detail', 'assignments', None, 'producer')], self.gateway.calls)
+        self.assertEqual('closed', self.service.model.item_contributions.entries['assignment'].state)
+        self.assertEqual('closed', self.service.model.item_contributions.entries['producer'].state)
+        self.assertTrue(self.service.assignment_holds.assignments['assignment'].conflict)
+        self.assertFalse(self.service.assignment_holds.assignments['assignment'].producer_recovery)
+        self.assertEqual(baseline['items'][0]['assignments'], self.service.current['items'][0]['assignments'])
+        self.service._refresh('assignments')
+        self.drain()
+        self.service._publish()
+        self.assertFalse(self.service.assignment_holds.assignments)
+        self.assertFalse([call for call in self.gateway.calls if call[0] == 'membership'])
+        self._assert_producer_recovery_fresh_and_replayed(baseline, 'r36-older-keyed-read')
+
+    def test_reviewed_producer_service_coalesces_active_and_queued_lookup_and_discards_rows(self):
+        review, producer = self._producer_recovery_fixture()
+        baseline = deepcopy(self.service.current)
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        original = self.gateway.detail
+        def captured(resource, key, scope=None):
+            result = original(resource, key, scope)
+            if key == 'producer':
+                result.rows[0]['reopenings'] = [{'reason': 'do not retain lookup history'}]
+                result.rows[0].pop('files', None)  # actual assignment-get shape
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError('fixture did not release producer lookup')
+            return result
+        self.gateway.detail = captured
+        producer.update(state='closed', closedAt=16)
+        review.update(state='closed', closedAt=17)
+        notice = self._assignment_close_notice(review)
+        self.service.change(notice)
+        self.service.reads.pump()
+        self.assertTrue(entered.wait(2))
+        self.service.change(notice)
+        self.assertFalse(self.service.reads.pending)
+        release.set()
+        event = self.service.events.get(timeout=2)
+        result = event[1][2]
+        self.service.change(notice)  # result queued, still coalesced
+        self.assertFalse(self.service.reads.pending)
+        self.service._handle(*event)
+        self.service._publish()
+        self.assertEqual([], result.rows)
+        self.assertFalse(self.service.assignment_holds.assignments)
+        self.assertFalse(self.service.reads.assignment_reads.flights)
+        self.assertEqual([('detail', 'assignments', None, 'producer')], self.gateway.calls)
+        self.assertNotIn('reopenings', repr(self.service.model.inventories))
+        self.assertNotIn('do not retain lookup history', repr(self.service.model.item_contributions.entries))
+        self._assert_producer_recovery_fresh_and_replayed(baseline, 'r36-coalesced-producer')
+
+    def test_failed_or_partial_producer_lookup_holds_until_scheduled_covering_read(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                review, producer = self._producer_recovery_fixture()
+                baseline = deepcopy(self.service.current)
+                original = self.gateway.detail
+                def incomplete(resource, key, scope=None):
+                    result = original(resource, key, scope)
+                    if key == 'producer':
+                        return Read(result.rows if partial else [], False, result.at,
+                                    result.source, 'partial' if partial else 'TimeoutError')
+                    return result
+                producer.update(state='closed', closedAt=16)
+                review.update(state='closed', closedAt=17)
+                with patch.object(self.gateway, 'detail', side_effect=incomplete):
+                    self.service.change(self._assignment_close_notice(review))
+                    self.drain()
+                self.service._publish()
+                self.assertEqual([('detail', 'assignments', None, 'producer')], self.gateway.calls)
+                self.assertEqual('open', self.service.model.item_contributions.entries['producer'].state)
+                self.assertTrue(self.service.assignment_holds.assignments['assignment'].producer_recovery)
+                job = ('reviewed-producer', 'producer', None)
+                self.assertIn(job, self.service.read_retries)
+                self.assertFalse(self.service.reads.pending)
+                self.assertFalse(self.service.reads.assignment_reads.flights)
+                self.assertEqual(baseline['items'][0]['assignments'],
+                                 self.service.current['items'][0]['assignments'])
+                self.assertEqual('unconfirmed', self.service.current['items'][0]['evidence']['assignments']['freshness'])
+                # No retry route escalation. A separately scheduled covering
+                # read can resolve without waiting for or repeating the lookup.
+                self.service._refresh('assignments')
+                self.drain()
+                self.service._publish()
+                self.assertNotIn(job, self.service.read_retries)
+                self.assertNotIn(job[:2], self.service.read_failures)
+                self.assertFalse(self.service.assignment_holds.assignments)
+                self.assertEqual('closed', self.service.model.item_contributions.entries['producer'].state)
+                self.assertFalse([call for call in self.gateway.calls if call[0] == 'membership'])
+                self._assert_producer_recovery_fresh_and_replayed(
+                    baseline, 'r36-producer-incomplete-' + str(partial))
+
+    def test_unidentified_producer_keeps_never_published_item_absent_until_covering_read(self):
+        review, _producer = self._producer_recovery_fixture(identified=False, published=False)
+        self.assertFalse(self.service.current.get('items'))
+        review.update(state='closed', closedAt=17)
+        self.service.change(self._assignment_close_notice(review))
+        self.service._publish()
+        self.assertEqual([], self.service.current['items'])
+        self.assertEqual([], self.gateway.calls)
+        self.assertFalse(self.service.reads.pending)
+        self.assertIsNone(self.service.assignment_holds.items['work'])
+        baseline = deepcopy(self.service.current)
+        self.service._refresh('assignments')
+        self.drain()
+        self.service._publish()
+        self.assertEqual(['work'], [item['id'] for item in self.service.current['items']])
+        self.assertFalse(self.service.assignment_holds.assignments)
+        self._assert_producer_recovery_fresh_and_replayed(baseline, 'r36-absent-producer')
+
+    def test_recovered_producer_survives_an_older_global_or_item_assignment_snapshot(self):
+        for item_source in (False, True):
+            with self.subTest(item_source=item_source):
+                review, producer = self._producer_recovery_fixture(workers=2)
+                baseline = deepcopy(self.service.current)
+                if item_source:
+                    self.service._request_item_assignments('work')
+                else:
+                    self.service._refresh('assignments')
+                self.service.reads.pump()
+                older = self.service.events.get(timeout=5)
+                self.assertEqual('read', older[0])
+                self.assertTrue(older[1][2].complete)
+                original_calls = list(self.gateway.calls)
+                # The source snapshot is already complete but queued. Its
+                # old A/P rows cannot undo the later targeted P recovery.
+                producer.update(state='closed', closedAt=16)
+                review.update(state='closed', closedAt=17)
+                self.service.change(self._assignment_close_notice(review))
+                self.service.reads.pump()
+                recovered = self.service.events.get(timeout=5)
+                self.assertEqual(('reviewed-producer', 'producer', None), recovered[1][0])
+                self.service._handle(*recovered)
+                self.assertEqual('closed', self.service.model.item_contributions.entries['producer'].state)
+                self.service._handle(*older)
+                self.drain()
+                self.service._publish()
+                self.assertEqual(original_calls + [('detail', 'assignments', None, 'producer')],
+                                 self.gateway.calls)
+                self.assertEqual(0, self.service.reads.epoch_discards)
+                self.assertEqual('closed', self.service.model.item_contributions.entries['producer'].state)
+                self.assertEqual(16, self.service.model.item_contributions.entries['producer'].closed_at)
+                self.assertTrue(self.service.assignment_holds.assignments['assignment'].conflict)
+                self.assertEqual(baseline['items'][0]['assignments'],
+                                 self.service.current['items'][0]['assignments'])
+                self.service._refresh('assignments')
+                self.drain()
+                self.service._publish()
+                self.assertFalse(self.service.assignment_holds.assignments)
+                self._assert_producer_recovery_fresh_and_replayed(
+                    baseline, 'r36-producer-older-source-' + str(item_source))
 
     def test_decision_and_artifact_payloads_require_versioned_complete_projections(self):
         from atc_payloads import PAYLOAD_POLICIES, DECISION_FIELDS, ARTIFACT_FIELDS
