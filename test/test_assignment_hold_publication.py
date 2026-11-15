@@ -534,53 +534,114 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         assert_replay_current(self, self.service, baseline, 'r29-repeat-conflict-failed-item')
 
     def test_applied_close_during_item_read_is_retained_without_epoch_restart(self):
+        # R36 section 3: this review names first, so the independently required
+        # producer detail must coexist with the older item-source attempt.
+        producer = next(row for row in self.gateway.rows['assignments', None]
+                        if row['id'] == 'first')
+        self.set_source_assignment(dict.fromkeys(ASSIGNMENT_FIELDS) | producer)
         baseline = deepcopy(self.service.current)
+        prior_item = deepcopy(self.item(baseline))
         event = self.queued_source('item-assignment-source')
         job = event[1][0]
         epoch = self.service.reads.epochs[job[:2]]
         calls = list(self.gateway.calls)
+        producer_job = ('reviewed-producer', 'first', None)
         self.clock.return_value = 6000
         self.set_source_assignment(self.closed)
         self.assertTrue(self.service.change(self.notice(self.closed)))
         self.service._publish()
-        published_close = deepcopy(self.item(self.service.current))
+        self.assert_retained(prior_item, self.item(self.service.current), 6000)
         self.assertEqual('closed', self.service.model.item_contributions.entries['open'].state)
         self.assertEqual(epoch, self.service.reads.epochs[job[:2]])
-        self.assertFalse(self.service.reads.pending)
+        self.assertEqual({producer_job}, set(self.service.reads.pending))
         self.assertEqual(calls, self.gateway.calls)
+        held = self.service.assignment_holds.assignments['open']
+        self.assertTrue(held.producer_recovery)
+        self.assertFalse(held.conflict)
         self.service._handle(*event)
         self.service._publish()
-        self.assert_retained(published_close, self.item(self.service.current), 6000)
-        self.assertIn('open', self.service.assignment_holds.assignments)
+        self.assert_retained(prior_item, self.item(self.service.current), 6000)
+        held = self.service.assignment_holds.assignments['open']
+        self.assertTrue(held.conflict)
+        self.assertTrue(held.producer_recovery)
         self.assertEqual(0, self.service.reads.epoch_discards)
         self.set_source_assignment(self.opened)
         self.service.change(self.notice(self.opened))
+        self.service._publish()
+        held = self.service.assignment_holds.assignments['open']
+        self.assertFalse(held.conflict)
+        self.assertTrue(held.producer_recovery)
+        self.assert_retained(prior_item, self.item(self.service.current), 6000)
+        self.assertEqual({producer_job}, set(self.service.reads.pending))
+        self.service.reads.pump()
+        producer_event = self.service.events.get(timeout=5)
+        self.assertEqual('read', producer_event[0])
+        self.assertEqual(producer_job, producer_event[1][0])
+        result = producer_event[1][2]
+        self.assertTrue(result.complete, result.error)
+        self.assertEqual(['first'], [row['id'] for row in result.rows])
+        self.service._handle(*producer_event)
+        self.assertEqual([], result.rows)
         self.settle()
+        self.assertEqual(calls + [('detail', 'assignments', None, 'first')], self.gateway.calls)
+        self.assertEqual(epoch, self.service.reads.epochs[job[:2]])
+        self.assertEqual(0, self.service.reads.epoch_discards)
         self.assertFalse(self.service.assignment_holds.assignments)
         self.assert_distinct_bootstrap_publication(
             self.fresh(), 'r29-applied-close-during-item-read')
         assert_replay_current(self, self.service, baseline, 'r29-applied-close-item-replay')
 
     def test_applied_close_during_global_read_keeps_its_actual_publication(self):
+        # Keep the identified review relation and a complete producer response;
+        # producer recovery must not resolve the independent A conflict.
+        producer = next(row for row in self.gateway.rows['assignments', None]
+                        if row['id'] == 'first')
+        self.set_source_assignment(dict.fromkeys(ASSIGNMENT_FIELDS) | producer)
         baseline = deepcopy(self.service.current)
+        prior_item = deepcopy(self.item(baseline))
         event = self.queued_source('assignments')
         epoch = self.service.reads.epochs['assignments', None]
+        calls = list(self.gateway.calls)
+        producer_job = ('reviewed-producer', 'first', None)
         self.clock.return_value = 6000
         self.set_source_assignment(self.closed)
         self.service.change(self.notice(self.closed))
         self.service._publish()
-        published_close = deepcopy(self.item(self.service.current))
+        self.assert_retained(prior_item, self.item(self.service.current), 6000)
         self.assertEqual(epoch, self.service.reads.epochs['assignments', None])
-        self.assertFalse(self.service.reads.pending)
+        self.assertEqual({producer_job}, set(self.service.reads.pending))
+        self.assertEqual(calls, self.gateway.calls)
+        held = self.service.assignment_holds.assignments['open']
+        self.assertTrue(held.producer_recovery)
+        self.assertFalse(held.conflict)
         self.service._handle(*event)
+        self.service._publish()
+        held = self.service.assignment_holds.assignments['open']
+        self.assertTrue(held.conflict)
+        self.assertTrue(held.producer_recovery)
+        self.assert_retained(prior_item, self.item(self.service.current), 6000)
+        self.service.reads.pump()
+        producer_event = self.service.events.get(timeout=5)
+        self.assertEqual('read', producer_event[0])
+        self.assertEqual(producer_job, producer_event[1][0])
+        result = producer_event[1][2]
+        self.assertTrue(result.complete, result.error)
+        self.assertEqual(['first'], [row['id'] for row in result.rows])
+        self.service._handle(*producer_event)
+        self.assertEqual([], result.rows)
         self.settle()
-        self.assert_retained(published_close, self.item(self.service.current), 6000)
-        self.assertIn('open', self.service.assignment_holds.assignments)
+        self.assertEqual(calls + [('detail', 'assignments', None, 'first')], self.gateway.calls)
+        self.assert_retained(prior_item, self.item(self.service.current), 6000)
+        held = self.service.assignment_holds.assignments['open']
+        self.assertTrue(held.conflict)
+        self.assertFalse(held.producer_recovery)
         self.assertEqual('closed', self.service.model.item_contributions.entries['open'].state)
+        self.assertEqual(epoch, self.service.reads.epochs['assignments', None])
         self.assertEqual(0, self.service.reads.epoch_discards)
         clean = self.queued_source('assignments')
         self.service._handle(*clean)
         self.settle()
+        self.assertFalse(self.service.assignment_holds.assignments)
         self.assert_distinct_bootstrap_publication(
             self.fresh(), 'r29-applied-close-during-global-read')
         assert_replay_current(self, self.service, baseline, 'r29-applied-close-global-replay')

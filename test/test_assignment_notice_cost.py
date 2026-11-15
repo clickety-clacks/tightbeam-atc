@@ -484,6 +484,7 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                     self.assertTrue(started.wait(5))
                     flight = service.reads.attest_flights['open']
                     epoch = service.reads.epochs['attests', 'open']
+                    producer_job = ('reviewed-producer', 'first', None)
                     for position, state in enumerate(states):
                         assignment.update(state=state, closedAt=100 + position if state == 'closed' else None)
                         payload = deepcopy(assignment)
@@ -494,6 +495,23 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                         service._publish()
                         self.assertEqual(set(), service.model.item_assignment_pending)
                         self.assertEqual(epoch, service.reads.epochs['attests', 'open'])
+                        # R36 identified review-close recovery coalesces across
+                        # these transitions; reopening cannot clear it.
+                        self.assertEqual({producer_job}, set(service.reads.pending))
+                        held = service.assignment_holds.assignments['open']
+                        self.assertTrue(held.producer_recovery)
+                        self.assertEqual('first', held.producer)
+                        prior_item = next(item for item in baseline['items'] if item['id'] == 'work')
+                        self.assertEqual(prior_item, service.assignment_holds.items['work'])
+                        retained = deepcopy(prior_item)
+                        since = service.assignment_holds.since('work')
+                        for fact in retained['evidence'].values():
+                            if fact['freshness'] != 'stale':
+                                fact['freshness'] = 'unconfirmed'
+                            prior = fact.get('unconfirmedSince')
+                            fact['unconfirmedSince'] = since if prior is None else min(prior, since)
+                        self.assertEqual(retained, next(item for item in service.current['items']
+                                                        if item['id'] == 'work'))
                     notice = dict.fromkeys(ATTEST_FIELDS) | dict(id='after-transition',
                         assignmentId='open', kind='progress', bySession='author',
                         ts=4000, commitRefs=[{'commit': 'new-ref'}])
@@ -506,8 +524,20 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                     self.assertEqual(1, flight.notice_count)
                     release.set()
                     service._handle(*service.events.get(timeout=5))
+                    self.assertEqual({producer_job}, set(service.reads.pending))
+                    service.reads.pump()
+                    producer_event = service.events.get(timeout=5)
+                    self.assertEqual('read', producer_event[0])
+                    self.assertEqual(producer_job, producer_event[1][0])
+                    result = producer_event[1][2]
+                    self.assertTrue(result.complete, result.error)
+                    self.assertEqual(['first'], [row['id'] for row in result.rows])
+                    service._handle(*producer_event)
+                    self.assertEqual([], result.rows)
                     self.settle(service)
-                self.assertEqual([('read', 'attests', 'open')], gateway.calls)
+                self.assertEqual([('read', 'attests', 'open'),
+                                  ('detail', 'assignments', None, 'first')], gateway.calls)
+                self.assertFalse(service.assignment_holds.assignments)
                 self.assertEqual(0, service.reads.epoch_discards)
                 self.assertEqual({}, service.reads.attest_flights)
                 contribution = service.model.item_contributions.entries['open']
