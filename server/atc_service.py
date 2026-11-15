@@ -1377,6 +1377,7 @@ class LiveService:
         self.assignment_holds.hold(str(assignment), item, published, at=now_ms(),
                                    producer_recovery=True, producer=producer)
         if producer is not None:
+            self.reads.assignment_reads.producer_effect(str(assignment), producer)
             job = ('reviewed-producer', producer, None)
             if job not in self.read_retries:
                 # ReadQueue coalesces both active and queued results. No
@@ -1479,7 +1480,9 @@ class LiveService:
                 consumed=self.assignment_delivery_consumed)
                 if assignment_flight is not None else set())
             protected = set(conflicts) | self._reviewed_producer_dependencies(
-                set(conflicts) | arrivals, stage.assignment_fingerprints)
+                set(conflicts) | arrivals, stage.assignment_fingerprints, assignment_flight)
+            producer_uncovered = arrivals | (set(assignment_flight.producer_effects)
+                                             if assignment_flight is not None else set())
             def replace(notices):
                 # Validate/replay before creating holds or changing live state.
                 # Closed membership rows have already been released; their
@@ -1494,7 +1497,7 @@ class LiveService:
                     conflicts, ((aid, wid) for aid in conflicts), at=now_ms())
                 released = self.model.replace_item_assignments(wid, result)
                 self._resolve_assignment_read_holds(conflicts, item=wid,
-                    covered_producers=covered_producers, producer_uncovered=arrivals)
+                    covered_producers=covered_producers, producer_uncovered=producer_uncovered)
                 # This existing covering read establishes complete item facts,
                 # including complete absence. It does not resolve any remaining
                 # mutable conflict by virtue of contribution completeness.
@@ -1558,7 +1561,7 @@ class LiveService:
             self.assignment_holds.hold(aid, wid, published.get(wid), at=at,
                 after_delivery=max(conflicts[aid], self.assignment_delivery_consumed))
 
-    def _reviewed_producer_dependencies(self, assignments, present):
+    def _reviewed_producer_dependencies(self, assignments, present, flight=None):
         """Keep a recovered P with the current A protected by this old read.
 
         A close can trigger a successful P lookup before an older whole-source
@@ -1575,6 +1578,9 @@ class LiveService:
                         current[aid].reviews if aid in current else None)
             if producer in present and (producer in rows or producer in current):
                 dependencies.add(producer)
+        if flight is not None:
+            dependencies.update(producer for producer in flight.producer_effects.values()
+                                if producer in present and (producer in rows or producer in current))
         return dependencies
 
     def _resolve_assignment_read_holds(self, conflicts, *, item=None, excluded_items=(),
@@ -1872,7 +1878,9 @@ class LiveService:
                 consumed=self.assignment_delivery_consumed)
                 if assignment_flight is not None else set())
             protected = set(conflicts) | self._reviewed_producer_dependencies(
-                set(conflicts) | arrivals, {str(row['id']) for row in result.rows})
+                set(conflicts) | arrivals, {str(row['id']) for row in result.rows}, assignment_flight)
+            producer_uncovered = arrivals | (set(assignment_flight.producer_effects)
+                                             if assignment_flight is not None else set())
             # The model validates the protected current projections before
             # accepting unaffected rows/absence. Publication is still the last
             # committed frame throughout this model-worker operation.
@@ -1886,7 +1894,7 @@ class LiveService:
             self._hold_assignment_conflict_deliveries(conflicts,
                 ((str(row['id']), row.get('workItemId')) for row in result.rows), at=now_ms())
             self._resolve_assignment_read_holds(conflicts,
-                excluded_items=self.model.item_assignment_pending, producer_uncovered=arrivals)
+                excluded_items=self.model.item_assignment_pending, producer_uncovered=producer_uncovered)
         elif key is None:
             activity_eligible = True
             if resource == "attests":

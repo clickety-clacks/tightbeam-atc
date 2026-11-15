@@ -382,6 +382,60 @@ class AssignmentConflictsTest(unittest.TestCase):
         registry.close()
         self.assertEqual({}, registry.flights)
 
+    def test_consumed_review_effect_protects_only_existing_whole_source_attempts(self):
+        registry = AssignmentReadRegistry()
+        # A pre-read close is not copied into future attempts.
+        registry.producer_effect('earlier-a', 'earlier-p')
+        global_job = ('assignments', None, None)
+        item_job = ('item-assignment-source', 'producer-item', None)
+        detail_job = ('assignments', None, 'p')
+        producer_job = ('reviewed-producer', 'p', None)
+        for job in (global_job, item_job, detail_job, producer_job):
+            registry.start(job)
+            self.assertEqual({}, registry.flights[job].producer_effects)
+        registry.producer_effect('a', 'p')
+        registry.producer_effect('other-a', 'p')
+        for job in (global_job, item_job):
+            self.assertEqual({'a': 'p', 'other-a': 'p'},
+                             registry.flights[job].producer_effects)
+            self.assertEqual({}, registry.flights[job].notices)  # no manufactured P notice
+        for job in (detail_job, producer_job):
+            self.assertEqual({}, registry.flights[job].producer_effects)
+        # The registry owns only the current identity per A, not past relations.
+        registry.producer_effect('a', 'current-p')
+        flight = registry.flights[global_job]
+        self.assertEqual({'a': 'current-p', 'other-a': 'p'}, flight.producer_effects)
+        registry.consume(global_job, lambda value: self.assertIs(flight, value))
+        self.assertTrue(flight.closed)
+        self.assertEqual({}, flight.producer_effects)
+        registry.start(global_job)
+        self.assertEqual({}, registry.flights[global_job].producer_effects)
+        remaining = list(registry.flights.values())
+        registry.close()
+        self.assertTrue(all(value.closed and not value.producer_effects for value in remaining))
+        self.assertEqual({}, registry.flights)
+
+    def test_failed_or_cancelled_whole_source_releases_producer_effects(self):
+        registry = AssignmentReadRegistry()
+        job = ('item-assignment-source', 'item', None)
+        registry.start(job)
+        registry.producer_effect('a', 'p')
+        flight = registry.flights[job]
+        def fail(value):
+            self.assertEqual({'a': 'p'}, value.producer_effects)
+            raise ValueError('source consumer failed')
+        with self.assertRaisesRegex(ValueError, 'source consumer failed'):
+            registry.consume(job, fail)
+        self.assertTrue(flight.closed)
+        self.assertEqual({}, flight.producer_effects)
+        registry.start(job)
+        registry.producer_effect('a', 'p')
+        cancelled = registry.flights[job]
+        registry.discard(job)
+        self.assertTrue(cancelled.closed)
+        self.assertEqual({}, cancelled.producer_effects)
+        self.assertEqual({}, registry.flights)
+
     def test_queue_insertion_observes_admission_and_failed_consumer_releases_attempt(self):
         registry = AssignmentReadRegistry()
         job = ('assignments', None, None)

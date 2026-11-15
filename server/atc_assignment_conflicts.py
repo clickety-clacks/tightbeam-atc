@@ -41,13 +41,17 @@ class AssignmentReadConflicts:
     list. Two distinct projections suffice to prove that any single returned
     row conflicts with at least one notice; keeping only the latest would lose
     that fact. Creation identity protects only a current member missing from
-    the snapshot. Discard both maps on success, failure or cancellation.
+    the snapshot. Discard all attempt-owned maps on success, failure or cancellation.
     """
-    __slots__ = ('notices', 'creations', 'closed', 'detail')
+    __slots__ = ('notices', 'creations', 'producer_effects', 'closed', 'detail')
 
     def __init__(self, *, detail=False):
         self.notices = {}
         self.creations = {}
+        # Current review relations applied during this attempt. They protect
+        # P after its targeted recovery when first-discovery A has no current
+        # projection from which the source consumer could recover the link.
+        self.producer_effects = {}
         self.closed = False
         self.detail = detail
 
@@ -124,6 +128,7 @@ class AssignmentReadConflicts:
     def discard(self):
         self.notices.clear()
         self.creations.clear()
+        self.producer_effects.clear()
         self.closed = True
 
 
@@ -328,6 +333,19 @@ class AssignmentReadRegistry:
                 return apply(flight)
             finally:
                 self.discard(job)
+
+    def producer_effect(self, assignment, producer):
+        """A consumed qualifying close overlaps these already-started reads.
+
+        Keep only the current relation until each attempt is consumed. This
+        neither manufactures a P notice nor orders two source snapshots.
+        Item attempts may belong to P's item, separately from A's item.
+        """
+        with self.lock:
+            for job, flight in self.flights.items():
+                if (job[0] == 'item-assignment-source'
+                        or (job[0] == 'assignments' and job[2] is None)):
+                    flight.producer_effects[assignment] = producer
 
     def discard(self, job):
         with self.lock:
