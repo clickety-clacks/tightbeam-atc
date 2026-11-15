@@ -2089,6 +2089,22 @@ class LiveService:
             else:
                 activity_owner, owner_known = None, False
             if not owner_known:
+                if (notice.get('class') in CLASSES['attests']
+                        and self.policies.get('attests') == 'immutable'
+                        and set(ATTEST_FIELDS) <= payload.keys()
+                        and str(payload['id']) == str(key)):
+                    # First discovery can have an open contribution snapshot
+                    # before any current model projection establishes owner.
+                    # Preserve its delivered notice in that existing attempt;
+                    # replay uses the complete snapshot's eligibility/owner.
+                    # This neither creates a contribution nor applies activity
+                    # before the separate R20 ownership resolution.
+                    row = attest_row(payload)
+                    for flight in self.reads.item_flights.values():
+                        flight.notice(str(scope), row)
+                    scoped_flight = self.reads.attest_flights.get(str(scope))
+                    if scoped_flight is not None:
+                        scoped_flight.notice(str(scope), row)
                 return self._queue_attest_activity(str(scope), payload["bySession"], payload["ts"])
             if self._attest_activity_eligible(activity_owner):
                 self.model.fold_session_activity(payload["bySession"], payload["ts"], "attest", scope,

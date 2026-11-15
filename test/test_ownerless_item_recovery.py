@@ -6,9 +6,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 from atc_payloads import ASSIGNMENT_FIELDS
-from atc_upstream import Read
-from publication_assertions import assert_publication_equal, assert_replay_current
+from atc_service import LiveService
+from atc_upstream import ATTEST_FIELDS, Read
+from publication_assertions import (assert_publication_equal, assert_replay_current,
+                                    assert_winner_exit_publication)
 from test_assignment_hold_publication import AssignmentHoldPublicationTest
+from test_item_assignment_retry import ItemReads
+from test_service import summarized_work
 
 
 class OwnerlessItemRecoveryTest(unittest.TestCase):
@@ -19,6 +23,7 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
     notice = AssignmentHoldPublicationTest.notice
     assert_retained = AssignmentHoldPublicationTest.assert_retained
     assert_held_publication = AssignmentHoldPublicationTest.assert_held_publication
+    queued_source = AssignmentHoldPublicationTest.queued_source
 
     def establish(self, *, unpublished=False):
         baseline = deepcopy(self.service.current)
@@ -177,3 +182,130 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
                 self.assertEqual({}, restarted.assignment_holds.items)
                 self.assertIn(row['workItemId'], {value['id'] for value in restarted.current['items']})
                 self.assertEqual(950000, restarted.model.session_activity['author'])
+
+    def test_failed_covering_read_keeps_hold_until_its_existing_retry(self):
+        for unpublished in (False, True):
+            with self.subTest(unpublished=unpublished):
+                if unpublished:
+                    self.service.stop()
+                    self.setUp()
+                baseline, row = self.establish(unpublished=unpublished)
+                self.gateway.fail_member = row['id']
+                self.service._request_item_assignments(row['workItemId'])
+                self.service._publish()
+                self.assertIn(row['id'], self.service.assignment_holds.assignments)
+                self.settle()
+                held = self.service.assignment_holds.assignments[row['id']]
+                self.assertTrue(held.incomplete_contribution)
+                self.assertFalse(held.conflict)
+                if unpublished:
+                    self.assertNotIn(row['workItemId'], {item['id'] for item in self.service.current['items']})
+                else:
+                    self.assert_retained(self.item(baseline), self.item(self.service.current), 1000)
+                job = ('item-assignment-source', row['workItemId'], None)
+                self.assertIn(job, self.service.read_retries)
+                calls = list(self.gateway.calls)
+                self.service.change(self.notice(row))
+                self.service._publish()
+                self.assertEqual(calls, self.gateway.calls)
+                self.assertEqual({}, self.service.reads.pending)
+                self.gateway.fail_member = None
+                _deadline, priority = self.service.read_retries[job]
+                self.service.read_retries[job] = (0, priority)
+                self.service._retry_incomplete_reads()
+                self.settle()
+                self.assertNotIn(row['id'], self.service.assignment_holds.assignments)
+                self.assertEqual(2, self.gateway.calls.count(('membership', row['workItemId'])))
+                self.assertEqual(0, self.service.reads.epoch_discards)
+                assert_publication_equal(self, self.fresh().current, self.service.current,
+                                         'r32-existing-retry-' + row['workItemId'])
+                assert_replay_current(self, self.service, baseline,
+                                      'r32-existing-retry-replay-' + row['workItemId'])
+
+    def test_complete_item_resolves_contribution_but_not_concurrent_order_conflict(self):
+        for unpublished in (False, True):
+            with self.subTest(unpublished=unpublished):
+                if unpublished:
+                    self.service.stop()
+                    self.setUp()
+                baseline, row = self.establish(unpublished=unpublished)
+                event = self.queued_source('item-assignment-source', row['workItemId'])
+                # The source can have closed both before and after an observed
+                # reopen. No generation orders that read against either notice.
+                # Both events are queued; only the later close may resolve.
+                self.service._queue_feed_change(self.notice(dict(row, state='open', closedAt=None)))
+                self.service._queue_feed_change(self.notice(row))
+                self.service._handle(*event)
+                self.service._publish()
+                held = self.service.assignment_holds.assignments[row['id']]
+                self.assertFalse(held.incomplete_contribution)
+                self.assertTrue(held.conflict)
+                self.assert_held_publication(baseline, 'r32-complete-with-conflict-' + row['workItemId'])
+                self.service._handle(*self.service.events.get(timeout=5))
+                self.service._publish()
+                self.assertTrue(self.service.assignment_holds.assignments[row['id']].conflict)
+                self.service._handle(*self.service.events.get(timeout=5))
+                self.settle()
+                self.assertNotIn(row['id'], self.service.assignment_holds.assignments)
+                self.assertEqual(1, self.gateway.calls.count(('membership', row['workItemId'])))
+                self.assertEqual(0, self.service.reads.epoch_discards)
+                assert_publication_equal(self, self.fresh().current, self.service.current,
+                                         'r32-conflict-next-notice-' + row['workItemId'])
+                assert_replay_current(self, self.service, baseline,
+                                      'r32-conflict-next-notice-replay-' + row['workItemId'])
+
+    def test_ownerless_notice_replays_into_queued_first_contribution_snapshot(self):
+        baseline, row = self.establish()
+        event = self.queued_source('item-assignment-source', row['workItemId'])
+        late = dict.fromkeys(ATTEST_FIELDS) | dict(
+            id='after-first-snapshot', assignmentId=row['id'], kind='progress',
+            bySession='author', ts=960000, commitRefs=[])
+        self.gateway.rows['attests', row['id']].append(deepcopy(late))
+        self.assertNotIn(row['id'], self.service.model.item_contributions.entries)
+        self.service.change(dict(resource='attests', op='upsert', **{'class': 'attest.created'},
+            refs={'attestId': late['id'], 'assignmentId': row['id']}, payload=late))
+        self.assertEqual(1, self.service.reads.item_flights[row['workItemId']].notice_count)
+        self.assertNotIn(row['id'], self.service.model.item_contributions.entries)
+        self.service._handle(*event)
+        self.assertEqual(2, self.service.model.item_contributions.entries[row['id']].attests.count)
+        self.settle()
+        self.assertNotIn(row['id'], self.service.assignment_holds.assignments)
+        self.assertEqual(1, self.gateway.calls.count(('membership', row['workItemId'])))
+        self.assertEqual(2, self.service.reads.attest_owner_attempts)
+        self.assertEqual(0, self.service.reads.epoch_discards)
+        self.assertEqual({}, self.service.reads.item_flights)
+        self.assertEqual(960000, self.service.model.session_activity['author'])
+        assert_publication_equal(self, self.fresh().current, self.service.current,
+                                 'r32-ownerless-first-snapshot-replay')
+        assert_replay_current(self, self.service, baseline, 'r32-ownerless-first-snapshot-sse')
+
+    def test_summary_eligibility_change_resolves_without_requiring_skipped_history(self):
+        # Exercise the existing implicit summary mode, not a simulated change
+        # to the pinned upstream version. Initially neither item has a summary.
+        self.service.version = None
+        baseline, row = self.establish()
+        original = deepcopy(self.gateway.rows['work-items', None])
+        self.gateway.rows['work-items', None] = [
+            summarized_work(holders=['author'] if item['id'] == 'work' else [],
+                            attest_counts={'progress': 4} if item['id'] == 'work' else {},
+                            started=item['id'] == 'work') | dict(
+                id=item['id'], title=item['title'], rowVersion=item['rowVersion'] + 1)
+            for item in original]
+        self.gateway.calls.clear()
+        self.service._refresh('work-items')
+        self.settle()
+        self.assertFalse(self.service._attest_activity_eligible('work'))
+        self.assertNotIn(row['id'], self.service.assignment_holds.assignments)
+        self.assertNotIn(('read', 'attests', row['id']), self.gateway.calls)
+        gateway = ItemReads()
+        gateway.rows = deepcopy(self.gateway.rows)
+        fresh = LiveService(gateway, workers=1)
+        self.addCleanup(fresh.stop)
+        fresh.connected = True
+        fresh.rebuild()
+        self.settle(fresh)
+        # The existing R21 winner-exit exception covers exactly these retained
+        # session observations. R32 adds no item exception after resolution.
+        assert_winner_exit_publication(self, fresh.current, self.service.current,
+                                      'r32-summary-source-exit', {'author', 'other'})
+        assert_replay_current(self, self.service, baseline, 'r32-summary-source-exit-replay')
