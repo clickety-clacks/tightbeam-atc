@@ -620,17 +620,39 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.assertTrue(held.conflict)
         self.assertTrue(held.producer_recovery)
         self.assert_retained(prior_item, self.item(self.service.current), 6000)
-        self.service.reads.pump()
-        producer_event = self.service.events.get(timeout=5)
-        self.assertEqual('read', producer_event[0])
-        self.assertEqual(producer_job, producer_event[1][0])
-        result = producer_event[1][2]
-        self.assertTrue(result.complete, result.error)
-        self.assertEqual(['first'], [row['id'] for row in result.rows])
-        self.service._handle(*producer_event)
-        self.assertEqual([], result.rows)
+        # Complete global membership also restores last's history scope.
+        # Its required confirmation and P recovery may dispatch in either order.
+        remaining = {('attests', 'last', None), producer_job}
+        self.assertEqual(calls, self.gateway.calls)
+        for _ in range(2):
+            self.assertEqual(remaining, set(self.service.reads.pending))
+            self.assertFalse(self.service.reads.active)
+            self.service.reads.pump()
+            next_event = self.service.events.get(timeout=5)
+            self.assertEqual('read', next_event[0])
+            next_job = next_event[1][0]
+            self.assertIn(next_job, remaining)
+            result = next_event[1][2]
+            self.assertTrue(result.complete, result.error)
+            if next_job == producer_job:
+                self.assertEqual(['first'], [row['id'] for row in result.rows])
+            self.service._handle(*next_event)
+            if next_job == producer_job:
+                self.assertEqual([], result.rows)
+            remaining.remove(next_job)
+            self.service._publish()
+            held = self.service.assignment_holds.assignments['open']
+            self.assertTrue(held.conflict)
+            self.assertEqual(producer_job in remaining, held.producer_recovery)
+            self.assert_retained(prior_item, self.item(self.service.current), 6000)
+        self.assertFalse(remaining)
+        self.assertFalse(self.service.reads.pending)
+        self.assertFalse(self.service.reads.active)
         self.settle()
-        self.assertEqual(calls + [('detail', 'assignments', None, 'first')], self.gateway.calls)
+        self.assertEqual(calls, self.gateway.calls[:len(calls)])
+        self.assertCountEqual([('read', 'attests', 'last'),
+                               ('detail', 'assignments', None, 'first')],
+                              self.gateway.calls[len(calls):])
         self.assert_retained(prior_item, self.item(self.service.current), 6000)
         held = self.service.assignment_holds.assignments['open']
         self.assertTrue(held.conflict)
