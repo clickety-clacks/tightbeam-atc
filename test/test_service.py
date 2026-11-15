@@ -1596,16 +1596,26 @@ class ServiceRecoveryTest(unittest.TestCase):
                     self.gateway.rows['attests', row['id']] = []
                 producer.update(state=state, closedAt=16 if state == 'closed' else None)
                 self.gateway.calls.clear()
-                returned = []
+                targeted_results = []
                 original = self.gateway.detail
                 def captured(resource, key, scope=None):
                     result = original(resource, key, scope)
                     if key == 'producer':
                         result.rows[0].pop('files', None)
                         result.rows[0]['reopenings'] = []
-                        returned.append(result)
                     return result
                 self.gateway.detail = captured
+                original_read = self.service.reads._read
+                def capture_targeted(job, keep_ids=(), flight=None):
+                    result = original_read(job, keep_ids, flight)
+                    if job == ('reviewed-producer', 'producer', None):
+                        targeted_results.append(result)
+                    return result
+                def drain_capturing_targeted():
+                    # PDO 1105 / owner art_6fc45e6e: ordinary item detail
+                    # results have a different ownership/disposal boundary.
+                    with patch.object(self.service.reads, '_read', side_effect=capture_targeted):
+                        self.drain()
                 for row in discovered:
                     self.assertTrue(self.service.change(self._assignment_close_notice(row)))
                     self.assertNotIn(row['id'], self.service.model.inventory('assignments').rows)
@@ -1641,13 +1651,14 @@ class ServiceRecoveryTest(unittest.TestCase):
                             result.error = 'TimeoutError'
                         return result
                     with patch.object(self.gateway, 'detail', side_effect=failed):
-                        self.drain()
+                        drain_capturing_targeted()
                     self.service._publish()
                     failed_deltas, fresh = self._assert_producer_hold_publication(baseline, label + '-failed')
                     self.assertEqual(deltas, failed_deltas)
                     self.assertIn(job, self.service.read_retries)
                     self.assertEqual([('detail', 'assignments', None, 'producer')], self.gateway.calls)
-                    self.assertTrue(all(not value.rows for value in returned))
+                    self.assertEqual(1, len(targeted_results))
+                    self.assertTrue(all(not value.rows for value in targeted_results))
                     if resolver == 'restart':
                         restarted = LiveService(self.gateway)
                         self.addCleanup(restarted.stop)
@@ -1665,9 +1676,10 @@ class ServiceRecoveryTest(unittest.TestCase):
                         _, priority = self.service.read_retries[job]
                         self.service.read_retries[job] = (time.monotonic() - 1, priority)
                         self.service._retry_incomplete_reads()
-                self.drain()
+                drain_capturing_targeted()
                 self.service._publish()
-                self.assertTrue(all(not value.rows for value in returned))
+                self.assertEqual(2 if resolver == 'retry' else 1, len(targeted_results))
+                self.assertTrue(all(not value.rows for value in targeted_results))
                 for row in discovered:
                     held = self.service.assignment_holds.assignments[row['id']]
                     self.assertTrue(held.incomplete_contribution)
