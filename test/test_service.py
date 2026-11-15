@@ -1931,6 +1931,60 @@ class ServiceRecoveryTest(unittest.TestCase):
                 self._assert_producer_recovery_fresh_and_replayed(
                     baseline, 'r36-producer-incomplete-' + str(partial))
 
+    def test_clean_covering_item_resolves_only_matching_producer_failure(self):
+        # N2: a genuinely covering item read clears P's resolved retry, while
+        # an unrelated failed source still prevents global live certification.
+        for unrelated_failure in (False, True):
+            with self.subTest(unrelated_failure=unrelated_failure):
+                self.gateway = PublishedReads()
+                review, producer = self._producer_recovery_fixture()
+                baseline = deepcopy(self.service.current)
+                producer.update(state='closed', closedAt=16)
+                review.update(state='closed', closedAt=17)
+                original = self.gateway.detail
+                def partial(resource, key, scope=None):
+                    result = original(resource, key, scope)
+                    if key == 'producer':
+                        return Read(result.rows, False, result.at, result.source, 'partial')
+                    return result
+                with patch.object(self.gateway, 'detail', side_effect=partial):
+                    self.assertTrue(self.service.change(self._assignment_close_notice(review)))
+                    self.drain()
+                producer_job = ('reviewed-producer', 'producer', None)
+                self.assertIn(producer_job[:2], self.service.read_failures)
+                self.assertIn(producer_job, self.service.read_retries)
+                self.assertTrue(self.service.assignment_holds.assignments['assignment'].producer_recovery)
+                other_scope = ('turns', 'agent s_author')
+                if unrelated_failure:
+                    self.gateway.partial.add(other_scope)
+                    self.service._refresh(*other_scope)
+                    self.drain()
+                    self.assertIn(other_scope, self.service.read_failures)
+                # Existing independently scheduled complete covering source.
+                self.service._request_item_assignments('work')
+                self.drain()
+                self.service._publish()
+                self.assertNotIn(producer_job[:2], self.service.read_failures)
+                self.assertNotIn(producer_job, self.service.read_retries)
+                self.assertFalse(self.service.assignment_holds.assignments)
+                self.assertEqual('closed', self.service.model.item_contributions.entries['producer'].state)
+                self.assertEqual(1, self.gateway.calls.count(('membership', 'work')))
+                if unrelated_failure:
+                    self.assertIn(other_scope, self.service.read_failures)
+                    other_job = other_scope + (None,)
+                    self.assertIn(other_job, self.service.read_retries)
+                    self.assertNotEqual('live', self.service.current['freshness']['state'])
+                    self.gateway.partial.remove(other_scope)
+                    _deadline, priority = self.service.read_retries[other_job]
+                    self.service.read_retries[other_job] = (0, priority)
+                    self.service._retry_incomplete_reads()
+                    self.drain()
+                    self.service._publish()
+                self.assertEqual('live', self.service.current['freshness']['state'])
+                self.assertIsNone(self.service.current['freshness']['reason'])
+                self._assert_producer_recovery_fresh_and_replayed(
+                    baseline, 'r38-n2-covering-' + str(unrelated_failure))
+
     def test_unidentified_producer_keeps_never_published_item_absent_until_covering_read(self):
         review, _producer = self._producer_recovery_fixture(identified=False, published=False)
         self.assertFalse(self.service.current.get('items'))

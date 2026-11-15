@@ -1527,9 +1527,21 @@ class LiveService:
             self._incomplete_state("item assignment source incomplete")
         if self.cycle:
             self._settle_cycle()
-        elif self.connected and not self.read_failures and not self.model.item_assignment_pending:
+        elif (result.complete and self.connected and not self.model.item_assignment_pending
+                and not self.correlation_gaps):
+            # A completed item source is no longer rebuilding. A failed P
+            # lookup whose independent hold remains is represented by that
+            # item's prior/unconfirmed publication, as when it fails without
+            # an overlapping item read. Keep its failure/retry intact; only
+            # actual covering-source resolution above may clear them.
+            visible_items = self.model.work_items()
+            held_producers = {held.producer for held in self.assignment_holds.assignments.values()
+                              if held.producer_recovery and held.producer is not None
+                              and held.item in visible_items}
+            blocking_failures = self.read_failures - {
+                ('reviewed-producer', producer) for producer in held_producers}
             required = list(BASE_SCOPES) + self._history_scopes()
-            if all(not self.model.inventory(*s).needs_source_read
+            if not blocking_failures and all(not self.model.inventory(*s).needs_source_read
                    and self.model.inventory(*s).complete and not self.model.inventory(*s).stale
                    for s in required):
                 self._state("live")
