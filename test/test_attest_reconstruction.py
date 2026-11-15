@@ -94,4 +94,3 @@ class AttestReconstructionTest(unittest.TestCase):
         model.accept_assignment_read_preserving(Read(rows, True, 100, 'fixture'), ())
         model.restore_assignment_attests(set())
         self.assertNotIn(('attests', 'first'), model.inventories)
-

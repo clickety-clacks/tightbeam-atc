@@ -524,4 +524,3 @@ class ItemAssignmentSourceTest(unittest.TestCase):
         self.assertTrue(result.complete, result.error)
         gc.collect()
         self.assertTrue(all(ref() is None for ref in held))
-

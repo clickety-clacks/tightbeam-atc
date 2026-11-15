@@ -269,4 +269,3 @@ class ItemAssignmentRetryTest(unittest.TestCase):
         self.assertEqual(2000, service.model.assignment_evidence('work')['observedAt'])
         self.assertFalse(service.model.inventory('assignments').complete)
         self.assertEqual(10, service.model.inventory('assignments').confirmed_at)
-
