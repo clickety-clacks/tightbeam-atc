@@ -23,9 +23,9 @@ class SessionActivityFoldTest(unittest.TestCase):
             records.append((model.session_activity, model.session_activity_evidence))
         self.assertEqual(records[0], records[1])
         self.assertEqual(950000, records[0][0]["author"])
-        self.assertEqual(["attest", "cli:attests a"], records[0][1]["author"]["source"])
+        self.assertEqual(["cli:attests a"], records[0][1]["author"]["source"])
 
-    def test_older_and_repeated_contributions_keep_only_winner_and_kinds(self):
+    def test_older_and_repeated_contributions_keep_only_winner(self):
         model = EvidenceModel()
         model.fold_session_activity("author key", 950000, "attest", "winner", self.facts())
         for index in range(100):
@@ -33,11 +33,22 @@ class SessionActivityFoldTest(unittest.TestCase):
         model.fold_session_activity("author key", 800000, "turn", "author key", self.facts())
         self.assertEqual({"author key": 950000}, model.session_activity)
         self.assertEqual({"author key"}, model.session_activity_evidence.keys())
-        self.assertEqual(["attest", "cli:attests winner", "turn"],
+        self.assertEqual(["cli:attests winner"],
                          model.session_activity_evidence["author key"]["source"])
         model.fold_session_activity("author key", 960000, "turn", "author key", self.facts())
-        self.assertEqual(["/api/sessions/author%20key/turns", "attest", "turn"],
+        self.assertEqual(["/api/sessions/author%20key/turns"],
                          model.session_activity_evidence["author key"]["source"])
+
+    def test_null_assignment_source_is_singleton_with_or_without_losing_sources(self):
+        for mixed in (False, True):
+            with self.subTest(mixed=mixed):
+                model = EvidenceModel()
+                if mixed:
+                    model.fold_session_activity('S', 900000, 'attest', 'A', self.facts(), owner='item')
+                    model.fold_session_activity('S', 800000, 'turn', 'S', self.facts())
+                model.fold_session_activity('S', 950000, 'attest', 'B', self.facts(), owner=None)
+                self.assertEqual(950000, model.session_activity['S'])
+                self.assertEqual(['cli:attests B'], model.session_activity_evidence['S']['source'])
 
     def test_winner_item_exit_retains_observation_until_newer_activity(self):
         for remaining in (None, 950000):
@@ -50,7 +61,7 @@ class SessionActivityFoldTest(unittest.TestCase):
                 model.retain_exited_activity(set(), 1200000)
                 self.assertEqual(1000000, model.session_activity["author"])
                 facts = model.session_activity_facts("author", self.facts())
-                self.assertEqual(["attest", "cli:attests winner"], facts["source"])
+                self.assertEqual(["cli:attests winner"], facts["source"])
                 self.assertFalse(facts["complete"])
                 self.assertEqual("unconfirmed", facts["freshness"])
                 self.assertEqual(1200000, facts["unconfirmedSince"])
@@ -60,7 +71,7 @@ class SessionActivityFoldTest(unittest.TestCase):
                 self.assertEqual(1100000, model.session_activity["author"])
                 self.assertTrue(model.session_activity_facts("author", self.facts())["complete"])
 
-    def test_turn_winner_retirement_retains_record_and_losing_turn_kind_exits(self):
+    def test_turn_winner_retirement_retains_record_and_losing_turn_exit_keeps_winner(self):
         model = EvidenceModel()
         model.fold_session_activity("turn-only", 950000, "turn", "turn-only", self.facts())
         model.fold_session_activity("mixed", 900000, "turn", "mixed", self.facts())
@@ -70,18 +81,18 @@ class SessionActivityFoldTest(unittest.TestCase):
         self.assertEqual(950000, model.session_activity["turn-only"])
         self.assertEqual(1000000, model.session_activity_evidence["turn-only"]["_retainedAt"])
         self.assertEqual(950000, model.session_activity["mixed"])
-        self.assertEqual(["attest", "cli:attests winner"],
+        self.assertEqual(["cli:attests winner"],
                          model.session_activity_evidence["mixed"]["source"])
 
-    def test_new_attest_after_turn_winner_exit_does_not_retain_exited_kind(self):
+    def test_new_attest_after_turn_winner_exit_replaces_retained_winner(self):
         model = EvidenceModel()
         model.fold_session_activity("author", 950000, "attest", "null", self.facts())
         model.fold_session_activity("author", 1000000, "turn", "author", self.facts())
         model.release_turn_activity("author", 1050000)
-        self.assertEqual(["/api/sessions/author/turns", "attest", "turn"],
+        self.assertEqual(["/api/sessions/author/turns"],
                          model.session_activity_evidence["author"]["source"])
         model.fold_session_activity("author", 1100000, "attest", "null", self.facts())
-        self.assertEqual(["attest", "cli:attests null"],
+        self.assertEqual(["cli:attests null"],
                          model.session_activity_evidence["author"]["source"])
         self.assertNotIn("_retainedAt", model.session_activity_evidence["author"])
 
@@ -93,7 +104,7 @@ class SessionActivityFoldTest(unittest.TestCase):
             model.fold_session_activity("author", 1000000, "attest", scope, self.facts())
             record = model.session_activity_evidence["author"]
             self.assertEqual(1050000, record["_retainedAt"])
-            self.assertEqual(["/api/sessions/author/turns", "attest", "turn"], record["source"])
+            self.assertEqual(["/api/sessions/author/turns"], record["source"])
             facts = model.session_activity_facts("author", self.facts())
             self.assertFalse(facts["complete"])
             self.assertEqual("unconfirmed", facts["freshness"])
@@ -122,7 +133,7 @@ class SessionActivityFoldTest(unittest.TestCase):
         model.accept("assignments", None, Read([], True, 1200000, "assignments"))
         self.assertEqual(1000000, model.session_activity["author"])
         self.assertEqual(1200000, model.session_activity_evidence["author"]["_retainedAt"])
-        self.assertEqual(["attest", "cli:attests winner"], model.session_activity_evidence["author"]["source"])
+        self.assertEqual(["cli:attests winner"], model.session_activity_evidence["author"]["source"])
 
     def test_resumed_refresh_does_not_reconfirm_a_pre_outage_record(self):
         model = EvidenceModel()

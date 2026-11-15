@@ -660,6 +660,7 @@ class LiveService:
         closed = {("attests", row["id"]) for row in assignments.rows.values()
                   if row.get("state") != "open"}
         if any(scope in self.reads.active or any(job[:2] == scope for job in self.reads.pending)
+               or any(job[:2] == scope for job in self.read_retries)
                or (scope in eligible and (not self.model.inventory(*scope).complete
                                          or self.model.inventory(*scope).needs_source_read))
                for scope in closed):
@@ -1489,6 +1490,7 @@ class LiveService:
                        assignment_flight=None):
         resource, scope, key = job
         accepted_closed_attests = False
+        retained_attest_failure = False
         if resource == "retired-turns":
             return self._retired_activity_done(job, result)
         if resource == "attest-owner":
@@ -1559,15 +1561,12 @@ class LiveService:
                 self._forget_scopes({job[:2]})
                 return True
             if owner and not result.complete:
-                self.last_incomplete_read = self._read_outcome(*job, result)
-                self._request_item_assignments(owner, changed=True)
-                if (resource, scope) in self.model.inventories:
-                    self.model.inventories[resource, scope].invalidate()
-                # The complete item read replaces this scope too. Its retry
-                # owns the incompleteness, without retaining the partial rows.
-                self._forget_scopes({job[:2]})
-                return True
-            if self.model.closed_sources_released and scope not in assignments.rows:
+                self.model.retain_failed_attest_read(scope)
+                # Use the common bounded retry bookkeeping below for this
+                # same scoped job. Failure alone cannot start an item reread.
+                retained_attest_failure = True
+            if (not retained_attest_failure and self.model.closed_sources_released
+                    and scope not in assignments.rows):
                 accepted_closed_attests = self.model.accept_closed_attest_read(
                     scope, result, connected=self.connected)
                 if not accepted_closed_attests:
@@ -1687,7 +1686,7 @@ class LiveService:
                 self._state("stale", "uncorrelated " + resource + " change")
             return True
         summary_was_active = self._summary_contract_active() if resource == "work-items" else None
-        if accepted_closed_attests:
+        if accepted_closed_attests or retained_attest_failure:
             pass
         elif resource == 'assignments' and key is None and result.complete:
             conflicts = (assignment_flight.conflict_deliveries(result.rows, complete=True)
@@ -1755,7 +1754,7 @@ class LiveService:
                 row = next((row for row in result.rows if row.get("id") == key), None)
                 if row:
                     self._reconcile_item_attests(row)
-        if not self.connected and not accepted_closed_attests:
+        if not self.connected and not (accepted_closed_attests or retained_attest_failure):
             self.model.inventory(resource, scope).invalidate()
         if result.complete:
             self.read_failures.discard(job[:2])

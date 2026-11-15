@@ -11,7 +11,7 @@ const model = {
   freshness:{state:'live'}, agents:[{
     id:'agent-S', sessionKey:'S', name:'Agent', idleSince:950000, idleFor:50,
     evidence:{idleFor:{status:'known', complete:true, freshness:'live', observedAt:950000,
-      unconfirmedSince:null, source:['attest', 'cli:attests A', 'turn']},
+      unconfirmedSince:null, source:['cli:attests A']},
       identity:{status:'known', source:['sessions']}}
   }], items:[], links:[], wakes:[], messages:[],
 };
@@ -22,9 +22,9 @@ const update = (revision, source) => {
   next.agents[0].evidence.idleFor.source = source;
   return next;
 };
-const next = update(2, ['/api/sessions/S/turns', 'attest', 'turn']);
+const next = update(2, ['/api/sessions/S/turns']);
 assert.equal(sceneSignature(model), sceneSignature(next));
-assert.deepEqual(model.agents[0].evidence.idleFor.source, ['attest', 'cli:attests A', 'turn'],
+assert.deepEqual(model.agents[0].evidence.idleFor.source, ['cli:attests A'],
   'signature calculation must not mutate published evidence');
 for (const change of [
   m => { m.agents[0].evidence.idleFor.complete = false; },
@@ -86,25 +86,25 @@ const code = extract('function refreshModelReferences(model){', 'function receiv
 new vm.Script(code).runInContext(context);
 assert.equal(context.receiveModel(model), true, context.streamError);
 context.renderDetail();
-assert.match(detail.innerHTML, /attest, cli:attests A, turn/);
+assert.match(detail.innerHTML, /cli:attests A/);
 context.hoverLeaders = [{key:'a:agent-S'}];
 const hover = context.hoverLeaders;
 const baseline = {...calls};
 assert.equal(context.receiveModel(next), true, context.streamError);
 assert.deepEqual(calls, baseline, 'source-only update must not rebuild scene/links or reset hover');
 assert.equal(context.hoverLeaders, hover);
-assert.match(detail.innerHTML, /\/api\/sessions\/S\/turns, attest, turn/);
+assert.match(detail.innerHTML, /\/api\/sessions\/S\/turns/);
 assert.doesNotMatch(detail.innerHTML, /cli:attests A/);
 
 context.view.focus.stage = 0;
 context.renderDetail();
 assert.equal(detail.style.display, 'none');
-const closedUpdate = update(3, ['attest', 'cli:attests B', 'turn']);
+const closedUpdate = update(3, ['cli:attests B']);
 assert.equal(context.receiveModel(closedUpdate), true, context.streamError);
 assert.deepEqual(calls, baseline);
 context.view.focus.stage = 1;
 context.renderDetail();
-assert.match(detail.innerHTML, /attest, cli:attests B, turn/);
+assert.match(detail.innerHTML, /cli:attests B/);
 assert.doesNotMatch(detail.innerHTML, /\/api\/sessions\/S\/turns/);
 
 const geometryUpdate = structuredClone(closedUpdate);

@@ -89,7 +89,7 @@ class ActivityObservationBoundTest(unittest.TestCase):
                         self.assertTrue(checks[name]["passes"], checks[name])
                         agent = next(a for a in service.current["agents"] if a["sessionKey"] == "S")
                         self.assertEqual(1000000, agent["idleSince"])
-                        self.assertEqual(["attest", "cli:attests B"], agent["evidence"]["idleFor"]["source"])
+                        self.assertEqual(["cli:attests B"], agent["evidence"]["idleFor"]["source"])
                         self.assertEqual("known", agent["evidence"]["idleFor"]["status"])
                         self.assertEqual("live", agent["evidence"]["idleFor"]["freshness"])
                         self.assertTrue(agent["evidence"]["idleFor"]["complete"])

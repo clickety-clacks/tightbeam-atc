@@ -288,6 +288,33 @@ class ItemContributionsTest(unittest.TestCase):
                     'first', Read([], False, 1350, 'fixture'), connected=True))
                 self.assertEqual(before, model.item_contributions.entries)
 
+    def test_failed_closed_scope_retains_facts_and_recovers_only_its_warning(self):
+        from copy import deepcopy
+        from publication_assertions import assert_publication_equal
+        model = ClosedAssignmentFoldTest().model()
+        baseline = deepcopy(model)
+        model.fold_closed_assignments()
+        before = dict(model.item_contributions.entries)
+        pin = model.closed_items['work']['detailFingerprint']
+        for aid in ('first', 'last'):
+            model.retain_failed_attest_read(aid)
+            baseline.inventory('attests', aid).invalidate()
+            self.assertEqual(before[aid]._replace(
+                evidence=before[aid].evidence._replace(freshness='stale')),
+                model.item_contributions.entries[aid])
+            self.assertNotIn(('attests', aid), model.inventories)
+        self.assertEqual(pin, model.closed_items['work']['detailFingerprint'])
+        assert_publication_equal(self, baseline.snapshot(1300), model.snapshot(1300),
+                                 'scoped-failure-retains-complete-facts')
+        for aid in ('first', 'last'):
+            result = Read(list(baseline.inventory('attests', aid).rows.values()), True, 1400, 'fixture')
+            baseline.accept('attests', aid, deepcopy(result))
+            self.assertTrue(model.accept_closed_attest_read(aid, result, connected=True))
+            self.assertEqual('stale' if aid == 'first' else 'live',
+                             model.closed_items['work']['facts']['freshness'])
+            assert_publication_equal(self, baseline.snapshot(1500), model.snapshot(1500),
+                                     'scoped-retry-retains-other-warning-' + aid)
+
     def test_released_projection_cannot_override_pending_or_different_item_source(self):
         from copy import deepcopy
         model = ClosedAssignmentFoldTest().model()

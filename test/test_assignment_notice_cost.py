@@ -231,17 +231,15 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 self.assertEqual(expected,
                     service.model.item_contributions.entries['first'].attests.count)
                 if partial:
-                    # Existing R10 recovery owns a failed scoped read through
-                    # a complete item replacement. The response is never
-                    # accepted as a replacement attest inventory.
-                    self.assertIn('work', service.model.item_assignment_pending)
-                    gateway.fail_member = 'last'
+                    # Failure keeps live facts and retries this same scope;
+                    # it cannot promote the refresh to a full item read.
+                    self.assertNotIn('work', service.model.item_assignment_pending)
+                    self.assertTrue(inventory.stale)
+                    self.assertTrue(inventory.needs_source_read)
                     self.settle(service)
                     self.assertEqual(prior.attests.count + 1,
                         service.model.item_contributions.entries['first'].attests.count)
-                    self.assertFalse(service.current['items'][0]['evidence']['assignments']['complete'])
-                    deadline = service.read_retries['item-assignment-source', 'work', None][0]
-                    gateway.fail_member = None
+                    deadline = service.read_retries['attests', 'first', None][0]
                     with patch('atc_service.time.monotonic', return_value=deadline + 1):
                         service._retry_incomplete_reads()
                 else:
@@ -253,7 +251,7 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 self.assertEqual(2 if partial else 1,
                     sum(call[:2] == ('read', 'attests') and call[-1] == 'first'
                         for call in gateway.calls))
-                self.assertEqual(2 if partial else 0,
+                self.assertEqual(0,
                     sum(call[0] == 'membership' for call in gateway.calls))
                 fresh_gateway = ItemReads()
                 fresh_gateway.rows = deepcopy(gateway.rows)
@@ -362,33 +360,31 @@ class AssignmentNoticeCostTest(unittest.TestCase):
                 self.assertTrue(flight.closed)
                 self.assertEqual({}, flight.buffers)
                 self.assertEqual({}, service.reads.attest_flights)
-                self.assertEqual(before_failure, service.model.item_contributions.entries['open'])
+                retained = service.model.item_contributions.entries['open']
+                self.assertEqual(before_failure._replace(
+                    evidence=before_failure.evidence._replace(freshness='stale')), retained)
                 self.assertEqual(4000, service.model.session_activity['author'])
                 self.assertEqual(0, service.reads.epoch_discards)
-                self.assertIn('work', service.model.item_assignment_pending)
-                # Existing partial-source recovery may read the item. Its
-                # first failure must retain the same live effects and use B3,
-                # not retry immediately or retain either attempt's buffer.
-                gateway.fail_member = 'last'
+                self.assertNotIn('work', service.model.item_assignment_pending)
+                # Retry the failed scope with B3, retaining all live effects
+                # and disposing the failed attempt's protected buffer.
                 self.settle(service)
                 self.assertEqual({}, service.reads.item_flights)
-                self.assertEqual(before_failure, service.model.item_contributions.entries['open'])
-                self.assertFalse(service.current['items'][0]['evidence']['assignments']['complete'])
-                retry_job = ('item-assignment-source', 'work', None)
+                self.assertEqual(retained, service.model.item_contributions.entries['open'])
+                retry_job = ('attests', 'open', None)
                 deadline, _ = service.read_retries[retry_job]
                 calls_before_retry = list(gateway.calls)
                 with patch('atc_service.time.monotonic', return_value=deadline - 0.001):
                     service._retry_incomplete_reads()
                 self.assertNotIn(retry_job, service.reads.pending)
                 self.assertEqual(calls_before_retry, gateway.calls)
-                gateway.fail_member = None
                 with patch('atc_service.time.monotonic', return_value=deadline):
                     service._retry_incomplete_reads()
                 self.assertIn(retry_job, service.reads.pending)
                 self.settle(service)
                 self.assertNotIn(retry_job, service.read_retries)
                 self.assertEqual(set(), service.model.item_assignment_pending)
-                self.assertEqual(2, gateway.calls.count(('membership', 'work')))
+                self.assertEqual(0, gateway.calls.count(('membership', 'work')))
                 self.assertEqual(2, gateway.calls.count(('read', 'attests', 'open')))
                 self.assertEqual(2, service.model.item_contributions.entries['open'].attests.count)
                 self.assertNotIn(('attests', 'open'), service.model.inventories)

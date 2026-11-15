@@ -52,14 +52,11 @@ def fold_session_activity_record(values, records, session, timestamp, kind, scop
         raise ValueError("session activity requires attest or turn")
     previous_at = values.get(session)
     previous = records.get(session)
-    kinds = {kind}
     winner = source
     winner_owner = owner if kind == "attest" else None
     previous_source = None
     if previous is not None:
-        kinds.update(s for s in previous["source"] if s in {"attest", "turn"})
-        previous_source = next((s for s in previous["source"]
-                                if s not in {"attest", "turn"}), None)
+        previous_source = next(iter(previous["source"]), None)
         if previous_source is not None and previous_at is not None:
             if previous_at > timestamp:
                 winner = previous_source
@@ -71,16 +68,10 @@ def fold_session_activity_record(values, records, session, timestamp, kind, scop
     retains_winner = (previous is not None and "_retainedAt" in previous
                       and previous_at is not None and previous_at >= timestamp
                       and winner == previous_source)
-    if (previous is not None and "_retainedAt" in previous
-            and previous_source is not None and previous_source.startswith("/api/sessions/")
-            and kind != "turn" and not retains_winner):
-        # Only replacement of the retained turn winner releases its kind.
-        # An equal-time losing attest cannot reconfirm that exited winner.
-        kinds.discard("turn")
     merged = combined_evidence(*(fact for fact in (previous, facts) if fact is not None))
     # combined_evidence retains its scalar confirmation semantics. Only
     # its per-scope source union is replaced by the fixed source contract.
-    merged["source"] = sorted(kinds | {winner})
+    merged["source"] = [winner]
     merged["_owner"] = winner_owner
     if retains_winner:
         merged["_retainedAt"] = previous["_retainedAt"]
@@ -240,14 +231,12 @@ class EvidenceModel:
 
     def release_turn_activity(self, session, at):
         record = self.session_activity_evidence.get(session)
-        if record is None or "turn" not in record["source"]:
+        if record is None:
             return
         if any(source.startswith("/api/sessions/") for source in record["source"]):
             # Scope exit cannot erase the already observed winning activity.
             # This fixed record is retained even while its session is hidden.
             record.setdefault("_retainedAt", at)
-        else:
-            record["source"].remove("turn")
 
     def retain_assignment_winner_exits(self, absent, at):
         for facts in self.session_activity_evidence.values():
@@ -673,6 +662,25 @@ class EvidenceModel:
                 self.fold_retired_activity({wid: source_part["turnActivity"]})
         self.closed_revision += 1
         self._item_activity_parts.clear()
+
+    def retain_failed_attest_read(self, aid):
+        """Keep current facts while the same scoped read waits for retry.
+
+        Failed snapshots cannot replace live notice effects or transfer a
+        scoped refresh to an item-wide read. Mark the existing representations
+        stale without reconstructing discarded rows or certifying first load.
+        """
+        aid = str(aid)
+        inventory = self.inventories.get(('attests', aid))
+        if inventory is not None:
+            inventory.invalidate()
+        previous = self.item_contributions.entries.get(aid)
+        if previous is not None:
+            self.item_contributions.entries[aid] = previous._replace(
+                evidence=previous.evidence._replace(freshness='stale'))
+            if previous.state != 'open' and aid not in self.inventory('assignments').rows:
+                self._reduce_current_closed_item(previous.item,
+                    self.closed_items.get(previous.item), preserve_facts=False)
 
     def accept_closed_attest_read(self, aid, result, *, connected):
         """Apply a complete scoped snapshot to its current closed contribution.
