@@ -56,15 +56,30 @@ def assert_publication_equal(case, fresh, warm, label):
     case.assertEqual(normalized_fresh, normalized_warm)
 
 
+def held_scope_identities(service):
+    """R37: distinct cause identities, never one offset per hold.
+
+    This is comparison-only scratch state. Production retains no extra set.
+    An unidentified producer contributes no identity; an independent ordering
+    or contribution hold still names its own assignment scope.
+    """
+    held = set()
+    for aid, hold in service.assignment_holds.assignments.items():
+        if hold.conflict or hold.incomplete_contribution:
+            held.add(('attests', aid))
+        if hold.producer_recovery and hold.producer is not None:
+            held.add(('attests', hold.producer))
+    return held
+
+
 def held_scope_metadata(case, fresh, warm, label):
-    """R34: explain only eight fields from actual held scope identities.
+    """R34/R37: explain only eight fields from actual held scope identities.
 
     Read each server's retained scopes and confirmation inputs separately.
     Neither a hold count nor observed metadata supplies an arbitrary offset.
     Return permitted values only after verifying their exact derivation.
     """
-    held = {('attests', aid) for aid, hold in warm.assignment_holds.assignments.items()
-            if hold.conflict or hold.incomplete_contribution}
+    held = held_scope_identities(warm)
     def inputs(service):
         groups = {'historyScopes': set(service._history_scopes()),
                   'active': set(service.backstop.active),
@@ -72,8 +87,13 @@ def held_scope_metadata(case, fresh, warm, label):
         return {name: {scope: service.model.inventories[scope].confirmed_at
                        for scope in scopes} for name, scopes in groups.items()}
     cold, retained = inputs(fresh), inputs(warm)
+    # Only scopes actually present in the compared source graphs contribute.
+    # A hold with no scope cannot enlarge a count bound or invent an offset.
+    held.intersection_update(set().union(
+        *(set(scopes) for groups in (cold, retained) for scopes in groups.values())))
     capture_publication(fresh.current, warm.current, label + '-scope-evidence',
-        heldAssignments=sorted(aid for _, aid in held),
+        heldAssignments=sorted(warm.assignment_holds.assignments),
+        heldScopes=[list(scope) for scope in sorted(held)],
         scopeAccounting={side: {name: [dict(scope=list(scope), confirmedAt=at)
                                       for scope, at in sorted(scopes.items())]
                                 for name, scopes in groups.items()}
