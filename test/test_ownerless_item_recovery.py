@@ -18,13 +18,25 @@ from test_service import summarized_work
 class OwnerlessItemRecoveryTest(unittest.TestCase):
     setUp = AssignmentHoldPublicationTest.setUp
     settle = AssignmentHoldPublicationTest.settle
-    fresh = AssignmentHoldPublicationTest.fresh
     item = AssignmentHoldPublicationTest.item
     notice = AssignmentHoldPublicationTest.notice
     assert_retained = AssignmentHoldPublicationTest.assert_retained
     assert_held_publication = AssignmentHoldPublicationTest.assert_held_publication
     queued_source = AssignmentHoldPublicationTest.queued_source
     set_source_assignment = AssignmentHoldPublicationTest.set_source_assignment
+
+    def fresh(self):
+        # R7/R32 matched source inputs; custodian agreement art_85f110ed.
+        # The implicit-summary case intentionally has no advertised version.
+        gateway = ItemReads()
+        gateway.rows = deepcopy(self.gateway.rows)
+        service = LiveService(gateway, workers=1, scope_budget=self.service.scope_budget,
+                              rebuild_interval=self.service.rebuild_interval)
+        self.addCleanup(service.stop)
+        service._handle('ready', deepcopy(self.service.version))
+        self.settle(service)
+        self.assertEqual(self.service.version, service.version)
+        return service
 
     def establish(self, *, unpublished=False):
         baseline = deepcopy(self.service.current)
@@ -46,7 +58,7 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
         self.gateway.rows['attests', row['id']] = attests
         self.gateway.calls.clear()
         epochs = dict(self.service.reads.epochs)
-        notice = dict(resource='attests', op='upsert', **{'class': 'attest.created'},
+        notice = dict(resource='attests', op='upsert', **{'class': 'attest.filed'},
                       refs={'attestId': 'new-evidence', 'assignmentId': row['id']},
                       payload=deepcopy(attests[0]))
         self.assertTrue(self.service.change(notice))
@@ -365,7 +377,7 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
             bySession='author', ts=960000, commitRefs=[])
         self.gateway.rows['attests', row['id']].append(deepcopy(late))
         self.assertNotIn(row['id'], self.service.model.item_contributions.entries)
-        notice = dict(resource='attests', op='upsert', **{'class': 'attest.created'},
+        notice = dict(resource='attests', op='upsert', **{'class': 'attest.filed'},
             refs={'attestId': late['id'], 'assignmentId': row['id']}, payload=deepcopy(late))
         if owner_field is not None:
             notice[owner_field]['workItemId'] = row['workItemId']
