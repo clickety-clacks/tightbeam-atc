@@ -373,6 +373,11 @@ class ReadQueue:
                 with self.attest_owner_counter_lock:
                     self.attest_owner_attempts += 1
                 return self.gateway.detail("assignments", scope)
+            if resource == "reviewed-producer":
+                # R36 uses the existing assignment-get transport, with its
+                # own result consumer. It must never enter the generic detail
+                # handler that can request a complete item-source reread.
+                return self.gateway.detail("assignments", scope)
             if resource == "retired-turns":
                 return self._retired_activity(keep_ids)
             if resource == "item-assignment-source":

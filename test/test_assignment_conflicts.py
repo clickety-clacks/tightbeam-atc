@@ -14,6 +14,66 @@ from atc_upstream import Read
 
 
 class AssignmentConflictsTest(unittest.TestCase):
+    def test_producer_recovery_keeps_prior_publication_until_its_own_resolver(self):
+        for prior in (None, {'id': 'item', 'title': 'Actual prior', 'evidence': {
+                'assignments': {'freshness': 'live', 'complete': True}}}):
+            for producer in (None, 'p'):
+                with self.subTest(published=prior is not None, producer=producer):
+                    holds = AssignmentHolds()
+                    original = deepcopy(prior)
+                    holds.hold('a', 'item', prior, at=100,
+                               producer_recovery=True, producer=producer)
+                    # R36: neither a later ordinary notice nor an attest
+                    # confirmation supplies the missing producer read.
+                    self.assertFalse(holds.resolve_notice('a', 200))
+                    self.assertFalse(holds.resolve('a'))
+                    self.assertFalse(holds.resolve_contribution('a'))
+                    self.assertEqual(producer, holds.assignments['a'].producer)
+                    current = [{'id': 'item', 'title': 'New facts'}, {'id': 'other'}]
+                    published = holds.published_items(current)
+                    if prior is None:
+                        self.assertEqual([{'id': 'other'}], published)
+                    else:
+                        self.assertEqual('Actual prior', published[0]['title'])
+                        self.assertEqual('unconfirmed',
+                                         published[0]['evidence']['assignments']['freshness'])
+                    self.assertEqual(original, prior)
+                    self.assertTrue(holds.resolve_producer('a'))
+                    self.assertEqual(current, holds.published_items(current))
+                    self.assertEqual({}, holds.assignments)
+                    self.assertEqual({}, holds.items)
+
+    def test_producer_resolution_does_not_erase_ordering_or_contribution_holds(self):
+        holds = AssignmentHolds()
+        prior = {'id': 'item', 'evidence': {}}
+        holds.hold('a', 'item', prior, at=100, producer_recovery=True, producer='p')
+        holds.hold('a', 'item', None, at=200, after_delivery=4)
+        holds.hold('a', 'item', None, at=300, incomplete_contribution=True)
+        self.assertTrue(holds.resolve_producer('a'))
+        self.assertIs(prior, holds.items['item'])
+        self.assertIsNone(holds.assignments['a'].producer)
+        self.assertTrue(holds.assignments['a'].conflict)
+        self.assertTrue(holds.assignments['a'].incomplete_contribution)
+        self.assertFalse(holds.resolve_notice('a', 4))
+        self.assertTrue(holds.resolve_notice('a', 5))
+        self.assertIs(prior, holds.items['item'])
+        self.assertTrue(holds.resolve_contribution('a'))
+        self.assertEqual({}, holds.items)
+
+    def test_same_producer_holds_share_actual_item_and_release_on_exit_or_restart(self):
+        holds = AssignmentHolds()
+        prior = {'id': 'item', 'evidence': {}}
+        for aid in ('a', 'b'):
+            holds.hold(aid, 'item', prior, at=100, producer_recovery=True, producer='p')
+        self.assertEqual(1, len(holds.items))
+        self.assertIs(prior, holds.items['item'])
+        holds.resolve_producer('a')
+        self.assertIs(prior, holds.items['item'])
+        holds.retain_items(set())
+        self.assertEqual({}, holds.items)
+        self.assertEqual({}, holds.assignments)
+        self.assertEqual({}, AssignmentHolds().assignments)
+
     def test_contribution_and_ordering_holds_have_independent_resolvers(self):
         for contribution_first in (False, True):
             with self.subTest(contribution_first=contribution_first):
@@ -82,6 +142,74 @@ class AssignmentConflictsTest(unittest.TestCase):
                     if key not in {'derivedStatus', 'rowVersion'}}
         snapshot['commitRefCorrections'] = [{'id': 'correction'}]
         self.assertEqual(set(), flight.conflicting_rows([snapshot], complete=True))
+
+    def test_producer_detail_compares_actual_shared_fields_and_keeps_reopen_conflict(self):
+        registry = AssignmentReadRegistry()
+        job = ('reviewed-producer', 'a', None)
+        registry.start(job)
+        flight = registry.flights[job]
+        row = self.row('closed', files=['membership-only'])
+        first = registry.admit(self.notice(row))
+        snapshot = {key: value for key, value in row.items()
+                    if key not in {'files', 'derivedStatus', 'rowVersion'}}
+        snapshot['reopenings'] = []
+        snapshot['commitRefCorrections'] = []
+        self.assertEqual({}, flight.conflict_deliveries([snapshot], complete=True))
+        registry.admit(self.notice(self.row(id='unrelated')))
+        self.assertEqual({'a'}, set(flight.notices))
+        second = registry.admit(self.notice(self.row()))
+        self.assertEqual({'a': second}, flight.conflict_deliveries([snapshot], complete=True))
+        self.assertEqual({'a': first}, flight.conflict_deliveries([self.row()], complete=True))
+        self.assertIsNone(flight.conflict_deliveries([snapshot], complete=False))
+        registry.discard(job)
+        self.assertTrue(flight.closed)
+        self.assertEqual({}, flight.notices)
+        self.assertEqual({}, registry.flights)
+
+    def test_producer_lookup_coalesces_active_and_queued_results_without_item_reads(self):
+        entered, release = Event(), Event()
+        calls = []
+        row = self.row('closed')
+        class Gateway:
+            def detail(self, resource, key):
+                calls.append((resource, key))
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError('fixture did not release producer lookup')
+                return Read([deepcopy(row)], True, 100, 'assignment-get')
+        events = queue.Queue()
+        reads = ReadQueue(Gateway(), events, 1)
+        self.addCleanup(reads.close)
+        self.addCleanup(release.set)
+        job = ('reviewed-producer', 'a', None)
+        reads.schedule(*job)
+        reads.schedule(*job)
+        self.assertEqual({job}, set(reads.pending))
+        reads.pump()
+        self.assertTrue(entered.wait(5))
+        for _ in range(4):
+            reads.schedule(*job)
+        self.assertFalse(reads.pending)
+        release.set()
+        kind, value = events.get(timeout=5)
+        self.assertEqual('read', kind)
+        self.assertTrue(value[2].complete)
+        # A finished worker is still the same in-flight lookup until the
+        # model consumer owns and discards its queued result.
+        reads.schedule(*job)
+        self.assertFalse(reads.pending)
+        delivery = reads.assignment_reads.admit(self.notice(self.row()))
+        def apply(flight):
+            self.assertTrue(reads.finish(value[0], value[1]))
+            self.assertEqual({'a': delivery}, flight.conflict_deliveries(
+                value[2].rows, complete=True))
+        reads.assignment_reads.consume(job, apply)
+        self.assertEqual([('assignments', 'a')], calls)
+        self.assertEqual(0, reads.attest_owner_attempts)
+        self.assertEqual(0, reads.epoch_discards)
+        self.assertFalse(reads.pending)
+        self.assertFalse(reads.active)
+        self.assertEqual({}, reads.assignment_reads.flights)
 
     def test_reopen_does_not_erase_an_earlier_conflict_in_the_same_flight(self):
         flight = AssignmentReadConflicts()

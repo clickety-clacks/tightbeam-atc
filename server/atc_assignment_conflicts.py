@@ -14,10 +14,14 @@ from atc_payloads import ASSIGNMENT_FIELDS
 # Hash the shared projection so a flight retains no subject, file list or
 # revocation prose. This fingerprint establishes equality, never precedence.
 _SHARED_FIELDS = tuple(sorted(ASSIGNMENT_FIELDS - {'derivedStatus', 'rowVersion'}))
+_DETAIL_SHARED_FIELDS = tuple(key for key in _SHARED_FIELDS if key != 'files')
 
 
-def assignment_projection_fingerprint(row):
-    values = [row.get(key) for key in _SHARED_FIELDS]
+def assignment_projection_fingerprint(row, *, detail=False):
+    # The existing assignment-get transport omits files. Compare its actual
+    # common fields with a notice; never fill a missing source field by guess.
+    fields = _DETAIL_SHARED_FIELDS if detail else _SHARED_FIELDS
+    values = [row.get(key) for key in fields]
     return hashlib.sha256(json.dumps(values, sort_keys=True,
                                     separators=(',', ':')).encode('utf-8')).digest()
 
@@ -39,12 +43,13 @@ class AssignmentReadConflicts:
     that fact. Creation identity protects only a current member missing from
     the snapshot. Discard both maps on success, failure or cancellation.
     """
-    __slots__ = ('notices', 'creations', 'closed')
+    __slots__ = ('notices', 'creations', 'closed', 'detail')
 
-    def __init__(self):
+    def __init__(self, *, detail=False):
         self.notices = {}
         self.creations = {}
         self.closed = False
+        self.detail = detail
 
     def observe(self, notice, *, delivery=0):
         if self.closed:
@@ -63,7 +68,7 @@ class AssignmentReadConflicts:
             # This is not a version for subsequent close/reopen projections.
             self.creations.setdefault(aid, delivery)
             return True
-        signature = assignment_projection_fingerprint(row)
+        signature = assignment_projection_fingerprint(row, detail=self.detail)
         previous = self.notices.get(aid)
         if previous is None:
             self.notices[aid] = _NoticeState(row['workItemId'], signature, delivery)
@@ -84,7 +89,7 @@ class AssignmentReadConflicts:
     def conflict_deliveries(self, rows, *, complete):
         """Identify the first conflicting local delivery, not a source version."""
         return self.conflict_fingerprints(
-            ((str(row['id']), assignment_projection_fingerprint(row)) for row in rows),
+            ((str(row['id']), assignment_projection_fingerprint(row, detail=self.detail)) for row in rows),
             complete=complete)
 
     def conflict_fingerprints(self, fingerprints, *, complete):
@@ -128,6 +133,8 @@ class _HeldAssignment(NamedTuple):
     after_delivery: int
     conflict: bool = True
     incomplete_contribution: bool = False
+    producer_recovery: bool = False
+    producer: str | None = None
 
 
 class AssignmentHolds:
@@ -146,7 +153,7 @@ class AssignmentHolds:
         self.items = {}
 
     def hold(self, assignment, item, published_item, *, at, after_delivery=0,
-             incomplete_contribution=False):
+             incomplete_contribution=False, producer_recovery=False, producer=None):
         if published_item is not None and published_item.get('id') != item:
             raise ValueError('hold requires the actual published item')
         previous = self.assignments.get(assignment)
@@ -157,11 +164,14 @@ class AssignmentHolds:
             # its establishing delivery is not a subsequent resolver either.
             self.assignments[assignment] = previous._replace(
                 after_delivery=max(previous.after_delivery, after_delivery),
-                conflict=previous.conflict or not incomplete_contribution,
-                incomplete_contribution=previous.incomplete_contribution or incomplete_contribution)
+                conflict=previous.conflict or not (incomplete_contribution or producer_recovery),
+                incomplete_contribution=previous.incomplete_contribution or incomplete_contribution,
+                producer_recovery=previous.producer_recovery or producer_recovery,
+                producer=producer if producer_recovery else previous.producer)
             return False
         self.assignments[assignment] = _HeldAssignment(
-            item, at, after_delivery, not incomplete_contribution, incomplete_contribution)
+            item, at, after_delivery, not (incomplete_contribution or producer_recovery),
+            incomplete_contribution, producer_recovery, producer if producer_recovery else None)
         self.items.setdefault(item, published_item)
         return True
 
@@ -173,16 +183,27 @@ class AssignmentHolds:
         """Caller has complete contribution facts, not just an ownership row."""
         return self._resolve(assignment, contribution=True)
 
-    def _resolve(self, assignment, *, conflict=False, contribution=False):
+    def resolve_producer(self, assignment):
+        """Caller committed the identified producer or a complete covering read.
+
+        An ordinary assignment notice and contribution confirmation are not
+        proof that the hidden reviewed-producer state was recovered (R36).
+        Unknown identity remains a hold, not a request to discover an owner.
+        """
+        return self._resolve(assignment, producer=True)
+
+    def _resolve(self, assignment, *, conflict=False, contribution=False, producer=False):
         previous = self.assignments.get(assignment)
         if previous is None:
             return False
         remaining = previous._replace(
             conflict=previous.conflict and not conflict,
-            incomplete_contribution=previous.incomplete_contribution and not contribution)
+            incomplete_contribution=previous.incomplete_contribution and not contribution,
+            producer_recovery=previous.producer_recovery and not producer,
+            producer=None if producer else previous.producer)
         if remaining == previous:
             return False
-        if remaining.conflict or remaining.incomplete_contribution:
+        if remaining.conflict or remaining.incomplete_contribution or remaining.producer_recovery:
             self.assignments[assignment] = remaining
             return True
         del self.assignments[assignment]
@@ -199,7 +220,7 @@ class AssignmentHolds:
     def retain_items(self, items):
         for assignment, held in tuple(self.assignments.items()):
             if held.item not in items:
-                self._resolve(assignment, conflict=True, contribution=True)
+                self._resolve(assignment, conflict=True, contribution=True, producer=True)
 
     def since(self, item):
         return min((held.since for held in self.assignments.values() if held.item == item),
@@ -254,12 +275,12 @@ class AssignmentReadRegistry:
         self.closed = False
 
     def start(self, job):
-        if job[0] not in {'assignments', 'item-assignment-source'}:
+        if job[0] not in {'assignments', 'item-assignment-source', 'reviewed-producer'}:
             return
         with self.lock:
             if self.closed or job in self.flights:
                 raise ValueError('assignment read outside a new attempt')
-            self.flights[job] = AssignmentReadConflicts()
+            self.flights[job] = AssignmentReadConflicts(detail=job[0] == 'reviewed-producer')
 
     def admit(self, notice, enqueue=None):
         with self.lock:
@@ -276,6 +297,7 @@ class AssignmentReadRegistry:
                 delivery = self.delivery
                 for (resource, scope, key), flight in self.flights.items():
                     if ((resource == 'item-assignment-source' and row['workItemId'] != scope)
+                            or (resource == 'reviewed-producer' and str(row['id']) != str(scope))
                             or (resource == 'assignments' and key is not None
                                 and str(row['id']) != str(key))):
                         continue
