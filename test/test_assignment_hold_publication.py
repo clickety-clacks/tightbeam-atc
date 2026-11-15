@@ -310,10 +310,39 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.assertEqual({'historyScopes': 1, 'active.scopeCount': 1}, differences)
         assert_replay_current(self, self.service, baseline, 'r31-one-hold-remains-replay')
 
+        producer_baseline = deepcopy(self.service.current)
         self.service._queue_feed_change(self.notice(closed[0]))
         self.service._handle(*self.service.events.get(timeout=5))
         self.settle()
         self.assertEqual(calls, self.gateway.calls)
+        # Owner agreement art_a81746d3; R36 section 3 / att_e33b4539,
+        # inherited by R37. This applied close resolves the old conflict but
+        # independently holds publication because no producer is identified.
+        self.assertEqual({'held-closed'}, set(self.service.assignment_holds.assignments))
+        held = self.service.assignment_holds.assignments['held-closed']
+        self.assertFalse(held.conflict)
+        self.assertFalse(held.incomplete_contribution)
+        self.assertTrue(held.producer_recovery)
+        self.assertIsNone(held.producer)
+        differences, _fresh = self.assert_held_publication(
+            producer_baseline, 'r37-shared-scope-resolved-producer-unknown')
+        self.assertEqual({'historyScopes': 0, 'active.scopeCount': 0}, differences)
+        assert_replay_current(self, self.service, baseline,
+                              'r37-shared-scope-resolved-producer-unknown-replay')
+        self.assertFalse(self.service.reads.pending)
+        self.assertFalse(self.service.reads.active)
+        self.settle()  # Feed drain alone cannot resolve the independent cause.
+        self.assertTrue(self.service.assignment_holds.assignments['held-closed'].producer_recovery)
+        self.assertEqual(calls, self.gateway.calls)
+        # Supply an existing scheduled clean covering read, not a new product
+        # timer or a discovery chain caused by the close notice.
+        covering = self.queued_source('assignments')
+        self.service._handle(*covering)
+        self.settle()
+        self.assertEqual(1, self.gateway.calls.count(('read', 'assignments', None))
+                         - calls.count(('read', 'assignments', None)))
+        self.assertEqual(sum(call[0] == 'membership' for call in calls),
+                         sum(call[0] == 'membership' for call in self.gateway.calls))
         self.assertFalse(self.service.assignment_holds.assignments)
         self.assertFalse(self.service.assignment_holds.items)
         self.assertEqual(0, self.service.reads.epoch_discards)
