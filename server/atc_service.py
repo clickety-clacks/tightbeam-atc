@@ -545,13 +545,15 @@ class LiveService:
             classified = False
         if not classified:
             self._update_backstop(at)
+        eligible_activity_items = None
         if self.model.inventory("work-items").complete:
             eligible_activity_items = {wid for wid, item in self.model.work_items().items()
                 if not (self._summary_contract_active() and has_work_item_summary(item)
                         and not self._summary_needs_review_timing(item))}
             self.model.retain_exited_activity(eligible_activity_items, at)
         data = deepcopy(self.model.snapshot(
-            at, assignment_source_unavailable=self.assignment_source_unavailable))
+            at, assignment_source_unavailable=self.assignment_source_unavailable,
+            eligible_activity_items=eligible_activity_items))
         self._retain_unproven_removals(data, at)
         self._resolve_complete_contribution_holds()
         data['items'] = self.assignment_holds.published_items(data['items'])

@@ -315,6 +315,22 @@ class ItemContributionsTest(unittest.TestCase):
             assert_publication_equal(self, baseline.snapshot(1500), model.snapshot(1500),
                                      'scoped-retry-retains-other-warning-' + aid)
 
+    def test_excluded_losing_attest_scope_does_not_keep_its_session_warning(self):
+        model = ClosedAssignmentFoldTest().model()
+        model.fold_closed_assignments()
+        def author_facts(eligible):
+            frame = model.snapshot(1300, eligible_activity_items=eligible)
+            return next(row['evidence']['idleFor'] for row in frame['agents']
+                        if row['sessionKey'] == 'author')
+        baseline = author_facts({'work'})
+        model.retain_failed_attest_read('first')
+        self.assertEqual('stale', author_facts({'work'})['freshness'])
+        # The winning source is the still-visible turn; only the losing
+        # attest scope exits. Its unrelated item warning is not erased.
+        model.retain_exited_activity(set(), 1200)
+        self.assertEqual(baseline, author_facts(set()))
+        self.assertEqual('stale', model.item_contributions.entries['first'].evidence.freshness)
+
     def test_released_projection_cannot_override_pending_or_different_item_source(self):
         from copy import deepcopy
         model = ClosedAssignmentFoldTest().model()

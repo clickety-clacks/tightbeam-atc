@@ -657,7 +657,8 @@ class EvidenceModel:
         self.details_revision += 1
         return True
 
-    def _reduce_current_closed_item(self, wid, source_part, *, preserve_facts=True):
+    def _reduce_current_closed_item(self, wid, source_part, *, preserve_facts=True,
+                                    preserve_turns=True):
         fold = ClosedAssignmentFold()
         for contribution in self.item_contributions.entries.values():
             if contribution.item == wid and contribution.state != "open":
@@ -676,12 +677,13 @@ class EvidenceModel:
                 # This source may also include the separately read retired
                 # holder turn fold. Ordinary contribution updates do not
                 # replace that source observation.
-                part["turnActivity"] = latest_time(part["turnActivity"], source_part["turnActivity"])
-                part["activity"] = latest_time(part["activity"], part["turnActivity"])
+                if preserve_turns:
+                    part["turnActivity"] = latest_time(part["turnActivity"], source_part["turnActivity"])
+                    part["activity"] = latest_time(part["activity"], part["turnActivity"])
             self.closed_items[wid] = part
         else:
             self.closed_items.pop(wid, None)
-            if source_part and source_part["turnActivity"] is not None:
+            if preserve_turns and source_part and source_part["turnActivity"] is not None:
                 self.fold_retired_activity({wid: source_part["turnActivity"]})
         self.closed_revision += 1
         self._item_activity_parts.clear()
@@ -1072,7 +1074,10 @@ class EvidenceModel:
             # Keep actual old source pins; compact state cannot invent a hash.
             for wid, part in closed.items():
                 if wid not in self.item_assignment_pending:
-                    self._reduce_current_closed_item(wid, part)
+                    # Complete membership establishes absence for every
+                    # unprotected contributor. Do not keep its old item-wide
+                    # maximum merely because another contributor is held.
+                    self._reduce_current_closed_item(wid, part, preserve_turns=False)
                 else:
                     self.closed_items[wid] = part
         self._item_activity_parts.clear()
@@ -1309,7 +1314,7 @@ class EvidenceModel:
             self._item_activity = combined
         return self._item_activity
 
-    def snapshot(self, now, *, assignment_source_unavailable=False):
+    def snapshot(self, now, *, assignment_source_unavailable=False, eligible_activity_items=None):
         self.next_expiry = None
         self.next_raw_expiry = None
         for (resource, scope), inventory in list(self.inventories.items()):
@@ -1383,7 +1388,9 @@ class EvidenceModel:
         # raw disposal must not drop that warning from the author's session.
         # Construction inventories above own their scopes until disposal.
         for aid, contribution in self.item_contributions.entries.items():
-            if ('attests', aid) in self.inventories:
+            if (('attests', aid) in self.inventories
+                    or (eligible_activity_items is not None
+                        and contribution.item not in eligible_activity_items)):
                 continue
             scope_facts = dict(contribution.evidence.publication(), source=[])
             for author, _timestamp in contribution.attests.authors:

@@ -94,6 +94,16 @@ class AssignmentConflictSourceTest(unittest.TestCase):
         self.assertEqual({'open', 'last'}, set(current.inventory('assignments').rows))
         self.assertEqual({'first', 'open', 'last'}, set(current.item_contributions.entries))
 
+    def test_held_member_does_not_retain_removed_members_turn_maximum(self):
+        current, reference = self.models()
+        incoming = [deepcopy(row) for aid, row in reference.inventory('assignments').rows.items()
+                    if aid != 'last']
+        incoming[0].update(state='open', closedAt=None)
+        self.replace(current, reference, incoming, {'first'}, 'held-member-removed-turn-winner')
+        self.assertNotIn('last', current.item_contributions.entries)
+        self.assertEqual(80, current.closed_items['work']['turnActivity'])
+        self.assertEqual(80, current.item_activity()['work'])
+
     def test_conflict_does_not_freeze_another_items_complete_replacement(self):
         current, reference = self.models(with_other_item=True)
         incoming = deepcopy(list(reference.inventory('assignments').rows.values()))
