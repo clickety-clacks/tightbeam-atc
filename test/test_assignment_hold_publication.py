@@ -437,8 +437,8 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.settle()
         self.assertFalse(self.service.assignment_holds.assignments)
         self.assertEqual('closed', self.service.model.item_contributions.entries['open'].state)
-        assert_publication_equal(self, self.fresh().current, self.service.current,
-                                 'r29-item-clean-resolver')
+        # R36 / test-owner agreement art_680506dc: distinct bootstraps.
+        self.assert_distinct_bootstrap_publication(self.fresh(), 'r29-item-clean-resolver')
         assert_replay_current(self, self.service, baseline, 'r29-item-clean-resolver-replay')
 
     def test_item_next_already_queued_reopen_resolves_after_establishing_close(self):
@@ -506,8 +506,8 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.service._handle(*clean)
         self.settle()
         self.assertFalse(self.service.assignment_holds.assignments)
-        assert_publication_equal(self, self.fresh().current, self.service.current,
-                                 'r29-global-clean-resolver')
+        # R36 / test-owner agreement art_680506dc: distinct bootstraps.
+        self.assert_distinct_bootstrap_publication(self.fresh(), 'r29-global-clean-resolver')
         assert_replay_current(self, self.service, baseline, 'r29-global-clean-resolver-replay')
 
     def test_repeat_item_conflict_and_failed_source_keep_original_hold(self):

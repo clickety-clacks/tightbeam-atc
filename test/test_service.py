@@ -354,7 +354,12 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertIsNone(self.service.cycle)
         self.assertEqual("live", self.service.state)
         self.assertEqual(1, self.item()["evidenceCounts"]["total"])
-        self.assertEqual("live", self.item()["evidence"]["stage"]["freshness"])
+        # R32 / art_680506dc: this retry confirms attests only. The other
+        # retained outage observations above are not silently reconfirmed.
+        self.assertEqual("live", self.service.model.inventory("attests", "assignment").evidence()["freshness"])
+        self.assertEqual("unconfirmed", self.service.model.inventory("work-items").evidence()["freshness"])
+        self.assertEqual("unconfirmed", self.service.model.inventory("assignments").evidence()["freshness"])
+        self.assertEqual("unconfirmed", self.item()["evidence"]["stage"]["freshness"])
 
     def test_repeated_lost_events_do_not_rebuild_after_disconnect_transition(self):
         self.service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")

@@ -76,24 +76,36 @@ class ClosedAssignmentFoldTest(unittest.TestCase):
         self.assertEqual(baseline.snapshot(1000), folded.snapshot(1000))
 
     def test_membership_refresh_preserves_current_turn_timing_and_removal_releases_it(self):
+        from publication_assertions import capture_publication
+
+        def equal_publication(label):
+            expected, actual = baseline.snapshot(1000), folded.snapshot(1000)
+            capture_publication(expected, actual, label)
+            self.assertEqual(expected, actual)
+
         folded = self.model()
         baseline = deepcopy(folded)
         members = deepcopy(list(baseline.inventory('assignments').rows.values()))
         folded.fold_closed_assignments()
         for model in (baseline, folded):
             self.read(model, 'assignments', deepcopy(members))
-        self.assertEqual(baseline.snapshot(1000), folded.snapshot(1000))
+            # Mirror the service's eligible construction boundary after the
+            # membership read; membership alone does not restore histories.
+            # Test-owner correction agreement art_680506dc.
+            model.restore_assignment_attests({'work'})
+        equal_publication('r36-turn-membership-restored')
         folded.fold_closed_assignments()
         self.assertEqual(90, folded.item_activity()['work'])
-        self.assertEqual(baseline.snapshot(1000), folded.snapshot(1000))
+        equal_publication('r36-turn-membership-refolded')
         # The maximum belongs to last, not permanently to the whole item.
         for model in (baseline, folded):
             self.read(model, 'assignments', [deepcopy(row) for row in members
                                              if row['id'] != 'last'])
+            model.restore_assignment_attests({'work'})
         folded.fold_closed_assignments()
         self.assertNotIn('last', folded.item_contributions.entries)
         self.assertEqual(80, folded.item_activity()['work'])
-        self.assertEqual(baseline.snapshot(1000), folded.snapshot(1000))
+        equal_publication('r36-turn-member-removed')
 
     def test_closed_assignment_live_turn_finish_advances_item_after_source_release(self):
         for complete in (False, True):

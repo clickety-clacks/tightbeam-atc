@@ -624,7 +624,29 @@ class EvidenceModel:
     def closed_item(self, wid, owned):
         # A fresh complete collection supplies replacement source rows. Until
         # folded, those rows are the contribution, not both them and its prior fold.
-        return self.closed_items.get(wid) if not any(a.get("state") != "open" for a in owned) else None
+        part = self.closed_items.get(wid)
+        if not any(a.get("state") != "open" for a in owned):
+            return part
+        if not self.closed_sources_released or part is None:
+            return None
+        # A selective R29 replacement can retain a released closed contributor
+        # beside other members' raw construction rows. Include only that
+        # released subset; dropping the whole fold loses it, while using the
+        # whole fold double-counts the reconstructed members.
+        raw_ids = {str(row['id']) for row in owned}
+        fold = ClosedAssignmentFold()
+        for aid, contribution in self.item_contributions.entries.items():
+            if (contribution.item == wid and contribution.state != 'open'
+                    and aid not in raw_ids):
+                fold.add_contribution(contribution)
+        if not fold.part['count']:
+            return None
+        retained = fold.finish()
+        # These are actual prior source pins, not hashes reconstructed from
+        # compact facts. add_contribution keeps detailsKnown false.
+        retained['detailFingerprint'] = part['detailFingerprint']
+        retained['assignmentFingerprint'] = part['assignmentFingerprint']
+        return retained
 
     def update_closed_assignment_contribution(self, row, *, allow_pending=False):
         """Apply an ordered projection to a released, still-closed contributor.
