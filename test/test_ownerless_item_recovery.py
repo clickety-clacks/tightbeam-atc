@@ -351,7 +351,25 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
                 self.service._handle(*self.service.events.get(timeout=5))
                 self.service._publish()
                 self.assertTrue(self.service.assignment_holds.assignments[row['id']].conflict)
+                before_close_calls = list(self.gateway.calls)
                 self.service._handle(*self.service.events.get(timeout=5))
+                self.settle()
+                # R36 section 3 / att_e33b4539; owner mapping art_637a203a.
+                # The next close resolves ordering but has no identified P.
+                held = self.service.assignment_holds.assignments[row['id']]
+                self.assertFalse(held.conflict)
+                self.assertFalse(held.incomplete_contribution)
+                self.assertTrue(held.producer_recovery)
+                self.assertIsNone(held.producer)
+                self.assertEqual(before_close_calls, self.gateway.calls)
+                if unpublished:
+                    self.assertNotIn(row['workItemId'],
+                                     {item['id'] for item in self.service.current['items']})
+                else:
+                    self.assert_retained(self.item(baseline),
+                                         self.item(self.service.current), 1000)
+                # An existing covering refresh, not a notice-driven item chain.
+                self.service._refresh('assignments')
                 self.settle()
                 self.assertNotIn(row['id'], self.service.assignment_holds.assignments)
                 self.assertEqual(1, self.gateway.calls.count(('membership', row['workItemId'])))
@@ -402,7 +420,9 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
     def test_summary_eligibility_change_resolves_without_requiring_skipped_history(self):
         # Exercise the existing implicit summary mode, not a simulated change
         # to the pinned upstream version. Initially neither item has a summary.
-        self.service.version = None
+        # R7/R32 matched handshake; custodian mapping art_637a203a.
+        self.service._handle('ready', None)
+        self.settle()
         baseline, row = self.establish()
         original = deepcopy(self.gateway.rows['work-items', None])
         self.gateway.rows['work-items', None] = [
@@ -417,13 +437,7 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
         self.assertFalse(self.service._attest_activity_eligible('work'))
         self.assertNotIn(row['id'], self.service.assignment_holds.assignments)
         self.assertNotIn(('read', 'attests', row['id']), self.gateway.calls)
-        gateway = ItemReads()
-        gateway.rows = deepcopy(self.gateway.rows)
-        fresh = LiveService(gateway, workers=1)
-        self.addCleanup(fresh.stop)
-        fresh.connected = True
-        fresh.rebuild()
-        self.settle(fresh)
+        fresh = self.fresh()
         # The existing R21 winner-exit exception covers exactly these retained
         # session observations. R32 adds no item exception after resolution.
         assert_winner_exit_publication(self, fresh.current, self.service.current,
