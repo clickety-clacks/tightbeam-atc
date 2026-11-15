@@ -17,6 +17,7 @@ from test_service import summarized_work
 
 class OwnerlessItemRecoveryTest(unittest.TestCase):
     setUp = AssignmentHoldPublicationTest.setUp
+    bootstrap = AssignmentHoldPublicationTest.bootstrap
     settle = AssignmentHoldPublicationTest.settle
     item = AssignmentHoldPublicationTest.item
     notice = AssignmentHoldPublicationTest.notice
