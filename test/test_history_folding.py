@@ -1,6 +1,7 @@
 """History pages preserve board facts without retaining display payloads."""
 import sys
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
@@ -64,7 +65,13 @@ class HistoryFoldingTest(unittest.TestCase):
         self.assertFalse(inventory.complete)
         model.accept("attests", "task", Read(rows, True, 1_000_002, "fixture"))
         self.assertEqual(1000, model.summary("attests", "task")["count"])
-        self.assertFalse(inventory.payload(rows[0], at=1_000_003, source="feed", policy="immutable"))
+        before = deepcopy((inventory.folded, inventory.attest_frontier,
+                           inventory.fingerprint, inventory.data_revision,
+                           inventory.rows, inventory.observations))
+        self.assertTrue(inventory.payload(rows[0], at=1_000_003, source="feed", policy="immutable"))
+        self.assertEqual(before, (inventory.folded, inventory.attest_frontier,
+                                 inventory.fingerprint, inventory.data_revision,
+                                 inventory.rows, inventory.observations))
         self.assertEqual(1000, inventory.folded["count"])
 
     def test_paged_history_folds_before_requesting_the_next_page(self):

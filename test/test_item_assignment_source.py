@@ -99,27 +99,29 @@ class ItemAssignmentSourceTest(unittest.TestCase):
                 model.apply_assignment_projection(new, at=100, source='feed')
                 note = dict(id='new-attest', assignmentId='new', kind='progress',
                             bySession='author', ts=700, commitRefs=[{'commit': 'new'}])
-                model.accept('attests', 'new', Read([note], True, 100, 'fixture'))
-                model.capture_assignment_contributions()
-                if state == 'closed':
-                    new.update(state='closed', closedAt=800)
-                    model.apply_assignment_projection(new, at=100, source='feed')
-                calls = list(self.calls)
-                snapshot.folded.preserve_assignments(model, set(), arrivals={'new'})
-                self.assertEqual(calls, self.calls)
-                self.assertEqual(0, snapshot.folded.contributions['new'].order)
-                self.assertEqual(state, snapshot.folded.contributions['new'].state)
-                self.assertEqual(1, snapshot.folded.contributions['new'].attests.count)
-                self.assertNotIn('new', snapshot.folded.assignment_fingerprints)
-                expected = deepcopy(model)
                 self.assignments.insert(0, new)
                 self.attests['new'] = [note]
-                expected.replace_item_assignments('work', self.result())
-                model.replace_item_assignments('work', snapshot)
-                assert_publication_equal(self, expected.snapshot(1000), model.snapshot(1000),
-                                         'r29-item-created-after-snapshot-' + state)
-                self.assignments.pop(0)
-                self.attests.pop('new')
+                try:
+                    model.accept('attests', 'new', self.gateway.read_current('attests', 'new'))
+                    model.capture_assignment_contributions()
+                    if state == 'closed':
+                        new.update(state='closed', closedAt=800)
+                        model.apply_assignment_projection(new, at=100, source='feed')
+                    calls = list(self.calls)
+                    snapshot.folded.preserve_assignments(model, set(), arrivals={'new'})
+                    self.assertEqual(calls, self.calls)
+                    self.assertEqual(0, snapshot.folded.contributions['new'].order)
+                    self.assertEqual(state, snapshot.folded.contributions['new'].state)
+                    self.assertEqual(1, snapshot.folded.contributions['new'].attests.count)
+                    self.assertNotIn('new', snapshot.folded.assignment_fingerprints)
+                    expected = deepcopy(model)
+                    expected.replace_item_assignments('work', self.result())
+                    model.replace_item_assignments('work', snapshot)
+                    assert_publication_equal(self, expected.snapshot(1000), model.snapshot(1000),
+                                             'r29-item-created-after-snapshot-' + state)
+                finally:
+                    self.assignments.pop(0)
+                    self.attests.pop('new')
 
     def test_selected_turns_finish_and_release_raw_results_before_first_attest(self):
         order, raw_refs = [], []

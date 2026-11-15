@@ -158,6 +158,12 @@ def assert_replay_current(case, service, baseline, label):
     full = json.loads(service.event.split(b"data: ", 1)[1])
     case.assertEqual(service.current, full)
     result = service.next_event(baseline["revision"], timeout=0)
+    if baseline["revision"] == service.revision:
+        case.assertIsNone(result)
+        capture_publication(full, baseline, label,
+                            replayBaseline=baseline, replayFrames=[])
+        case.assertEqual(full, baseline)
+        return
     case.assertIsNotNone(result)
     revision, wire = result
     frames = []
