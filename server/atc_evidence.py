@@ -345,7 +345,6 @@ class HistoryInventory(Inventory):
             for name in ("latest", "authors", "assignmentActivity"):
                 for key, value in fold.summary[name].items():
                     previous[name][key] = max(previous[name].get(key, 0), value)
-            previous["authorIds"].update(fold.summary["authorIds"])
             # Current rows can still establish a newer turn state or mark.
             current = summarize(self.resource, self.rows.values(), now=at)
             previous["live"] = current["live"]

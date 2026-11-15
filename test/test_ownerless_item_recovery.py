@@ -24,6 +24,7 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
     assert_retained = AssignmentHoldPublicationTest.assert_retained
     assert_held_publication = AssignmentHoldPublicationTest.assert_held_publication
     queued_source = AssignmentHoldPublicationTest.queued_source
+    set_source_assignment = AssignmentHoldPublicationTest.set_source_assignment
 
     def establish(self, *, unpublished=False):
         baseline = deepcopy(self.service.current)
@@ -88,17 +89,46 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
                 if unpublished:
                     self.service.stop()
                     self.setUp()
-                _baseline, row = self.establish(unpublished=unpublished)
+                baseline, row = self.establish(unpublished=unpublished)
                 before = deepcopy(self.service.current)
                 calls = list(self.gateway.calls)
                 for incomplete in (row, dict(row, state='open', closedAt=None)):
+                    self.set_source_assignment(incomplete)
                     self.assertTrue(self.service.change(self.notice(incomplete)))
+                    self.assertEqual(incomplete,
+                        self.service.model.inventory('assignments').rows[row['id']])
                     self.service._publish()
+                    self.assertTrue(self.service.assignment_holds.assignments[row['id']].incomplete_contribution)
+                    self.assert_held_publication(baseline,
+                        'r32-incomplete-notice-' + row['workItemId'] + '-' + incomplete['state'])
                 self.assertEqual(calls, self.gateway.calls)
                 self.assertEqual({}, self.service.reads.pending)
-                self.assertNotIn(row['id'], self.service.model.item_contributions.entries)
-                assert_publication_equal(self, before, self.service.current,
-                                         'r32-incomplete-notice-' + row['workItemId'])
+                # Membership can now contribute internally, but cannot claim
+                # complete attest evidence or release the published-item hold.
+                contribution = self.service.model.item_contributions.entries.get(row['id'])
+                if contribution is not None:
+                    self.assertFalse(contribution.evidence.complete)
+                assert_replay_current(self, self.service, before,
+                                      'r32-incomplete-notice-replay-' + row['workItemId'])
+
+    def test_incomplete_next_assignment_notice_resolves_only_conflict_cause(self):
+        baseline, row = self.establish()
+        self.service.assignment_holds.hold(row['id'], row['workItemId'],
+            self.item(baseline), at=1000,
+            after_delivery=self.service.assignment_delivery_consumed)
+        self.assertTrue(self.service.assignment_holds.assignments[row['id']].conflict)
+        opened = dict(row, state='open', closedAt=None)
+        self.set_source_assignment(opened)
+        calls = list(self.gateway.calls)
+        self.assertTrue(self.service.change(self.notice(opened)))
+        held = self.service.assignment_holds.assignments[row['id']]
+        self.assertFalse(held.conflict)
+        self.assertTrue(held.incomplete_contribution)
+        self.assertEqual(opened, self.service.model.inventory('assignments').rows[row['id']])
+        self.service._publish()
+        self.assertEqual(calls, self.gateway.calls)
+        self.assertEqual({}, self.service.reads.pending)
+        self.assert_held_publication(baseline, 'r32-next-notice-clears-only-conflict')
 
     def test_existing_covering_read_resolves_published_and_absent_items(self):
         for unpublished in (False, True):
@@ -255,6 +285,15 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
                                       'r32-conflict-next-notice-replay-' + row['workItemId'])
 
     def test_ownerless_notice_replays_into_queued_first_contribution_snapshot(self):
+        self.assert_first_snapshot_replay()
+
+    def test_refs_owner_notice_replays_into_queued_first_contribution_snapshot(self):
+        self.assert_first_snapshot_replay(owner_field='refs')
+
+    def test_payload_owner_notice_replays_into_queued_first_contribution_snapshot(self):
+        self.assert_first_snapshot_replay(owner_field='payload')
+
+    def assert_first_snapshot_replay(self, *, owner_field=None):
         baseline, row = self.establish()
         event = self.queued_source('item-assignment-source', row['workItemId'])
         late = dict.fromkeys(ATTEST_FIELDS) | dict(
@@ -262,22 +301,26 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
             bySession='author', ts=960000, commitRefs=[])
         self.gateway.rows['attests', row['id']].append(deepcopy(late))
         self.assertNotIn(row['id'], self.service.model.item_contributions.entries)
-        self.service.change(dict(resource='attests', op='upsert', **{'class': 'attest.created'},
-            refs={'attestId': late['id'], 'assignmentId': row['id']}, payload=late))
+        notice = dict(resource='attests', op='upsert', **{'class': 'attest.created'},
+            refs={'attestId': late['id'], 'assignmentId': row['id']}, payload=deepcopy(late))
+        if owner_field is not None:
+            notice[owner_field]['workItemId'] = row['workItemId']
+        self.assertTrue(self.service.change(notice))
         self.assertEqual(1, self.service.reads.item_flights[row['workItemId']].notice_count)
         self.assertNotIn(row['id'], self.service.model.item_contributions.entries)
+        self.assertTrue(self.service.assignment_holds.assignments[row['id']].incomplete_contribution)
         self.service._handle(*event)
         self.assertEqual(2, self.service.model.item_contributions.entries[row['id']].attests.count)
         self.settle()
         self.assertNotIn(row['id'], self.service.assignment_holds.assignments)
         self.assertEqual(1, self.gateway.calls.count(('membership', row['workItemId'])))
-        self.assertEqual(2, self.service.reads.attest_owner_attempts)
+        self.assertEqual(2 if owner_field is None else 1, self.service.reads.attest_owner_attempts)
         self.assertEqual(0, self.service.reads.epoch_discards)
         self.assertEqual({}, self.service.reads.item_flights)
         self.assertEqual(960000, self.service.model.session_activity['author'])
         assert_publication_equal(self, self.fresh().current, self.service.current,
-                                 'r32-ownerless-first-snapshot-replay')
-        assert_replay_current(self, self.service, baseline, 'r32-ownerless-first-snapshot-sse')
+                                 'r32-first-snapshot-replay-' + str(owner_field))
+        assert_replay_current(self, self.service, baseline, 'r32-first-snapshot-sse-' + str(owner_field))
 
     def test_summary_eligibility_change_resolves_without_requiring_skipped_history(self):
         # Exercise the existing implicit summary mode, not a simulated change

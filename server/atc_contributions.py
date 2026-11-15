@@ -98,7 +98,6 @@ class AttestContribution(NamedTuple):
     verdicts: tuple
     latest: tuple
     authors: tuple
-    author_ids: tuple
     refs: tuple
     activity: int | None
     frontier: AttestFrontier
@@ -107,7 +106,7 @@ class AttestContribution(NamedTuple):
     def capture(cls, summary, frontier):
         return cls(summary['count'], tuple(summary['kinds'].items()),
                    tuple(summary['verdicts'].items()), tuple(summary['latest'].items()),
-                   tuple(summary['authors'].items()), tuple(sorted(summary['authorIds'])),
+                   tuple(summary['authors'].items()),
                    tuple(deepcopy(summary['refs'])), summary['activity'], frontier)
 
     def summary(self):
@@ -119,7 +118,6 @@ class AttestContribution(NamedTuple):
         result['verdicts'].update(dict(self.verdicts))
         result['latest'].update(self.latest)
         result['authors'].update(self.authors)
-        result['authorIds'].update(self.author_ids)
         result['refs'].extend(deepcopy(self.refs))
         result['activity'] = result['recentActivity'] = self.activity
         return result
@@ -160,7 +158,6 @@ class AttestContribution(NamedTuple):
 
 class AssignmentContribution(NamedTuple):
     item: str
-    holder: str | None
     state: str
     opened_at: int | None
     closed_at: int | None
@@ -183,7 +180,7 @@ class AssignmentContribution(NamedTuple):
         # Correction text is never a published contribution. Preserve all
         # remaining current correction fields and their source order.
         corrections = cls.current_corrections(row.get('commitRefCorrections'))
-        return cls(row['workItemId'], row.get('holderKey'), row['state'],
+        return cls(row['workItemId'], row['state'],
                    row.get('openedAt'), row.get('closedAt'), row.get('effectKind'),
                    row.get('reviewsAssignmentId'), order, corrections,
                    AttestContribution.capture(inventory.folded, inventory.attest_frontier),
@@ -198,7 +195,7 @@ class AssignmentContribution(NamedTuple):
         correction list from an existing source read can replace that field.
         """
         fields = {
-            'item': 'workItemId', 'holder': 'holderKey', 'state': 'state',
+            'item': 'workItemId', 'state': 'state',
             'opened_at': 'openedAt', 'closed_at': 'closedAt',
             'effect': 'effectKind', 'reviews': 'reviewsAssignmentId',
         }

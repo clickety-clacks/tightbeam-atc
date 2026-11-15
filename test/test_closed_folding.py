@@ -100,7 +100,7 @@ class ClosedAssignmentFoldTest(unittest.TestCase):
         folded.release_session_histories({'author'})
         self.assertEqual(before, folded.snapshot(1000))
         part = folded.closed_items['work']
-        self.assertEqual({'author', 'other'}, part['summary']['authorIds'])
+        self.assertEqual({'author': 10, 'other': 30}, part['summary']['authors'])
         self.assertIn('other', part['summary']['authors'])
         self.assertEqual(part['summary']['authors']['other'], folded.session_activity['other'])
         self.assertEqual(90, folded.item_activity()['work'])

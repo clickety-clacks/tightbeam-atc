@@ -29,7 +29,7 @@ def summarize(resource, rows, *, into=None, now=None):
     ``now`` selects the current display window; omitted for full-load callers.
     """
     result = into if into is not None else {"count": 0, "kinds": Counter(), "verdicts": Counter(), "latest": {},
-              "authors": {}, "authorIds": set(), "refs": [], "activity": None,
+              "authors": {}, "refs": [], "activity": None,
               "live": [], "marks": [], "recentActivity": None, "assignmentActivity": {}}
     for row in rows:
         result["count"] += 1
@@ -42,7 +42,6 @@ def summarize(resource, rows, *, into=None, now=None):
                 result["latest"][verdict] = max(result["latest"].get(verdict, 0), row["ts"])
             author, at = row.get("bySession"), row.get("ts")
             if author:
-                result["authorIds"].add(author)
                 if isinstance(at, (int, float)):
                     result["authors"][author] = max(result["authors"].get(author, 0), at)
             result["refs"].extend(row.get("commitRefs") or [])

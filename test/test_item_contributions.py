@@ -41,7 +41,6 @@ class ItemContributionsTest(unittest.TestCase):
                          last.corrections)
         self.assertNotIn('discard', repr(entries))
         self.assertEqual(60, last.closed_at)
-        self.assertEqual('other', last.holder)
 
     def test_assignment_close_and_reopen_keep_existing_attest_and_correction_facts(self):
         original = self.entries()['last']
@@ -60,7 +59,6 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertIsNone(reopened.closed_at)
         self.assertIs(original.attests, reopened.attests)
         self.assertEqual(original.order, reopened.order)
-        self.assertEqual(original.holder, reopened.holder)
         self.assertEqual(original.corrections, reopened.corrections)
 
     def test_assignment_source_correction_replaces_only_current_correction_field(self):
@@ -406,6 +404,25 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual(list(prior.corrections),
                          model.inventory('assignments').rows['last']['commitRefCorrections'])
         self.assertEqual(2, model.closed_items['work']['count'])
+
+    def test_deferred_contribution_keeps_mutable_row_and_retired_holder_visibility(self):
+        model = ClosedAssignmentFoldTest().model()
+        model.fold_closed_assignments()
+        model.inventory('sessions').rows['other']['state'] = 'retired'
+        self.assertNotIn('other', {row['sessionKey'] for row in model.active_sessions()})
+        original_contributions = dict(model.item_contributions.entries)
+        original_inventories = set(model.inventories)
+        row = dict(id='missing-history', workItemId='work', state='closed',
+                   holderKey='other', openedAt=100, closedAt=200, effectKind='code')
+        for state in ('closed', 'open', 'closed'):
+            row = dict(row, state=state, closedAt=None if state == 'open' else 200)
+            self.assertEqual(set(), model.apply_assignment_projection(
+                row, at=1100, source='feed', allow_pending=True, defer_contribution=True))
+            self.assertEqual(row, model.inventory('assignments').rows[row['id']])
+            self.assertEqual(state == 'open',
+                             'other' in {value['sessionKey'] for value in model.active_sessions()})
+            self.assertEqual(original_contributions, model.item_contributions.entries)
+            self.assertEqual(original_inventories, set(model.inventories))
 
     def test_assignment_projection_does_not_complete_a_partial_item_source(self):
         from copy import deepcopy

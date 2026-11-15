@@ -46,7 +46,6 @@ class AttestReplayTest(unittest.TestCase):
                 # Author-map insertion order is not a published ordering.
                 self.assertEqual(fresh.count, replayed.count)
                 self.assertEqual(dict(fresh.authors), dict(replayed.authors))
-                self.assertEqual(fresh.author_ids, replayed.author_ids)
                 self.assertEqual(fresh.kinds, replayed.kinds)
                 self.assertEqual(fresh.verdicts, replayed.verdicts)
                 self.assertEqual(fresh.latest, replayed.latest)

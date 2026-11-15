@@ -1925,7 +1925,7 @@ class LiveService:
             key = None
         self.reads.schedule(resource, scope, key, priority=True)
 
-    def _apply_assignment_notice(self, notice, key, payload):
+    def _apply_assignment_notice(self, notice, key, payload, *, defer_contribution=False):
         if (notice.get("op") != "upsert" or not ASSIGNMENT_FIELDS <= payload.keys()
                 or str(payload["id"]) != str(key)
                 or notice.get("class") not in {
@@ -1943,9 +1943,15 @@ class LiveService:
         # replacement. Valid notices therefore need neither epoch changes nor
         # item rereads, including while a failed source is waiting for retry.
         released = self.model.apply_assignment_projection(
-            payload, at=now_ms(), source="feed:" + notice["class"], allow_pending=True)
+            payload, at=now_ms(), source="feed:" + notice["class"], allow_pending=True,
+            defer_contribution=defer_contribution)
         if released is None:
             return False
+        if defer_contribution:
+            # R32 keeps publication held, not the delivered assignment row.
+            # Discovery must not turn this incomplete notice into extra reads.
+            self.metrics["payloads"] += 1
+            return True
         # Closing does not cancel an independently required confirmation,
         # including a refresh of previously complete facts. Its existing
         # scoped consumer applies attest facts to the current closed/reopened
@@ -1961,6 +1967,31 @@ class LiveService:
         self._discover_assignment_sessions((payload,))
         self._discover_histories()
         self._ensure_retired_activity()
+        return True
+
+    def _buffer_attest_notice(self, notice, key, scope, payload, *, owner=None):
+        """Preserve a delivered full notice in already-open snapshot flights."""
+        if (notice.get("op") != "upsert"
+                or notice.get("class") not in CLASSES["attests"]
+                or self.policies.get("attests") != "immutable"
+                or not set(ATTEST_FIELDS) <= payload.keys()
+                or str(payload["id"]) != str(key)
+                or str(payload["assignmentId"]) != str(scope)):
+            return False
+        refs = notice.get('refs') or {}
+        if owner is not None and any(
+                'workItemId' in value and value['workItemId'] != owner
+                for value in (payload, refs)):
+            return False
+        row = attest_row(payload)
+        flights = (self.reads.item_flights.values() if owner is None else
+                   (self.reads.item_flights.get(owner),))
+        for flight in flights:
+            if flight is not None:
+                flight.notice(str(scope), row)
+        scoped_flight = self.reads.attest_flights.get(str(scope))
+        if scoped_flight is not None:
+            scoped_flight.notice(str(scope), row)
         return True
 
     def _apply_contribution_attest_notice(self, notice, key, scope, payload):
@@ -1988,12 +2019,7 @@ class LiveService:
             # contract as fresh load. Its notice cannot make it eligible.
             return True
         row = attest_row(payload)
-        flight = self.reads.item_flights.get(owner)
-        if flight is not None:
-            flight.notice(str(scope), row)
-        scoped_flight = self.reads.attest_flights.get(str(scope))
-        if scoped_flight is not None:
-            scoped_flight.notice(str(scope), row)
+        self._buffer_attest_notice(notice, key, scope, payload, owner=owner)
         assignment = self.model.inventory('assignments').rows.get(str(scope))
         if assignment is not None:
             if assignment.get('workItemId') != owner:
@@ -2043,6 +2069,7 @@ class LiveService:
             scope = None
         if resource == 'assignments':
             held = self.assignment_holds.assignments.get(str(key))
+            defer_contribution = False
             if (held is not None and held.conflict and assignment_delivery is not None
                     and assignment_delivery <= held.after_delivery):
                 # A queued establishing notice is the other side of the
@@ -2058,11 +2085,9 @@ class LiveService:
                 history_complete = (inventory is not None and inventory.complete
                                     and not inventory.needs_source_read)
                 if not existing_complete and not history_complete:
-                    # A mutable assignment projection carries no attest
-                    # history. Do not turn it into a partial contribution or
-                    # trigger discovery to make this hold's notice complete.
-                    return True
-            if self._apply_assignment_notice(notice, key, payload):
+                    defer_contribution = True
+            if self._apply_assignment_notice(notice, key, payload,
+                                             defer_contribution=defer_contribution):
                 if assignment_delivery is not None:
                     self.assignment_holds.resolve_notice(str(key), assignment_delivery)
                 return True
@@ -2089,22 +2114,9 @@ class LiveService:
             else:
                 activity_owner, owner_known = None, False
             if not owner_known:
-                if (notice.get('class') in CLASSES['attests']
-                        and self.policies.get('attests') == 'immutable'
-                        and set(ATTEST_FIELDS) <= payload.keys()
-                        and str(payload['id']) == str(key)):
-                    # First discovery can have an open contribution snapshot
-                    # before any current model projection establishes owner.
-                    # Preserve its delivered notice in that existing attempt;
-                    # replay uses the complete snapshot's eligibility/owner.
-                    # This neither creates a contribution nor applies activity
-                    # before the separate R20 ownership resolution.
-                    row = attest_row(payload)
-                    for flight in self.reads.item_flights.values():
-                        flight.notice(str(scope), row)
-                    scoped_flight = self.reads.attest_flights.get(str(scope))
-                    if scoped_flight is not None:
-                        scoped_flight.notice(str(scope), row)
+                # The existing flight establishes its own scope/owner. This
+                # does not create a contribution or apply unresolved activity.
+                self._buffer_attest_notice(notice, key, scope, payload)
                 return self._queue_attest_activity(str(scope), payload["bySession"], payload["ts"])
             if self._attest_activity_eligible(activity_owner):
                 self.model.fold_session_activity(payload["bySession"], payload["ts"], "attest", scope,
@@ -2118,6 +2130,10 @@ class LiveService:
         if resource == 'attests':
             held = self.assignment_holds.assignments.get(str(scope))
             if held is not None and held.incomplete_contribution:
+                # A known owner with no current contribution still needs
+                # replay of notices delivered after its complete snapshot.
+                # Keep the item held; only its existing source can complete it.
+                self._buffer_attest_notice(notice, key, scope, payload, owner=held.item)
                 return True
         owner = (payload.get("workItemId") or refs.get("workItemId") or
                  self.model.inventory("assignments").rows.get(

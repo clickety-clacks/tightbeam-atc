@@ -85,6 +85,35 @@ class SessionActivityFoldTest(unittest.TestCase):
                          model.session_activity_evidence["author"]["source"])
         self.assertNotIn("_retainedAt", model.session_activity_evidence["author"])
 
+    def test_equal_time_losing_attest_does_not_reconfirm_retained_turn_winner(self):
+        model = EvidenceModel()
+        model.fold_session_activity("author", 1000000, "turn", "author", self.facts())
+        model.release_turn_activity("author", 1050000)
+        for scope in ("first", "second", "first"):
+            model.fold_session_activity("author", 1000000, "attest", scope, self.facts())
+            record = model.session_activity_evidence["author"]
+            self.assertEqual(1050000, record["_retainedAt"])
+            self.assertEqual(["/api/sessions/author/turns", "attest", "turn"], record["source"])
+            facts = model.session_activity_facts("author", self.facts())
+            self.assertFalse(facts["complete"])
+            self.assertEqual("unconfirmed", facts["freshness"])
+            self.assertEqual(1050000, facts["unconfirmedSince"])
+        # The next strictly newer observation replaces the retained winner.
+        model.fold_session_activity("author", 1100000, "attest", "second", self.facts())
+        fresh = EvidenceModel()
+        for scope, timestamp in (("first", 1000000), ("second", 1100000)):
+            fresh.fold_session_activity("author", timestamp, "attest", scope, self.facts())
+        self.assertEqual(fresh.session_activity, model.session_activity)
+        self.assertEqual(fresh.session_activity_evidence, model.session_activity_evidence)
+
+    def test_newer_same_turn_source_reconfirms_retained_winner(self):
+        model = EvidenceModel()
+        model.fold_session_activity("author", 1000000, "turn", "author", self.facts())
+        model.release_turn_activity("author", 1050000)
+        model.fold_session_activity("author", 1100000, "turn", "author", self.facts())
+        self.assertNotIn("_retainedAt", model.session_activity_evidence["author"])
+        self.assertTrue(model.session_activity_facts("author", self.facts())["complete"])
+
     def test_only_complete_assignment_membership_can_establish_winner_exit(self):
         model = EvidenceModel()
         model.fold_session_activity("author", 1000000, "attest", "winner", self.facts())

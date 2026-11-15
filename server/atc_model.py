@@ -55,16 +55,12 @@ def fold_session_activity_record(values, records, session, timestamp, kind, scop
     kinds = {kind}
     winner = source
     winner_owner = owner if kind == "attest" else None
+    previous_source = None
     if previous is not None:
         kinds.update(s for s in previous["source"] if s in {"attest", "turn"})
         previous_source = next((s for s in previous["source"]
                                 if s not in {"attest", "turn"}), None)
         if previous_source is not None and previous_at is not None:
-            if ("_retainedAt" in previous and previous_source.startswith("/api/sessions/")
-                    and kind != "turn" and timestamp >= previous_at):
-                # A session has only its own turn source. Once that winner
-                # exits, a later attest cannot revive the exited turn kind.
-                kinds.discard("turn")
             if previous_at > timestamp:
                 winner = previous_source
                 winner_owner = previous.get("_owner")
@@ -72,12 +68,21 @@ def fold_session_activity_record(values, records, session, timestamp, kind, scop
                 winner = min(previous_source, source)
                 if winner != source:
                     winner_owner = previous.get("_owner")
+    retains_winner = (previous is not None and "_retainedAt" in previous
+                      and previous_at is not None and previous_at >= timestamp
+                      and winner == previous_source)
+    if (previous is not None and "_retainedAt" in previous
+            and previous_source is not None and previous_source.startswith("/api/sessions/")
+            and kind != "turn" and not retains_winner):
+        # Only replacement of the retained turn winner releases its kind.
+        # An equal-time losing attest cannot reconfirm that exited winner.
+        kinds.discard("turn")
     merged = combined_evidence(*(fact for fact in (previous, facts) if fact is not None))
     # combined_evidence retains its scalar confirmation semantics. Only
     # its per-scope source union is replaced by the fixed source contract.
     merged["source"] = sorted(kinds | {winner})
     merged["_owner"] = winner_owner
-    if previous and "_retainedAt" in previous and previous_at > timestamp:
+    if retains_winner:
         merged["_retainedAt"] = previous["_retainedAt"]
     latest = timestamp if previous_at is None else max(previous_at, timestamp)
     changed = previous_at != latest or previous != merged
@@ -144,7 +149,6 @@ class ClosedAssignmentFold:
         for field in ("latest", "authors"):
             for key, at in getattr(summary, field):
                 folded[field][key] = max(folded[field].get(key, 0), at)
-        folded["authorIds"].update(summary.author_ids)
         part["facts"] = combined_evidence(part["facts"], facts) if part["facts"] else combined_evidence(facts)
 
     def finish(self):
@@ -741,7 +745,8 @@ class EvidenceModel:
         self.details_revision += 1
         return True
 
-    def apply_assignment_projection(self, row, *, at, source, allow_pending=False):
+    def apply_assignment_projection(self, row, *, at, source, allow_pending=False,
+                                    defer_contribution=False):
         """Merge an ordered current assignment without reading item membership.
 
         This is the model commit seam, not a payload validator or an ordering
@@ -756,6 +761,26 @@ class EvidenceModel:
         if previous is not None and previous.item != wid:
             return None
         assignments = self.inventory("assignments")
+        if defer_contribution:
+            # A full mutable notice supplies membership/holder facts even
+            # while its attest contribution is incomplete. Keep the normal
+            # raw projection for active sessions and reconciliation scopes;
+            # the service retains the item's actual publication separately.
+            # Neither this row nor its evidence certifies the attest history.
+            incoming = dict(assignments.rows.get(aid, {}), **deepcopy(row))
+            if (previous is not None and "commitRefCorrections" not in incoming):
+                incoming["commitRefCorrections"] = deepcopy(list(previous.corrections))
+            changed = assignments.rows.get(aid) != incoming
+            assignments.rows[aid] = incoming
+            assignments.observations[aid] = dict(status="known", freshness="live",
+                observedAt=at, source=source, complete=True)
+            assignments.data_revision += 1
+            if previous is not None:
+                self.item_contributions.entries[aid] = previous.assignment_update(incoming)
+            if changed:
+                self.details_revision += 1
+            self._item_activity_parts.clear()
+            return set()
         self.capture_assignment_contributions(items={wid})
         previous = self.item_contributions.entries.get(aid)
         if previous is None and row["state"] != "open":
