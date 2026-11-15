@@ -75,6 +75,26 @@ class ClosedAssignmentFoldTest(unittest.TestCase):
         self.assertEqual({}, folded.live_assignment_items)
         self.assertEqual(baseline.snapshot(1000), folded.snapshot(1000))
 
+    def test_membership_refresh_preserves_current_turn_timing_and_removal_releases_it(self):
+        folded = self.model()
+        baseline = deepcopy(folded)
+        members = deepcopy(list(baseline.inventory('assignments').rows.values()))
+        folded.fold_closed_assignments()
+        for model in (baseline, folded):
+            self.read(model, 'assignments', deepcopy(members))
+        self.assertEqual(baseline.snapshot(1000), folded.snapshot(1000))
+        folded.fold_closed_assignments()
+        self.assertEqual(90, folded.item_activity()['work'])
+        self.assertEqual(baseline.snapshot(1000), folded.snapshot(1000))
+        # The maximum belongs to last, not permanently to the whole item.
+        for model in (baseline, folded):
+            self.read(model, 'assignments', [deepcopy(row) for row in members
+                                             if row['id'] != 'last'])
+        folded.fold_closed_assignments()
+        self.assertNotIn('last', folded.item_contributions.entries)
+        self.assertEqual(80, folded.item_activity()['work'])
+        self.assertEqual(baseline.snapshot(1000), folded.snapshot(1000))
+
     def test_closed_assignment_live_turn_finish_advances_item_after_source_release(self):
         for complete in (False, True):
             with self.subTest(complete=complete):

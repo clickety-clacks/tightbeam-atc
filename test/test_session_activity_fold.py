@@ -125,6 +125,22 @@ class SessionActivityFoldTest(unittest.TestCase):
         self.assertNotIn("_retainedAt", model.session_activity_evidence["author"])
         self.assertTrue(model.session_activity_facts("author", self.facts())["complete"])
 
+    def test_complete_returning_winner_reconfirms_but_equal_other_source_does_not(self):
+        model = EvidenceModel()
+        model.fold_session_activity('author', 950000, 'attest', 'winner', self.facts(), owner='item')
+        model.retain_exited_activity(set(), 1000000)
+        model.fold_session_activity('author', 950000, 'attest', 'z-other', self.facts(),
+                                    owner='other', reconfirmed=True)
+        self.assertIn('_retainedAt', model.session_activity_evidence['author'])
+        model.fold_session_activity('author', 950000, 'attest', 'winner',
+                                    self.facts(complete=False), owner='item', reconfirmed=True)
+        self.assertIn('_retainedAt', model.session_activity_evidence['author'])
+        model.fold_session_activity('author', 950000, 'attest', 'winner', self.facts(),
+                                    owner='item', reconfirmed=True)
+        self.assertNotIn('_retainedAt', model.session_activity_evidence['author'])
+        self.assertEqual(950000, model.session_activity['author'])
+        self.assertEqual(['cli:attests winner'], model.session_activity_evidence['author']['source'])
+
     def test_only_complete_assignment_membership_can_establish_winner_exit(self):
         model = EvidenceModel()
         model.fold_session_activity("author", 1000000, "attest", "winner", self.facts())

@@ -168,6 +168,7 @@ class AssignmentContribution(NamedTuple):
     attests: AttestContribution
     evidence: ContributionEvidence
     detail_fingerprint: str | None
+    turn_activity: int | None = None
 
     @staticmethod
     def current_corrections(rows):
