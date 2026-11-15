@@ -556,7 +556,13 @@ class LiveService:
             eligible_activity_items=eligible_activity_items))
         self._retain_unproven_removals(data, at)
         self._resolve_complete_contribution_holds()
-        data['items'] = self.assignment_holds.published_items(data['items'])
+        producer_items = self._held_producer_items()
+        for wid in set(producer_items.values()):
+            previous = next((item for item in self.current.get('items', ())
+                             if item['id'] == wid), None)
+            self.assignment_holds.items.setdefault(wid, previous)
+        data['items'] = self.assignment_holds.published_items(
+            data['items'], producer_items=producer_items)
         old_agents = {row["id"]: row for row in self.current.get("agents", [])}
         unresolved_activity = {}
         for pending in self.attest_activity_pending.values():
@@ -1341,8 +1347,23 @@ class LiveService:
                 continue
             self.assignment_holds.resolve_contribution(aid)
 
+    def _held_producer_items(self):
+        """Derive held P items from current source, never an ownership cache."""
+        result = {}
+        rows = self.model.inventory('assignments').rows
+        contributions = self.model.item_contributions.entries
+        for aid, held in self.assignment_holds.assignments.items():
+            if not held.producer_recovery or held.producer is None:
+                continue
+            row = rows.get(held.producer)
+            part = contributions.get(held.producer)
+            wid = row.get('workItemId') if row is not None else part.item if part else None
+            if wid in self.model.work_items():
+                result[aid] = wid
+        return result
+
     def _request_reviewed_producer(self, assignment, item, producer):
-        """R36: called only after applying a qualifying close projection.
+        """R36 applied close or R38 first-discovery close identifying P.
 
         This condition is distinct from mutable ordering and missing attest
         contribution holds. Neither a later A notice nor an attest confirmation
@@ -1564,22 +1585,29 @@ class LiveService:
         await their own complete replacement. Complete absence otherwise has
         the same resolving authority as a present clean assignment row.
         """
+        producer_items = self._held_producer_items()
         for aid, held in tuple(self.assignment_holds.assignments.items()):
             if (aid not in conflicts and held.item not in excluded_items
                     and (item is None or held.item == item)):
                 self.assignment_holds.resolve(aid)
-                if (held.producer_recovery and aid not in producer_uncovered
-                        and held.producer not in conflicts
-                        and (item is None or held.producer is None
-                             or held.producer in covered_producers)):
-                    self.assignment_holds.resolve_producer(aid)
-                    if held.producer is not None and not any(
-                            value.producer_recovery and value.producer == held.producer
-                            for value in self.assignment_holds.assignments.values()):
-                        # A scheduled covering source may beat the targeted
-                        # lookup. Drop its pending/retry state; an active result
-                        # is discarded by its no-waiter consumer when delivered.
-                        self._forget_scopes({('reviewed-producer', held.producer)})
+            producer_covered = (
+                producer_items.get(aid, held.item) not in excluded_items
+                if item is None else
+                (held.producer in covered_producers if held.producer is not None
+                 else held.item == item))
+            if (held.producer_recovery and aid not in conflicts
+                    and aid not in producer_uncovered and held.producer not in conflicts
+                    and producer_covered):
+                # A complete P-item read covers P even when A belongs to a
+                # different item. It does not resolve A's independent causes.
+                self.assignment_holds.resolve_producer(aid)
+                if held.producer is not None and not any(
+                        value.producer_recovery and value.producer == held.producer
+                        for value in self.assignment_holds.assignments.values()):
+                    # A scheduled covering source may beat the targeted
+                    # lookup. Drop its pending/retry state; an active result
+                    # is discarded by its no-waiter consumer when delivered.
+                    self._forget_scopes({('reviewed-producer', held.producer)})
 
     def _consume_read_done(self, value, assignment_flight=None):
         # R29 equality summaries survive queue delay and stay locked through
@@ -2274,6 +2302,11 @@ class LiveService:
                                   if item['id'] == wid), None)
                 self.assignment_holds.hold(str(key), wid, published, at=now_ms(),
                                            incomplete_contribution=True)
+                # R38 recovers P independently of the missing A contribution.
+                # Only this notice's actual identity can grant that read here.
+                identified = payload.get('reviewsAssignmentId')
+                if isinstance(identified, str) and identified:
+                    self._request_reviewed_producer(str(key), wid, identified)
                 return True
         if (resource == "attests" and notice.get("op") == "upsert"
                 and payload.get("kind") and payload.get("bySession")

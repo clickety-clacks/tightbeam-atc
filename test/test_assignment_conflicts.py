@@ -475,3 +475,41 @@ class AssignmentConflictsTest(unittest.TestCase):
         self.assertEqual([unrelated], holds.published_items([unrelated]))
         self.assertEqual({}, holds.assignments)
         self.assertEqual({}, holds.items)
+
+    def test_producer_item_prior_survives_other_cause_resolution_then_releases(self):
+        holds = AssignmentHolds()
+        old = {'id': 'producer-item', 'title': 'Prior producer', 'evidence': {
+            'assignments': dict(freshness='live', unconfirmedSince=None)}}
+        other = {'id': 'review-item', 'title': 'Prior review'}
+        current = [{'id': 'producer-item', 'title': 'New producer'},
+                   {'id': 'review-item', 'title': 'New review'}]
+        holds.hold('local', 'producer-item', old, at=100, incomplete_contribution=True)
+        holds.hold('review', 'review-item', other, at=200,
+                   producer_recovery=True, producer='p')
+        owners = {'review': 'producer-item'}  # current source-derived, not retained
+        self.assertEqual(100, holds.since('producer-item', producer_items=owners))
+        holds.resolve_contribution('local')
+        self.assertIs(old, holds.items['producer-item'])
+        rendered = holds.published_items(current, producer_items=owners)
+        self.assertEqual('Prior producer', rendered[0]['title'])
+        self.assertEqual(200, rendered[0]['evidence']['assignments']['unconfirmedSince'])
+        self.assertEqual('live', old['evidence']['assignments']['freshness'])
+        holds.resolve_producer('review')
+        self.assertFalse(holds.assignments)
+        self.assertFalse(holds.items)
+        self.assertEqual(current, holds.published_items(current))
+
+    def test_distinct_producer_prior_releases_when_its_item_leaves_board(self):
+        holds = AssignmentHolds()
+        prior = {'id': 'review-item', 'title': 'Prior review'}
+        holds.hold('review', 'review-item', prior, at=100,
+                   incomplete_contribution=True, producer_recovery=True, producer='p')
+        holds.items['producer-item'] = {'id': 'producer-item', 'title': 'Prior producer'}
+        rendered = holds.published_items([{'id': 'review-item', 'title': 'New review'}],
+                                        producer_items={'review': 'producer-item'})
+        self.assertEqual([prior], rendered)
+        self.assertNotIn('producer-item', holds.items)
+        self.assertTrue(holds.assignments['review'].incomplete_contribution)
+        holds.published_items([])
+        self.assertFalse(holds.items)
+        self.assertFalse(holds.assignments)

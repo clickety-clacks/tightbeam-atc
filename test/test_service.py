@@ -1200,7 +1200,7 @@ class ServiceRecoveryTest(unittest.TestCase):
                 if fact['freshness'] != 'stale':
                     fact['freshness'] = 'unconfirmed'
                 previous = fact.get('unconfirmedSince')
-                since = holds.since(wid)
+                since = holds.since(wid, producer_items=self.service._held_producer_items())
                 fact['unconfirmedSince'] = since if previous is None else min(previous, since)
             expected['items'] = [retained if item['id'] == wid else item
                                  for item in expected['items']]
@@ -1446,6 +1446,19 @@ class ServiceRecoveryTest(unittest.TestCase):
                     self.assertIsNone(self.service.assignment_holds.items['work'])
                     self.assertFalse(self.service.current['items'])
 
+                # R38 keeps the R32 completeness rule: a next mutable notice
+                # can apply, but cannot certify the missing attest history.
+                discovered.update(state='open', closedAt=None)
+                reopened = self._assignment_close_notice(discovered)
+                reopened['class'] = 'assignment.reopened'
+                self.assertTrue(self.service.change(reopened))
+                self.service._publish()
+                self.assertTrue(self.service.assignment_holds.assignments[
+                    discovered['id']].incomplete_contribution)
+                self.assertEqual([], self.gateway.calls)
+                self.assertFalse(self.service.reads.pending)
+                self._assert_producer_hold_publication(baseline, label + '-incomplete-next-notice')
+
                 # Explicit fixture delivery of an independently scheduled
                 # covering source; the notice must not schedule this read.
                 self.service._request_item_assignments('work')
@@ -1523,6 +1536,7 @@ class ServiceRecoveryTest(unittest.TestCase):
     def test_first_discovery_close_supplies_producer_identity_only_in_notice(self):
         # Source-shaped first discovery, separately labeled from fully loaded
         # recovery. No prior relation is erased to manufacture this case.
+        # R38 / PO att_3533a567: P recovery does not complete unapplied A.
         review, producer = self._producer_recovery_fixture()
         baseline = deepcopy(self.service.current)
         discovered = dict(review, id='discovered-review', openedAt=12,
@@ -1541,9 +1555,138 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.service._publish()
         self.assertEqual(1, self.gateway.calls.count(('detail', 'assignments', None, 'producer')))
         self.assertFalse([call for call in self.gateway.calls if call[0] == 'membership'])
+        held = self.service.assignment_holds.assignments['discovered-review']
+        self.assertTrue(held.incomplete_contribution)
+        self.assertFalse(held.producer_recovery)
+        self._assert_producer_hold_publication(baseline, 'r38-first-discovery-P-resolved-A-held')
+        self.assertFalse(self.service.reads.pending)
+        self.service._request_item_assignments('work')  # explicit existing covering source
+        self.drain()
+        self.service._publish()
         self.assertFalse(self.service.assignment_holds.assignments)
         self._assert_producer_recovery_fresh_and_replayed(
             baseline, 'r37-first-discovery-notice-only')
+
+    def test_first_discovery_shared_producer_on_distinct_item_recovers_independently(self):
+        # R38 / PO att_3533a567; owner agreement art_f1c12430.
+        # Actual source-shaped A notices, with no prior A relation removed.
+        from publication_assertions import assert_publication_equal
+        cases = ((True, 'closed', 'targeted'), (False, 'open', 'targeted'),
+                 (True, 'closed', 'retry'), (False, 'closed', 'covering'),
+                 (True, 'closed', 'restart'))
+        for published, state, resolver in cases:
+            with self.subTest(published=published, state=state, resolver=resolver):
+                self.gateway = PublishedReads()
+                review, producer = self._producer_recovery_fixture()
+                item = dict(self.gateway.rows['work-items', None][0],
+                            id='review-item', title='Review item')
+                self.gateway.rows['work-items', None].append(item)
+                self.service._refresh('work-items')
+                self.drain()
+                if published:
+                    self.service._publish()
+                baseline = deepcopy(self.service.current)
+                self.assertEqual(published, any(item['id'] == 'review-item'
+                                               for item in baseline['items']))
+                discovered = [dict(review, id=aid, workItemId='review-item',
+                    openedAt=12, state='closed', closedAt=17)
+                    for aid in ('discovered-one', 'discovered-two')]
+                for row in discovered:
+                    self.gateway.rows['assignments', None].append(row)
+                    self.gateway.rows['attests', row['id']] = []
+                producer.update(state=state, closedAt=16 if state == 'closed' else None)
+                self.gateway.calls.clear()
+                returned = []
+                original = self.gateway.detail
+                def captured(resource, key, scope=None):
+                    result = original(resource, key, scope)
+                    if key == 'producer':
+                        result.rows[0].pop('files', None)
+                        result.rows[0]['reopenings'] = []
+                        returned.append(result)
+                    return result
+                self.gateway.detail = captured
+                for row in discovered:
+                    self.assertTrue(self.service.change(self._assignment_close_notice(row)))
+                    self.assertNotIn(row['id'], self.service.model.inventory('assignments').rows)
+                    self.assertNotIn(row['id'], self.service.model.item_contributions.entries)
+                if resolver == 'retry':
+                    # A later incomplete reopen supplies A1's mutable facts,
+                    # not its attest completeness. The source then closes A1
+                    # again before that next close is delivered. Its retained
+                    # scope and shared P are two distinct held scopes.
+                    discovered[0].update(state='open', closedAt=None)
+                    reopened = self._assignment_close_notice(discovered[0])
+                    reopened['class'] = 'assignment.reopened'
+                    self.assertTrue(self.service.change(reopened))
+                    self.assertTrue(self.service.assignment_holds.assignments[
+                        discovered[0]['id']].incomplete_contribution)
+                    discovered[0].update(state='closed', closedAt=18)
+                job = ('reviewed-producer', 'producer', None)
+                self.assertEqual({job}, set(self.service.reads.pending))
+                self.assertEqual([], self.gateway.calls)
+                self.service._publish()
+                label = 'r38-distinct-' + str(published) + '-' + state + '-' + resolver
+                deltas, _fresh = self._assert_producer_hold_publication(baseline, label + '-pending')
+                expected_scopes = (1 if state == 'closed' else 0) + (1 if resolver == 'retry' else 0)
+                self.assertEqual(expected_scopes, deltas['historyScopes'])
+                self.assertEqual(expected_scopes, deltas['active.scopeCount'])
+                self.assertIn('work', self.service.assignment_holds.items)
+                self.assertIn('review-item', self.service.assignment_holds.items)
+                if resolver != 'targeted':
+                    def failed(resource, key, scope=None):
+                        result = captured(resource, key, scope)
+                        if key == 'producer':
+                            result.complete = False
+                            result.error = 'TimeoutError'
+                        return result
+                    with patch.object(self.gateway, 'detail', side_effect=failed):
+                        self.drain()
+                    self.service._publish()
+                    failed_deltas, fresh = self._assert_producer_hold_publication(baseline, label + '-failed')
+                    self.assertEqual(deltas, failed_deltas)
+                    self.assertIn(job, self.service.read_retries)
+                    self.assertEqual([('detail', 'assignments', None, 'producer')], self.gateway.calls)
+                    self.assertTrue(all(not value.rows for value in returned))
+                    if resolver == 'restart':
+                        restarted = LiveService(self.gateway)
+                        self.addCleanup(restarted.stop)
+                        restarted._handle('ready', self.service.version)
+                        self.drain(restarted)
+                        restarted._publish()
+                        self.assertFalse(restarted.assignment_holds.assignments)
+                        assert_publication_equal(self, fresh.current, restarted.current, label + '-restart')
+                        continue
+                    if resolver == 'covering':
+                        # An existing independently scheduled P-item source
+                        # resolves P, but is not a complete source for A's item.
+                        self.service._request_item_assignments('work')
+                    else:
+                        _, priority = self.service.read_retries[job]
+                        self.service.read_retries[job] = (time.monotonic() - 1, priority)
+                        self.service._retry_incomplete_reads()
+                self.drain()
+                self.service._publish()
+                self.assertTrue(all(not value.rows for value in returned))
+                for row in discovered:
+                    held = self.service.assignment_holds.assignments[row['id']]
+                    self.assertTrue(held.incomplete_contribution)
+                    self.assertFalse(held.producer_recovery)
+                self.assertNotIn('work', self.service.assignment_holds.items)
+                self.assertIn('review-item', self.service.assignment_holds.items)
+                self.assertEqual(state, self.service.model.item_contributions.entries['producer'].state)
+                self.assertEqual(1 if resolver == 'covering' else 0,
+                                 len([call for call in self.gateway.calls if call[0] == 'membership']))
+                remaining, _fresh = self._assert_producer_hold_publication(
+                    baseline, label + '-P-resolved-A-held')
+                self.assertEqual(1 if resolver == 'retry' else 0, remaining['historyScopes'])
+                self.assertEqual(1 if resolver == 'retry' else 0, remaining['active.scopeCount'])
+                self.service._request_item_assignments('review-item')  # existing A covering source
+                self.drain()
+                self.service._publish()
+                self.assertFalse(self.service.assignment_holds.assignments)
+                self.assertFalse(self.service.assignment_holds.items)
+                self._assert_producer_recovery_fresh_and_replayed(baseline, label + '-all-resolved')
 
     def test_reviewed_producer_service_coalesces_active_and_queued_lookup_and_discards_rows(self):
         review, producer = self._producer_recovery_fixture()

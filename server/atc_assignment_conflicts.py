@@ -207,8 +207,14 @@ class AssignmentHolds:
             self.assignments[assignment] = remaining
             return True
         del self.assignments[assignment]
-        if not any(value.item == previous.item for value in self.assignments.values()):
-            self.items.pop(previous.item)
+        if not self.assignments:
+            self.items.clear()
+        elif not any(value.producer_recovery for value in self.assignments.values()):
+            held_items = {value.item for value in self.assignments.values()}
+            self.items = {item: prior for item, prior in self.items.items() if item in held_items}
+        # While another P recovery remains, its item can equal this A's item.
+        # Publication derives those owners from current source and prunes the
+        # shared prior frames atomically; no persistent owner map is needed.
         return True
 
     def resolve_notice(self, assignment, delivery):
@@ -222,11 +228,13 @@ class AssignmentHolds:
             if held.item not in items:
                 self._resolve(assignment, conflict=True, contribution=True, producer=True)
 
-    def since(self, item):
-        return min((held.since for held in self.assignments.values() if held.item == item),
+    def since(self, item, *, producer_items=None):
+        producer_items = producer_items or {}
+        return min((held.since for aid, held in self.assignments.items()
+                    if held.item == item or producer_items.get(aid) == item),
                    default=None)
 
-    def published_items(self, items):
+    def published_items(self, items, *, producer_items=None):
         """Overlay only held items onto a new frame, without mutating old frames.
 
         The caller supplies the current published item set after its existing
@@ -234,7 +242,13 @@ class AssignmentHolds:
         board; it is not evidence that one failed source read removed it.
         This neither confirms nor resolves any retained assignment.
         """
-        self.retain_items({item['id'] for item in items})
+        visible = {item['id'] for item in items}
+        self.retain_items(visible)
+        producer_items = {aid: item for aid, item in (producer_items or {}).items()
+                          if aid in self.assignments and self.assignments[aid].producer_recovery
+                          and item in visible}
+        held_items = {held.item for held in self.assignments.values()} | set(producer_items.values())
+        self.items = {item: prior for item, prior in self.items.items() if item in held_items}
         result = []
         for item in items:
             if item['id'] not in self.items:
@@ -246,7 +260,7 @@ class AssignmentHolds:
                 # there is no visible evidence object to mark unconfirmed.
                 continue
             retained = deepcopy(previous)
-            since = self.since(item['id'])
+            since = self.since(item['id'], producer_items=producer_items)
             for fact in retained.get('evidence', {}).values():
                 if fact['freshness'] != 'stale':
                     fact['freshness'] = 'unconfirmed'
