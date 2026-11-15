@@ -2248,7 +2248,11 @@ class LiveService:
                                              defer_contribution=defer_contribution):
                 if assignment_delivery is not None:
                     self.assignment_holds.resolve_notice(str(key), assignment_delivery)
-                if notice.get('class') == 'assignment.closed' and payload.get('state') == 'closed':
+                if (notice.get('class') == 'assignment.closed' and payload.get('state') == 'closed'
+                        and (producer or payload.get('effectKind') == 'review')):
+                    # Ordinary non-review closes do not imply a hidden producer
+                    # change. Unknown-P recovery belongs only to a review;
+                    # an identified relation still uses either allowed source.
                     self._request_reviewed_producer(str(key), payload['workItemId'], producer)
                 return True
             if held is not None and held.incomplete_contribution:
