@@ -77,7 +77,7 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
         self.assertEqual(self.item(baseline, 'unaffected-item'),
                          self.item(self.service.current, 'unaffected-item'))
         differences, _fresh = self.assert_held_publication(baseline, 'r32-full-hold-' + wid)
-        # This case retains no unresolved history scope. R31 is not a blanket
+        # This case retains no unresolved history scope. R34 is not a blanket
         # metadata allowance for a missing-contribution hold.
         self.assertEqual({'historyScopes': 0, 'active.scopeCount': 0}, differences)
         assert_replay_current(self, self.service, baseline, 'r32-owner-hold-' + wid)
@@ -129,6 +129,70 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
         self.assertEqual(calls, self.gateway.calls)
         self.assertEqual({}, self.service.reads.pending)
         self.assert_held_publication(baseline, 'r32-next-notice-clears-only-conflict')
+
+    def test_held_open_and_closed_scope_metadata_is_exactly_explained_until_resolution(self):
+        for state in ('open', 'closed'):
+            for conflict in (False, True):
+                with self.subTest(state=state, conflict=conflict):
+                    if state != 'open' or conflict:
+                        self.service.stop()
+                        self.setUp()
+                    # Three confirmed inactive histories put the unchanged
+                    # sweep calculation exactly on its batch boundary. Their
+                    # old confirmation also prevents an invented minimum for A.
+                    self.service.scope_budget = 3
+                    self.gateway.rows['sessions', None].append(dict(
+                        sessionKey='quiet', state='active', displayName='Quiet'))
+                    self.service._refresh('sessions')
+                    self.settle()
+                    self.assertEqual(3, len(self.service._repeated_history_scopes()))
+                    baseline, row = self.establish()
+                    if conflict:
+                        self.service.assignment_holds.hold(row['id'], row['workItemId'],
+                            self.item(baseline), at=1000,
+                            after_delivery=self.service.assignment_delivery_consumed)
+                    row = dict(row, state=state, closedAt=None if state == 'open' else 200)
+                    self.set_source_assignment(row)
+                    calls = list(self.gateway.calls)
+                    self.assertTrue(self.service.change(self.notice(row)))
+                    self.service._publish()
+                    held = self.service.assignment_holds.assignments[row['id']]
+                    self.assertFalse(held.conflict)
+                    self.assertTrue(held.incomplete_contribution)
+                    self.assertEqual(calls, self.gateway.calls)
+                    self.assertEqual({}, self.service.reads.pending)
+                    label = 'r34-' + state + '-conflict-' + str(conflict)
+                    _, fresh = self.assert_held_publication(baseline, label)
+                    warm_meta = self.service.current['freshness']['reconciliation']
+                    fresh_meta = fresh.current['freshness']['reconciliation']
+                    if state == 'open':
+                        self.assertEqual(fresh_meta['historyScopes'], warm_meta['historyScopes'])
+                        self.assertEqual(fresh_meta['active']['scopeCount'], warm_meta['active']['scopeCount'])
+                        self.assertEqual(fresh_meta['active']['unconfirmedScopes'] + 1,
+                                         warm_meta['active']['unconfirmedScopes'])
+                        self.assertEqual(fresh_meta['active']['oldestConfirmedAt'],
+                                         warm_meta['active']['oldestConfirmedAt'])
+                        self.assertEqual(fresh_meta['estimatedSweepMs'], warm_meta['estimatedSweepMs'])
+                    else:
+                        self.assertEqual(fresh_meta['historyScopes'] + 1, warm_meta['historyScopes'])
+                        self.assertEqual(fresh_meta['history']['scopeCount'] + 1,
+                                         warm_meta['history']['scopeCount'])
+                        self.assertEqual(fresh_meta['history']['unconfirmedScopes'] + 1,
+                                         warm_meta['history']['unconfirmedScopes'])
+                        self.assertEqual(fresh_meta['history']['oldestConfirmedAt'],
+                                         warm_meta['history']['oldestConfirmedAt'])
+                        self.assertEqual(300000, fresh_meta['estimatedSweepMs'])
+                        self.assertEqual(600000, warm_meta['estimatedSweepMs'])
+                    assert_replay_current(self, self.service, baseline, label + '-held-replay')
+                    # Use the already-authorized complete covering consumer;
+                    # no hold-driven read or new resolver is introduced.
+                    self.service._request_item_assignments(row['workItemId'])
+                    self.settle()
+                    self.assertNotIn(row['id'], self.service.assignment_holds.assignments)
+                    self.assertEqual(1, self.gateway.calls.count(('membership', row['workItemId'])))
+                    assert_publication_equal(self, self.fresh().current, self.service.current,
+                                             label + '-resolved')
+                    assert_replay_current(self, self.service, baseline, label + '-resolved-replay')
 
     def test_existing_covering_read_resolves_published_and_absent_items(self):
         for unpublished in (False, True):

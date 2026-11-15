@@ -56,6 +56,74 @@ def assert_publication_equal(case, fresh, warm, label):
     case.assertEqual(normalized_fresh, normalized_warm)
 
 
+def held_scope_metadata(case, fresh, warm, label):
+    """R34: explain only eight fields from actual held scope identities.
+
+    Read each server's retained scopes and confirmation inputs separately.
+    Neither a hold count nor observed metadata supplies an arbitrary offset.
+    Return permitted values only after verifying their exact derivation.
+    """
+    held = {('attests', aid) for aid, hold in warm.assignment_holds.assignments.items()
+            if hold.conflict or hold.incomplete_contribution}
+    def inputs(service):
+        groups = {'historyScopes': set(service._history_scopes()),
+                  'active': set(service.backstop.active),
+                  'history': set(service._repeated_history_scopes())}
+        return {name: {scope: service.model.inventories[scope].confirmed_at
+                       for scope in scopes} for name, scopes in groups.items()}
+    cold, retained = inputs(fresh), inputs(warm)
+    capture_publication(fresh.current, warm.current, label + '-scope-evidence',
+        heldAssignments=sorted(aid for _, aid in held),
+        scopeAccounting={side: {name: [dict(scope=list(scope), confirmedAt=at)
+                                      for scope, at in sorted(scopes.items())]
+                                for name, scopes in groups.items()}
+                         for side, groups in (('fresh', cold), ('warm', retained))},
+        sweepInputs={side: dict(scopeBudget=service.scope_budget,
+                               rebuildInterval=service.rebuild_interval)
+                     for side, service in (('fresh', fresh), ('warm', warm))})
+    actual_cold = fresh.current['freshness']['reconciliation']
+    actual_warm = warm.current['freshness']['reconciliation']
+    permitted, deltas = {}, {}
+    for name in cold:
+        left, right = cold[name], retained[name]
+        case.assertEqual(set(left) - held, set(right) - held, name)
+        if name == 'historyScopes':
+            fields = {'historyScopes': (len(left), len(right))}
+        else:
+            case.assertEqual({s: at for s, at in left.items() if s not in held},
+                             {s: at for s, at in right.items() if s not in held}, name)
+            def oldest(scopes):
+                return min((at for at in scopes.values() if at is not None), default=None)
+            fields = {name + '.scopeCount': (len(left), len(right)),
+                      name + '.unconfirmedScopes': (sum(at is None for at in left.values()),
+                                                    sum(at is None for at in right.values())),
+                      name + '.oldestConfirmedAt': (oldest(left), oldest(right))}
+        for path, (expected_left, expected_right) in fields.items():
+            bits = path.split('.')
+            def value(metadata):
+                return metadata[bits[0]][bits[1]] if len(bits) == 2 else metadata[bits[0]]
+            case.assertEqual(expected_left, value(actual_cold), 'fresh ' + path)
+            case.assertEqual(expected_right, value(actual_warm), 'warm ' + path)
+            if not path.endswith('oldestConfirmedAt'):
+                def contribution(scopes):
+                    return sum(s in held and (not path.endswith('unconfirmedScopes') or at is None)
+                               for s, at in scopes.items())
+                delta = expected_right - expected_left
+                case.assertEqual(contribution(right) - contribution(left), delta, path)
+                case.assertLessEqual(abs(delta), len(held), path)
+                deltas[path] = delta
+            permitted[path] = expected_right
+    case.assertEqual(fresh.scope_budget, warm.scope_budget)
+    case.assertEqual(fresh.rebuild_interval, warm.rebuild_interval)
+    for service, groups, metadata in ((fresh, cold, actual_cold), (warm, retained, actual_warm)):
+        count = len(groups['history'])
+        estimate = ((count + service.scope_budget - 1) // service.scope_budget
+                    * service.rebuild_interval * 1000)
+        case.assertEqual(estimate, metadata['estimatedSweepMs'])
+    permitted['estimatedSweepMs'] = actual_warm['estimatedSweepMs']
+    return permitted, deltas
+
+
 def assert_winner_exit_publication(case, fresh, warm, label, affected):
     """R19 permits only the named session's retained observation/evidence."""
     normalized_fresh, normalized_warm = capture_publication(fresh, warm, label,

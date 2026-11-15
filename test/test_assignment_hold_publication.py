@@ -11,7 +11,8 @@ from atc_payloads import ASSIGNMENT_FIELDS
 from atc_service import LiveService
 from atc_upstream import ATTEST_FIELDS
 from test_item_assignment_retry import ItemReads
-from publication_assertions import assert_publication_equal, assert_replay_current, capture_publication
+from publication_assertions import (assert_publication_equal, assert_replay_current,
+                                    capture_publication, held_scope_metadata)
 
 
 class AssignmentHoldPublicationTest(unittest.TestCase):
@@ -73,7 +74,8 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
     def fresh(self):
         gateway = ItemReads()
         gateway.rows = deepcopy(self.gateway.rows)
-        service = LiveService(gateway, workers=1)
+        service = LiveService(gateway, workers=1, scope_budget=self.service.scope_budget,
+                              rebuild_interval=self.service.rebuild_interval)
         self.addCleanup(service.stop)
         service._handle('ready', {'version': '0.1.9', 'build': 2908, 'sha': '8433d22f'})
         self.settle(service)
@@ -92,36 +94,13 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         fresh = self.fresh()
         expected = deepcopy(fresh.current)
         holds = self.service.assignment_holds
-        scope_sets = {
-            'historyScopes': (set(self.service._history_scopes()), set(fresh._history_scopes())),
-            'active.scopeCount': (set(self.service.backstop.active), set(fresh.backstop.active)),
-        }
-        accounting = {name: dict(warm=sorted(warm), fresh=sorted(cold),
-                                retainedOnly=sorted(warm - cold), freshOnly=sorted(cold - warm))
-                      for name, (warm, cold) in scope_sets.items()}
-        # Capture actual complete frames and identity accounting before any
-        # assertion or adjustment. No field is removed from the evidence.
-        capture_publication(fresh.current, self.service.current, label + '-scope-evidence',
-                            heldAssignments=sorted(holds.assignments), scopeAccounting=accounting)
-        permitted = {('attests', aid) for aid in holds.assignments}
-        differences = {}
-        for name, (warm, cold) in scope_sets.items():
-            self.assertEqual(set(), cold - warm, name)
-            self.assertTrue(warm - cold <= permitted, (name, accounting[name]))
-            self.assertLessEqual(len(warm - cold), len(holds.assignments), name)
-            left = expected['freshness']['reconciliation']
-            right = self.service.current['freshness']['reconciliation']
-            if name == 'active.scopeCount':
-                left, right, field = left['active'], right['active'], 'scopeCount'
-            else:
-                field = name
-            self.assertEqual(len(cold), left[field], name)
-            self.assertEqual(len(warm), right[field], name)
-            differences[name] = len(warm - cold)
-            self.assertEqual(differences[name], right[field] - left[field], name)
-            # R31 permits exactly this scope-derived difference, never a
-            # blanket offset for every hold or another reconciliation field.
-            left[field] += differences[name]
+        permitted, deltas = held_scope_metadata(self, fresh, self.service, label)
+        for path, value in permitted.items():
+            bits = path.split('.')
+            target = expected['freshness']['reconciliation']
+            if len(bits) == 2:
+                target = target[bits[0]]
+            target[bits[-1]] = value
         for wid, actual_prior in holds.items.items():
             if actual_prior is None:
                 self.assertNotIn(wid, {item['id'] for item in baseline['items']})
@@ -137,10 +116,10 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
                 fact['unconfirmedSince'] = since if prior is None else min(prior, since)
             expected['items'] = [retained if item['id'] == wid else item
                                  for item in expected['items']]
-        # R30/R31 allow only held item publication/absence and the two exact
-        # counts above. Agents, links, health and all other fields stay exact.
+        # Only the eight explained R34 paths and the existing held item
+        # publication/absence may differ. All other fields remain exact.
         assert_publication_equal(self, expected, self.service.current, label)
-        return differences, fresh
+        return {path: deltas[path] for path in ('historyScopes', 'active.scopeCount')}, fresh
 
     def first_discovery(self, resource, *, unpublished, resolution='notice'):
         baseline = deepcopy(self.service.current)
