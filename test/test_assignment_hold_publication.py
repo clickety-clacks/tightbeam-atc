@@ -26,11 +26,8 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.gateway.rows['work-items', None].append(other)
         self.service = LiveService(self.gateway, workers=1)
         self.addCleanup(self.service.stop)
-        self.service._handle('ready', {'version': '0.1.9', 'build': 2908, 'sha': '8433d22f'})
-        while self.service.reads.pending or self.service.reads.active:
-            self.service.reads.pump()
-            self.service._handle(*self.service.events.get(timeout=5))
-        self.service._publish()
+        self.bootstrap_events = {}
+        self.bootstrap(self.service)
         self.opened = dict.fromkeys(ASSIGNMENT_FIELDS) | deepcopy(next(
             row for row in self.gateway.rows['assignments', None] if row['id'] == 'open'))
         self.closed = dict(self.opened, state='closed', closedAt=5000, outcome='completed')
@@ -77,9 +74,50 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         service = LiveService(gateway, workers=1, scope_budget=self.service.scope_budget,
                               rebuild_interval=self.service.rebuild_interval)
         self.addCleanup(service.stop)
+        self.bootstrap(service)
+        return service
+
+    def bootstrap(self, service):
+        # R36 / att_e33b4539: observe two actual bootstrap invocations, not
+        # an event identity inferred from differing published timestamps.
+        self.assertIsNone(service.last_sweep)
+        at = self.clock.return_value
         service._handle('ready', {'version': '0.1.9', 'build': 2908, 'sha': '8433d22f'})
         self.settle(service)
-        return service
+        self.assertTrue(service.metrics['bootstrapComplete'])
+        self.assertIsNone(service.cycle)
+        self.assertEqual(at, service.last_sweep)
+        self.bootstrap_events[service] = dict(
+            event=len(self.bootstrap_events) + 1, trigger='ready/bootstrap',
+            priorLastSweepAt=None, completedAt=at)
+
+    def assert_distinct_bootstrap_publication(self, fresh, label):
+        # Test-owner agreement art_e96b8bb1, R36 section 2. Only these
+        # explicitly distinct events permit lastSweepAt value inequality.
+        events = {side: self.bootstrap_events[service]
+                  for side, service in (('fresh', fresh), ('warm', self.service))}
+        self.assertNotEqual(events['fresh']['event'], events['warm']['event'])
+        for side, service in (('fresh', fresh), ('warm', self.service)):
+            self.assertIsNone(service.cycle)
+            self.assertEqual(events[side]['completedAt'], service.last_sweep)
+            self.assertEqual(service.last_sweep,
+                             service.current['freshness']['reconciliation']['lastSweepAt'])
+        left, right = capture_publication(fresh.current, self.service.current, label,
+            distinctBootstrapEvents=events,
+            comparisonRule='R36 section 2 / att_e33b4539; lastSweepAt only')
+        for frame in (left, right):
+            del frame['freshness']['reconciliation']['lastSweepAt']
+        self.assertEqual(left, right)
+
+    def test_same_sweep_timestamp_remains_exact(self):
+        # Two publications of this one bootstrap still require exactness.
+        frame = deepcopy(self.service.current)
+        self.assertEqual(1000, frame['freshness']['reconciliation']['lastSweepAt'])
+        assert_publication_equal(self, frame, self.service.current, 'r36-same-sweep')
+        frame['freshness']['reconciliation']['lastSweepAt'] = 6000
+        with self.assertRaises(AssertionError):
+            assert_publication_equal(self, frame, self.service.current,
+                                     'r36-same-sweep-reject-mismatch')
 
     def set_source_assignment(self, row):
         rows = self.gateway.rows['assignments', None]
@@ -519,8 +557,8 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.service.change(self.notice(self.opened))
         self.settle()
         self.assertFalse(self.service.assignment_holds.assignments)
-        assert_publication_equal(self, self.fresh().current, self.service.current,
-                                 'r29-applied-close-during-item-read')
+        self.assert_distinct_bootstrap_publication(
+            self.fresh(), 'r29-applied-close-during-item-read')
         assert_replay_current(self, self.service, baseline, 'r29-applied-close-item-replay')
 
     def test_applied_close_during_global_read_keeps_its_actual_publication(self):
@@ -543,8 +581,8 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         clean = self.queued_source('assignments')
         self.service._handle(*clean)
         self.settle()
-        assert_publication_equal(self, self.fresh().current, self.service.current,
-                                 'r29-applied-close-during-global-read')
+        self.assert_distinct_bootstrap_publication(
+            self.fresh(), 'r29-applied-close-during-global-read')
         assert_replay_current(self, self.service, baseline, 'r29-applied-close-global-replay')
 
     def test_delayed_creation_cannot_reopen_a_loaded_closed_projection(self):

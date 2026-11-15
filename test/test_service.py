@@ -320,11 +320,14 @@ class ServiceRecoveryTest(unittest.TestCase):
 
         self.drain()
         self.assertEqual("rebuilding", self.service.state)
-        # R12 retries the complete item source instead of publishing a partial
-        # attest fold. The inventory's confirmation/outage credit stays intact.
-        self.assertEqual(set(), self.service.cycle["pending"])
-        self.assertEqual({"work"}, self.service.model.item_assignment_pending)
-        self.assertIn(("item-assignment-source", "work", None), self.service.read_retries)
+        # Bound R32/R10, test-owner agreement art_6fa7dbb4: a scoped
+        # failure retains complete facts and retries that same scope. It
+        # does not identify an incomplete assignment-membership source.
+        self.assertEqual({("attests", "assignment")}, self.service.cycle["pending"])
+        self.assertEqual(set(), self.service.model.item_assignment_pending)
+        self.assertIn(("attests", "assignment", None), self.service.read_retries)
+        self.assertNotIn(("item-assignment-source", "work", None), self.service.read_retries)
+        self.assertEqual(1, self.service.model.summary("attests", "assignment")["count"])
         self.assertFalse(self.service.model.inventory("work-items").stale)
         self.assertFalse(self.service.model.inventory("assignments").stale)
         self.assertTrue(self.service.model.inventory("attests", "assignment").stale)
@@ -338,6 +341,20 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertEqual(1, reconciliation["pendingScopes"])
         self.assertEqual("stale", self.service.snapshot()["items"][0]["evidence"]["stage"]["freshness"])
         self.assertIsNotNone(self.service.snapshot()["items"][0]["evidence"]["stage"]["unconfirmedSince"])
+
+        deadline, _ = self.service.read_retries["attests", "assignment", None]
+        self.gateway.partial.clear()
+        self.gateway.calls.clear()
+        with patch("atc_service.time.monotonic", return_value=deadline):
+            self.service._retry_incomplete_reads()
+        self.drain()
+        self.service._publish()
+        self.assertEqual([("read", "attests", "assignment")], self.gateway.calls)
+        self.assertNotIn(("attests", "assignment", None), self.service.read_retries)
+        self.assertIsNone(self.service.cycle)
+        self.assertEqual("live", self.service.state)
+        self.assertEqual(1, self.item()["evidenceCounts"]["total"])
+        self.assertEqual("live", self.item()["evidence"]["stage"]["freshness"])
 
     def test_repeated_lost_events_do_not_rebuild_after_disconnect_transition(self):
         self.service._handle("lost", "feed disconnected: ConnectionClosedError (4008)")
@@ -805,22 +822,32 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.gateway.rows[("attests", "assignment")] = []
         before = self.service.last_sweep
         previous_stage = self.item()["stage"]
+        previous_complete = self.item()["evidence"]["stage"]["complete"]
         self.service.rebuild(recovery=False)
         self.drain()
-        self.assertNotIn(("attests", "assignment"), self.service.model.inventories)
-        self.assertEqual(1, self.service.model.closed_items["work"]["summary"]["count"])
+        # R32/R10 / art_6fa7dbb4: retain the prior complete scoped facts
+        # until this same read recovers; do not inject an item reread.
+        self.assertIn(("attests", "assignment"), self.service.model.inventories)
+        self.assertEqual(1, self.service.model.summary("attests", "assignment")["count"])
         self.assertEqual(previous_stage, self.item()["stage"])
-        self.assertFalse(self.item()["evidence"]["stage"]["complete"])
+        self.assertEqual(1, self.item()["evidenceCounts"]["total"])
+        self.assertEqual(previous_complete, self.item()["evidence"]["stage"]["complete"])
         self.assertEqual("rebuilding", self.service.state)
         self.assertEqual("stale", self.item()["evidence"]["attests"]["freshness"])
         self.assertEqual(before, self.service.last_sweep)
         self.gateway.partial.clear()
-        self.service.read_retries["item-assignment-source", "work", None] = (0, 2)
-        self.service._retry_incomplete_reads()
-        self.service.rebuild(recovery=False)
+        job = ("attests", "assignment", None)
+        self.assertIn(job, self.service.read_retries)
+        self.assertNotIn(("item-assignment-source", "work", None), self.service.read_retries)
+        deadline, _ = self.service.read_retries[job]
+        self.gateway.calls.clear()
+        with patch("atc_service.time.monotonic", return_value=deadline):
+            self.service._retry_incomplete_reads()
         self.drain()
-        self.assertEqual({}, self.service.model.inventory("attests", "assignment").rows)
+        self.assertEqual([("read", "attests", "assignment")], self.gateway.calls)
+        self.assertNotIn(job, self.service.read_retries)
         self.assertEqual(0, self.item()["stage"])
+        self.assertEqual(0, self.item()["evidenceCounts"]["total"])
 
     def test_assignment_notice_recovers_a_holder_missing_from_session_inventory(self):
         self.gateway.rows[("sessions", None)].append({
