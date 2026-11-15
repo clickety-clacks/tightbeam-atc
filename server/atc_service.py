@@ -782,6 +782,24 @@ class LiveService:
                     for resource in ("turns", "wakes", "messages")]
         return list(dict.fromkeys(scopes))
 
+    def _can_restore_live(self):
+        if self.cycle or not self.connected or self.correlation_gaps:
+            return False
+        # Held producer failures remain retryable and unconfirmed at the item
+        # boundary. They must not latch an unrelated completed source's global
+        # rebuilding reason. Only a covering resolver may remove the failure.
+        visible_items = self.model.work_items()
+        held_producers = {held.producer for held in self.assignment_holds.assignments.values()
+                          if held.producer_recovery and held.producer is not None
+                          and held.item in visible_items}
+        blocking_failures = self.read_failures - {
+            ('reviewed-producer', producer) for producer in held_producers}
+        required = list(BASE_SCOPES) + self._history_scopes()
+        return not blocking_failures and all(
+            not self.model.inventory(*scope).needs_source_read
+            and self.model.inventory(*scope).complete
+            and not self.model.inventory(*scope).stale for scope in required)
+
     def _update_backstop(self, at):
         before = (self.state, self.reason, self.backstop.active, self.backstop.history,
                   {s for s in self.backstop.active
@@ -793,13 +811,9 @@ class LiveService:
         if overdue and self.connected:
             self._state("stale", "active reconciliation budget exceeded")
         elif self.reason == "active reconciliation budget exceeded":
-            required = list(BASE_SCOPES) + scopes
-            complete = all(not self.model.inventory(*s).needs_source_read
-                           and self.model.inventory(*s).complete and not self.model.inventory(*s).stale
-                           for s in required)
             if self.cycle:
                 self._state("rebuilding", "reading published state: " + self.cycle["mode"])
-            elif complete and self.connected and not self.read_failures and not self.correlation_gaps:
+            elif self._can_restore_live():
                 self._state("live")
             else:
                 self._incomplete_state("incomplete read or disconnected feed")
@@ -1527,24 +1541,9 @@ class LiveService:
             self._incomplete_state("item assignment source incomplete")
         if self.cycle:
             self._settle_cycle()
-        elif (result.complete and self.connected and not self.model.item_assignment_pending
-                and not self.correlation_gaps):
-            # A completed item source is no longer rebuilding. A failed P
-            # lookup whose independent hold remains is represented by that
-            # item's prior/unconfirmed publication, as when it fails without
-            # an overlapping item read. Keep its failure/retry intact; only
-            # actual covering-source resolution above may clear them.
-            visible_items = self.model.work_items()
-            held_producers = {held.producer for held in self.assignment_holds.assignments.values()
-                              if held.producer_recovery and held.producer is not None
-                              and held.item in visible_items}
-            blocking_failures = self.read_failures - {
-                ('reviewed-producer', producer) for producer in held_producers}
-            required = list(BASE_SCOPES) + self._history_scopes()
-            if not blocking_failures and all(not self.model.inventory(*s).needs_source_read
-                   and self.model.inventory(*s).complete and not self.model.inventory(*s).stale
-                   for s in required):
-                self._state("live")
+        elif (result.complete and not self.model.item_assignment_pending
+                and self._can_restore_live()):
+            self._state("live")
         return True
 
     def _read_done(self, value):
@@ -1678,7 +1677,10 @@ class LiveService:
         if resource == "attest-owner":
             return self._attest_activity_owner_done(job, result)
         if resource == "reviewed-producer":
-            return self._reviewed_producer_done(job, result, assignment_flight)
+            changed = self._reviewed_producer_done(job, result, assignment_flight)
+            if self._can_restore_live():
+                changed = self._state("live") or changed
+            return changed
         if resource == "item-assignment-source":
             return self._item_assignments_done(job, result, assignment_flight)
         assignments = self.model.inventory("assignments")
@@ -1991,12 +1993,8 @@ class LiveService:
                 self.cycle["pending"].discard(job[:2])
             self.cycle["complete"] = self.cycle["complete"] and result.complete
             self._settle_cycle()
-        elif not self.cycle and self.connected and not self.read_failures and not self.correlation_gaps:
-            required = list(BASE_SCOPES) + self._history_scopes()
-            if all(not self.model.inventory(*s).needs_source_read
-                   and self.model.inventory(*s).complete and not self.model.inventory(*s).stale
-                   for s in required):
-                self._state("live")
+        elif self._can_restore_live():
+            self._state("live")
         return True
 
     def _discover_assignment_sessions(self, assignments):

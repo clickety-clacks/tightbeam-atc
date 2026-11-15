@@ -1943,6 +1943,74 @@ class ServiceRecoveryTest(unittest.TestCase):
                 self._assert_producer_recovery_fresh_and_replayed(
                     baseline, 'r36-producer-incomplete-' + str(partial))
 
+    def test_unrelated_read_and_producer_retries_restore_exact_freshness(self):
+        # B7: both completion orders use the same global readiness rules.
+        for producer_first in (False, True):
+            with self.subTest(producer_first=producer_first):
+                self.gateway = PublishedReads()
+                review, producer = self._producer_recovery_fixture()
+                baseline = deepcopy(self.service.current)
+                producer.update(state='closed', closedAt=16)
+                review.update(state='closed', closedAt=17)
+                original = self.gateway.detail
+                def partial(resource, key, scope=None):
+                    result = original(resource, key, scope)
+                    if key == 'producer':
+                        return Read(result.rows, False, result.at, result.source, 'partial')
+                    return result
+                with patch.object(self.gateway, 'detail', side_effect=partial):
+                    self.assertTrue(self.service.change(self._assignment_close_notice(review)))
+                    self.drain()
+                producer_job = ('reviewed-producer', 'producer', None)
+                other_scope = ('turns', 'agent s_author')
+                other_job = other_scope + (None,)
+                self.gateway.partial.add(other_scope)
+                self.service._refresh(*other_scope)
+                self.drain()
+                self.service._publish()
+                self.assertEqual('rebuilding', self.service.current['freshness']['state'])
+                self.assertEqual('published read incomplete', self.service.current['freshness']['reason'])
+                def retry(job):
+                    _deadline, priority = self.service.read_retries[job]
+                    self.service.read_retries[job] = (0, priority)
+                    self.service._retry_incomplete_reads()
+                    self.drain()
+                if producer_first:
+                    retry(producer_job)
+                    self.service._publish()
+                    self.assertNotIn(producer_job[:2], self.service.read_failures)
+                    self.assertFalse(self.service.assignment_holds.assignments)
+                    self.assertIn(other_scope, self.service.read_failures)
+                    self.assertEqual('rebuilding', self.service.current['freshness']['state'])
+                self.gateway.partial.remove(other_scope)
+                retry(other_job)
+                self.service._publish()
+                self.assertEqual('live', self.service.current['freshness']['state'])
+                self.assertIsNone(self.service.current['freshness']['reason'])
+                label = 'r38-b7-producer-first-' + str(producer_first)
+                if not producer_first:
+                    self.assertIn(producer_job[:2], self.service.read_failures)
+                    self.assertIn(producer_job, self.service.read_retries)
+                    self.assertTrue(self.service.assignment_holds.assignments['assignment'].producer_recovery)
+                    self._assert_producer_hold_publication(baseline, label + '-other-recovered')
+                    with patch.object(self.gateway, 'detail', side_effect=partial):
+                        retry(producer_job)
+                    self.service._publish()
+                    self.assertIn(producer_job, self.service.read_retries)
+                    self.assertEqual('live', self.service.current['freshness']['state'])
+                    self.assertIsNone(self.service.current['freshness']['reason'])
+                    self._assert_producer_hold_publication(baseline, label + '-P-still-failed')
+                    retry(producer_job)
+                self.service._publish()
+                self.assertFalse(self.service.assignment_holds.assignments)
+                self.assertNotIn(producer_job[:2], self.service.read_failures)
+                self.assertNotIn(producer_job, self.service.read_retries)
+                self.assertNotIn(other_scope, self.service.read_failures)
+                self.assertFalse([call for call in self.gateway.calls if call[0] == 'membership'])
+                self.assertEqual('live', self.service.current['freshness']['state'])
+                self.assertIsNone(self.service.current['freshness']['reason'])
+                self._assert_producer_recovery_fresh_and_replayed(baseline, label + '-resolved')
+
     def test_clean_covering_item_resolves_only_matching_producer_failure(self):
         # N2: a genuinely covering item read clears P's resolved retry, while
         # an unrelated failed source still prevents global live certification.
