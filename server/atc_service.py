@@ -236,10 +236,6 @@ class LiveService:
         return ("event: " + kind + "\ndata: " +
                 json.dumps(value, separators=(",", ":")) + "\n\n").encode()
 
-    @staticmethod
-    def _comparable(collection, row):
-        return {k: v for k, v in row.items() if k != "idleFor"} if collection == "agents" else row
-
     def evidence_page(self, item_id, offset=0, limit=100, generation=None, revision=None):
         from heapq import nsmallest
         from itertools import chain
@@ -613,8 +609,11 @@ class LiveService:
             before = {row["id"]: row for row in previous.get(name, [])}
             after = {row["id"]: row for row in data[name]}
             changes[name] = {
+                # The publication comparison above suppresses clock-only
+                # revisions. Once another fact commits a revision, its delta
+                # must reproduce that entire frame, including sampled ages.
                 "upsert": [row for key, row in after.items() if key not in before or
-                           self._comparable(name, row) != self._comparable(name, before[key])],
+                           row != before[key]],
                 "remove": [key for key in before if key not in after],
             }
         metadata = {key: value for key, value in current.items() if key not in COLLECTIONS}
@@ -777,7 +776,9 @@ class LiveService:
 
     def _update_backstop(self, at):
         before = (self.state, self.reason, self.backstop.active, self.backstop.history,
-                  {s for s in self.backstop.active if self.model.inventory(*s).budget_stale})
+                  {s for s in self.backstop.active
+                   if (inventory := self.model.inventories.get(s)) is not None
+                   and inventory.budget_stale})
         scopes = self._history_scopes()
         self.backstop.classify(self.model, scopes, at)
         overdue = any(self.model.inventory(*s).budget_stale for s in self.backstop.active)

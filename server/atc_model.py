@@ -1342,6 +1342,20 @@ class EvidenceModel:
                 previous = activity_scope_facts.get(author)
                 activity_scope_facts[author] = combined_evidence(
                     *([previous] if previous is not None else []), scope_facts)
+        # A released source can still be awaiting a scoped retry or carry an
+        # outage warning. Use its current contribution's existing evidence;
+        # raw disposal must not drop that warning from the author's session.
+        # Construction inventories above own their scopes until disposal.
+        for aid, contribution in self.item_contributions.entries.items():
+            if ('attests', aid) in self.inventories:
+                continue
+            scope_facts = dict(contribution.evidence.publication(), source=[])
+            for author, _timestamp in contribution.attests.authors:
+                if author not in ids:
+                    continue
+                previous = activity_scope_facts.get(author)
+                activity_scope_facts[author] = combined_evidence(
+                    *([previous] if previous is not None else []), scope_facts)
         for assignment in assignments.rows.values():
             wid = assignment.get("workItemId")
             summary = self.summary("attests", assignment["id"])
