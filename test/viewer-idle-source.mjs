@@ -57,7 +57,7 @@ const noop = () => {};
 const context = vm.createContext({
   console, Map, Set, Date, sceneSignature, prepareModelSnapshot, shouldAcceptSnapshot,
   shouldAcceptModel, agentSampleTimes, idleAgeSeconds,
-  firstBoardComplete:true,openingFrameStatus:null,userMoved:false,
+  firstBoardComplete:true,openingFrameStatus:null,startupWarning:null,userMoved:false,
   DATA:null, lastModel:null, lastSceneSignature:null, lastRenderedModel:null,
   agentSamples:new Map(), itemEvidencePages:new Map(), itemEvidenceNotices:new Map(),
   pendingEvidenceReloads:new Set(), pendingSceneRollbackView:null, deferredSceneSyncError:null,
