@@ -31,6 +31,36 @@ class ClosedSourceServiceTest(unittest.TestCase):
             service._handle(*service.events.get(timeout=5))
         service._publish()
 
+    def test_complete_item_exit_releases_closed_provenance_and_replays_publication(self):
+        from publication_assertions import assert_replay_current
+        gateway = PublishedReads()
+        gateway.rows['assignments', None][0]['state'] = 'closed'
+        other = dict(gateway.rows['work-items', None][0], id='unaffected', title='Unaffected')
+        gateway.rows['work-items', None].append(other)
+        service = self.service(gateway)
+        baseline = deepcopy(service.current)
+        self.assertIn('work', service.model.closed_items)
+        gateway.rows['work-items', None] = [other]
+        gateway.calls.clear()
+        service._refresh('work-items')
+        self.settle(service)
+        self.assertEqual([('read', 'work-items', None)], gateway.calls)
+        self.assertEqual(['unaffected'], [item['id'] for item in service.current['items']])
+        for values in (service.model.closed_items, service.model.item_assignment_facts,
+                       service.model.item_assignment_summary, service.model.retired_item_activity,
+                       service.model.item_activity()):
+            self.assertNotIn('work', values)
+        self.assertFalse(service.model.item_contributions.entries)
+        self.assertFalse(service.model.live_assignment_items)
+        self.assertFalse(service.model.open_assignment_order)
+        self.assertEqual(publication({'items': [item for item in baseline['items']
+                                               if item['id'] == 'unaffected']}),
+                         publication({'items': service.current['items']}))
+        assert_replay_current(self, service, baseline, 'r39-item-exit-complete-publication')
+        # Repeated publication must not resurrect the removed fold.
+        service._publish()
+        self.assertNotIn('work', service.model.closed_items)
+
     def test_closed_notice_reloads_facts_and_matches_fresh_after_source_disposal(self):
         gateway = PublishedReads()
         gateway.rows['assignments', None][0]['state'] = 'closed'

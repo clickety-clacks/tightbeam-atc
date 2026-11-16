@@ -473,11 +473,39 @@ class EvidenceModel:
                 if fact["freshness"] != "stale":
                     fact["freshness"] = "unconfirmed"
 
+    def retain_item_provenance(self):
+        # work_items includes retained older items and partial-read omissions.
+        # Only an actual board exit releases their folds and derived lookups.
+        published = self.work_items()
+        self.item_contributions.retain_items(published)
+        for wid in tuple(self.closed_items):
+            if wid not in published:
+                del self.closed_items[wid]
+                self.closed_revision += 1
+        for wid in tuple(self.retired_item_activity):
+            if wid not in published:
+                del self.retired_item_activity[wid]
+                self.retired_activity_revision += 1
+        for values in (self.item_assignment_facts, self.item_assignment_summary,
+                       self._item_activity,
+                       *(part[1] for part in self._item_activity_parts.values())):
+            for wid in tuple(values):
+                if wid not in published:
+                    del values[wid]
+        self.live_assignment_items = {aid: wid for aid, wid in self.live_assignment_items.items()
+                                      if wid in published}
+        assignments = self.inventory('assignments').rows
+        self.open_assignment_order = {aid: order for aid, order in self.open_assignment_order.items()
+                                      if assignments.get(aid, {}).get('workItemId') in published}
+
     def release_auxiliary_sources(self):
-        self.item_contributions.retain_items(self.work_items())
+        self.retain_item_provenance()
+        published = self.work_items()
         for (resource, _scope), inventory in self.inventories.items():
             if resource == "artifacts":
                 inventory.release_rows()
+                inventory.activity = {wid: at for wid, at in inventory.activity.items()
+                                      if wid in published}
             elif resource == "decision-requests":
                 # The board uses scope completeness, not decision source text.
                 inventory.rows.clear()
@@ -535,6 +563,7 @@ class EvidenceModel:
         """Fold a settled assignment read into per-item board facts."""
         assignments = self.inventory("assignments")
         self.capture_assignment_contributions(items=items)
+        published = self.work_items()
         if ((items is None and not assignments.complete)
                 or not any(row.get("state") != "open" for row in assignments.rows.values())):
             return set()
@@ -570,11 +599,11 @@ class EvidenceModel:
                                                     previous_order.get(aid, order))
                 continue
             self.fold_activity_inventory("attests", aid, releasing=True)
-            if wid is not None:
+            if wid in published:
                 fold = grouped.setdefault(wid, ClosedAssignmentFold())
                 fold.add(row, self.inventory("attests", aid), order=order, position=position,
                          contribution=contribution)
-            if aid in live_ids:
+            if aid in live_ids and wid in published:
                 self.live_assignment_items[aid] = wid
             released.add(aid)
         if not released:
@@ -605,7 +634,7 @@ class EvidenceModel:
             for aid in tuple(linked):
                 if aid in released:
                     wid = assignments.rows[aid].get("workItemId")
-                    if wid is not None:
+                    if wid in grouped:
                         part = self.closed_items[wid]
                         part["turnActivity"] = latest_time(part["turnActivity"], linked[aid])
                         part["activity"] = latest_time(part["activity"], linked[aid])
@@ -1165,7 +1194,7 @@ class EvidenceModel:
         inventory.read(
             result.rows, complete=result.complete, at=result.at, source=result.source)
         if resource == "work-items":
-            self.item_contributions.retain_items(self.work_items())
+            self.retain_item_provenance()
         if resource == "assignments" and result.complete:
             self.closed_sources_released = False
             closed = {row.get("workItemId") for row in result.rows if row.get("state") != "open"}
@@ -1274,7 +1303,9 @@ class EvidenceModel:
         # Keep independently changing histories separate: a turn must not make
         # publication rescan all artifacts or assignments. Revision checks also
         # cover direct feed payload updates and complete-inventory removals.
-        versions = {"assignments": [], "artifacts": [], "turns": []}
+        published = self.work_items()
+        membership_revision = (("work-items", None), self.inventory("work-items").data_revision)
+        versions = {group: [membership_revision] for group in ("assignments", "artifacts", "turns")}
         for key, inventory in self.inventories.items():
             resource = key[0]
             if resource in {"assignments", "attests"}:
@@ -1294,7 +1325,7 @@ class EvidenceModel:
             changed = True
             activity = {}
             def record(wid, *times):
-                if wid:
+                if wid in published:
                     activity[wid] = latest_time(activity.get(wid), *times)
             if group == "assignments":
                 raw_closed = {row.get("workItemId") for row in assignments.rows.values()
@@ -1312,7 +1343,7 @@ class EvidenceModel:
                            self.summary("attests", assignment["id"])["activity"]
                            if getattr(inventory, "activity_eligible", True) else None)
                 # Missing attest scopes are created by summary on first use.
-                revision = [(key, inv.data_revision, getattr(inv, "activity_eligible", True))
+                revision = [membership_revision] + [(key, inv.data_revision, getattr(inv, "activity_eligible", True))
                             for key, inv in self.inventories.items()
                             if key[0] in {"assignments", "attests"}]
                 revision.append(("closed-items", self.closed_revision))

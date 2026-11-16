@@ -170,6 +170,53 @@ class ItemContributionsTest(unittest.TestCase):
         self.assertEqual(previous, model.item_contributions.entries)
         model.accept('work-items', None, Read([], True, 1200, 'complete'))
         self.assertEqual({}, model.item_contributions.entries)
+        self.assertEqual({}, model.closed_items)
+        self.assertEqual({}, model.live_assignment_items)
+        self.assertEqual({}, model.open_assignment_order)
+        self.assertEqual({}, model.item_activity())
+
+    def test_item_exit_releases_folds_and_activity_without_recreating_from_old_rows(self):
+        from copy import deepcopy
+        from test_assignment_source_failure import publication
+        for already_folded in (False, True):
+            with self.subTest(already_folded=already_folded):
+                model = ClosedAssignmentFoldTest().model()
+                item = deepcopy(model.work_items()['work'])
+                other = dict(item, id='unaffected', title='Unaffected')
+                model.accept('work-items', None, Read([item, other], True, 100, 'complete'))
+                model.accept('artifacts', None, Read([
+                    dict(artifactId='artifact', workItemId='work', createdAt=95)],
+                    True, 100, 'complete'))
+                model.fold_retired_activity({'work': 96, 'unaffected': 97})
+                before = model.snapshot(1000)
+                if already_folded:
+                    model.fold_closed_assignments()
+                    self.assertIn('work', model.closed_items)
+                model.release_auxiliary_sources()
+                model.accept('work-items', None, Read([other], False, 1100, 'partial'))
+                self.assertIn('work', model.work_items())
+                self.assertEqual(96, model.item_activity()['work'])
+                model.accept('work-items', None, Read([other], True, 1200, 'complete'))
+                # Raw assignment sources can outlive the board membership read.
+                # Their later disposal must not recreate an exited item fold.
+                model.fold_closed_assignments()
+                model.release_auxiliary_sources()
+                after = model.snapshot(1300)
+                for values in (model.closed_items, model.retired_item_activity,
+                               model.item_assignment_facts, model.item_assignment_summary,
+                               model.item_activity(), model.inventory('artifacts').activity,
+                               *(part[1] for part in model._item_activity_parts.values())):
+                    self.assertNotIn('work', values)
+                self.assertFalse(model.item_contributions.entries)
+                self.assertFalse(model.live_assignment_items)
+                self.assertFalse(model.open_assignment_order)
+                self.assertEqual(publication({'items': [row for row in before['items']
+                                                       if row['id'] == 'unaffected']}),
+                                 publication({'items': after['items']}))
+                # A re-entry is a new current item, with no retained old fold.
+                model.accept('work-items', None, Read([item, other], True, 1400, 'complete'))
+                model.snapshot(1500)
+                self.assertNotIn('work', model.closed_items)
 
     def test_newly_closed_raw_member_merges_with_previously_released_closed_members(self):
         from copy import deepcopy
@@ -559,14 +606,18 @@ class ItemContributionsTest(unittest.TestCase):
         model.accept('work-items', None, Read([item], True, 1100, 'complete'))
         model.fold_closed_assignments()
         prior = dict(model.item_contributions.entries)
+        closed = model.closed_items['work']
         before = model.snapshot(1200)
         model.fold_older_work_items()
         self.assertNotIn('work', model.inventory('work-items').rows)
         model.release_auxiliary_sources()
         self.assertEqual(prior, model.item_contributions.entries)
+        self.assertIs(closed, model.closed_items['work'])
         self.assertEqual(before, model.snapshot(1200))
         model.accept('work-items', None, Read([], False, 1300, 'partial'))
         model.release_auxiliary_sources()
         self.assertEqual(prior, model.item_contributions.entries)
+        self.assertIs(closed, model.closed_items['work'])
         model.accept('work-items', None, Read([], True, 1400, 'complete'))
         self.assertEqual({}, model.item_contributions.entries)
+        self.assertEqual({}, model.closed_items)
