@@ -1808,6 +1808,13 @@ class ServiceRecoveryTest(unittest.TestCase):
                     self.assertTrue(entered.wait(2))
                     old_flight = self.service.reads.assignment_reads.flights[older]
                     before = list(self.gateway.calls)
+                    # R23/R28 keep this independently required source read.
+                    # Owner agreement art_ab329c84 separates its detail from
+                    # the targeted P read and existing same-scope retry.
+                    producer_details_before_notice = before.count(
+                        ('detail', 'assignments', None, 'producer'))
+                    self.assertEqual(1 if resource == 'item-assignment-source' else 0,
+                                     producer_details_before_notice)
                     epochs = dict(self.service.reads.epochs)
                     producer.update(state='closed', closedAt=16)
                     discovered.update(state='closed', closedAt=17)
@@ -1861,6 +1868,9 @@ class ServiceRecoveryTest(unittest.TestCase):
                     self.service._publish()
                 self.assertEqual('closed', self.service.model.item_contributions.entries['producer'].state)
                 self.assertEqual(16, self.service.model.item_contributions.entries['producer'].closed_at)
+                self.assertEqual(2 if partial_producer else 1,
+                    self.gateway.calls.count(('detail', 'assignments', None, 'producer'))
+                    - producer_details_before_notice)
                 # Discovery may create a zero-valued epoch key; no scope may
                 # advance its epoch and restart the independently required read.
                 for scope in set(epochs) | set(self.service.reads.epochs):
