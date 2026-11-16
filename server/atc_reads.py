@@ -290,6 +290,15 @@ class ItemAssignmentSource:
         return bool(changed)
 
 
+class ReadEpochs(dict):
+    """Untouched scopes have epoch zero without retaining a zero entry."""
+
+    __slots__ = ()
+
+    def __missing__(self, key):
+        return 0
+
+
 class ReadQueue:
     def __init__(self, gateway, events, workers, current_ids=None):
         self.gateway, self.events, self.workers = gateway, events, workers
@@ -307,7 +316,9 @@ class ReadQueue:
         self.flight_maximum_read_duration = 0.0
         # Epoch-invalidated reads must keep their original scheduling urgency.
         self.active_priorities = {}
-        self.epochs = defaultdict(int)
+        # Only invalidation creates a generation. Reads of the initial zero
+        # must not retain every reconciled scope after its source is released.
+        self.epochs = ReadEpochs()
         self.dispatched = 0
         self.attest_owner_attempts = 0
         self.attest_owner_counter_lock = Lock()
@@ -342,6 +353,10 @@ class ReadQueue:
             inventory = job[:2]
             priority = self.pending[job]
             del self.pending[job]
+            if not self.pending:
+                # OrderedDict deletion can retain its former hash capacity.
+                # Keep the same root, releasing only empty queue storage.
+                self.pending.clear()
             self.dispatched += 1
             epoch = self.epochs[inventory]
             self.active[inventory] = job, epoch

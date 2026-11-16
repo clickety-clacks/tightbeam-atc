@@ -680,9 +680,13 @@ class LiveService:
         for key in list(self.reads.pending):
             if key[:2] in released:
                 del self.reads.pending[key]
+        if not self.reads.pending:
+            self.reads.pending.clear()
         for key in list(self.reads.epochs):
             if key in released and key not in self.reads.active:
                 del self.reads.epochs[key]
+        if not self.reads.epochs:
+            self.reads.epochs.clear()
         for key in list(self.read_retries):
             if key[:2] in released:
                 del self.read_retries[key]
