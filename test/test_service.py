@@ -1814,6 +1814,14 @@ class ServiceRecoveryTest(unittest.TestCase):
                     self.assertTrue(self.service.change(self._assignment_close_notice(discovered)))
                     self.assertNotIn(discovered['id'], self.service.model.inventory('assignments').rows)
                     self.assertEqual({discovered['id']: 'producer'}, old_flight.producer_effects)
+                    if resource == 'item-assignment-source':
+                        # The older source is still unapplied. Exercise the
+                        # observer's full-parity comparison boundary without
+                        # allocation instrumentation (PO att_0941802c).
+                        self.service._publish()
+                        self._assert_producer_hold_publication(
+                            baseline, 'r38-pending-item-parity-' + str(partial_producer),
+                            pending_item_sources=('work',))
                     self.service.reads.pump()
                     kind, value = self.service.events.get(timeout=5)
                     self.assertEqual('read', kind)
