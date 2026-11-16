@@ -354,20 +354,20 @@ class OwnerlessItemRecoveryTest(unittest.TestCase):
                 before_close_calls = list(self.gateway.calls)
                 self.service._handle(*self.service.events.get(timeout=5))
                 self.settle()
-                # R36 section 3 / att_e33b4539; owner mapping art_637a203a.
-                # The next close resolves ordering but has no identified P.
-                held = self.service.assignment_holds.assignments[row['id']]
-                self.assertFalse(held.conflict)
-                self.assertFalse(held.incomplete_contribution)
-                self.assertTrue(held.producer_recovery)
-                self.assertIsNone(held.producer)
+                # Reconciled B5/F1; owner agreement art_cea86cd0. This is an
+                # ordinary code/null-P close, not an unidentified review.
+                self.assertEqual('code', row['effectKind'])
+                self.assertIsNone(row['reviewsAssignmentId'])
+                self.assertNotIn(row['id'], self.service.assignment_holds.assignments)
                 self.assertEqual(before_close_calls, self.gateway.calls)
-                if unpublished:
-                    self.assertNotIn(row['workItemId'],
-                                     {item['id'] for item in self.service.current['items']})
-                else:
-                    self.assert_retained(self.item(baseline),
-                                         self.item(self.service.current), 1000)
+                self.assertFalse(any(job[0] == 'reviewed-producer'
+                                     for job in self.service.reads.pending))
+                self.assertIn(row['workItemId'],
+                              {item['id'] for item in self.service.current['items']})
+                assert_publication_equal(self, self.fresh().current, self.service.current,
+                                         'r32-ordinary-close-resolved-' + row['workItemId'])
+                assert_replay_current(self, self.service, baseline,
+                                      'r32-ordinary-close-resolved-replay-' + row['workItemId'])
                 # An existing covering refresh, not a notice-driven item chain.
                 self.service._refresh('assignments')
                 self.settle()

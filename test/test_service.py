@@ -1169,7 +1169,7 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.assertFalse([call for call in self.gateway.calls if call[0] == 'membership'])
         self._assert_producer_recovery_fresh_and_replayed(baseline, 'r36-older-keyed-read')
 
-    def _assert_producer_hold_publication(self, baseline, label):
+    def _assert_producer_hold_publication(self, baseline, label, *, pending_item_sources=None):
         from publication_assertions import (assert_publication_equal,
             assert_replay_current, held_scope_metadata)
         gateway = PublishedReads()
@@ -1179,6 +1179,14 @@ class ServiceRecoveryTest(unittest.TestCase):
         self.addCleanup(fresh.stop)
         fresh._handle('ready', self.service.version)
         self.drain(fresh)
+        if pending_item_sources is not None:
+            # Compare the same independent item-read boundary, not a pending
+            # warm server to a drained reference. No output normalization or
+            # held-scope allowance is added (owner agreement art_cea86cd0).
+            self.assertEqual(set(pending_item_sources), self.service.model.item_assignment_pending)
+            for wid in pending_item_sources:
+                self.assertTrue(fresh._request_item_assignments(wid))
+            self.assertEqual(set(pending_item_sources), fresh.model.item_assignment_pending)
         fresh._publish()
         expected = deepcopy(fresh.current)
         permitted, deltas = held_scope_metadata(self, fresh, self.service, label)

@@ -671,6 +671,11 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
     def test_delayed_creation_cannot_reopen_a_loaded_closed_projection(self):
         self.service.change(self.notice(self.closed))
         self.service._publish()
+        # R36 review/first close already requires P; delayed creation must
+        # preserve that exact job, not empty the queue (art_cea86cd0).
+        producer_job = ('reviewed-producer', 'first', None)
+        self.assertEqual({producer_job: 2}, self.service.reads.pending)
+        pending = dict(self.service.reads.pending)
         baseline = deepcopy(self.service.current)
         contribution = self.service.model.item_contributions.entries['open']
         revision = self.service.model.details_revision
@@ -682,7 +687,7 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         self.assertEqual(contribution, self.service.model.item_contributions.entries['open'])
         self.assertEqual(revision, self.service.model.details_revision)
         self.assertEqual(calls, self.gateway.calls)
-        self.assertFalse(self.service.reads.pending)
+        self.assertEqual(pending, self.service.reads.pending)
         assert_publication_equal(self, baseline, self.service.current, 'r29-delayed-creation')
 
     def test_new_member_and_close_during_item_read_keep_existing_scoped_confirmation(self):
@@ -755,6 +760,7 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
                                  'r29-global-completion-with-pending-item')
 
     def test_hold_shares_actual_last_publication_without_changing_other_collections(self):
+        original_item = self.item(self.service.current)
         before_close = deepcopy(self.service.current)
         self.clock.return_value = 6000
         flight = AssignmentReadConflicts()
@@ -764,15 +770,24 @@ class AssignmentHoldPublicationTest(unittest.TestCase):
         published = self.service.current
         retained = self.item(published)
         original = deepcopy(retained)
+        # Producer and ordering causes share the original frame; publication
+        # copies it to mark unconfirmed evidence (art_cea86cd0).
+        self.assertIs(original_item, self.service.assignment_holds.items['work'])
+        self.assertIsNot(original_item, retained)
+        self.assert_retained(original_item, retained, 6000)
+        self.assertTrue(self.service.assignment_holds.assignments['open'].producer_recovery)
         self.assertNotEqual(self.item(before_close), retained)
         calls = list(self.gateway.calls)
         conflicts = self.service._hold_assignment_conflicts(
             [self.opened], flight, complete=True, at=6000)
         self.assertEqual({'open'}, conflicts)
-        self.assertIs(retained, self.service.assignment_holds.items['work'])
+        self.assertIs(original_item, self.service.assignment_holds.items['work'])
+        self.assertTrue(self.service.assignment_holds.assignments['open'].producer_recovery)
+        self.assertTrue(self.service.assignment_holds.assignments['open'].conflict)
         self.service._publish()
         self.assert_retained(original, self.item(self.service.current), 6000)
         self.assertEqual(original, retained)  # Earlier full/replay frames remain immutable.
+        self.assertEqual(self.item(before_close), original_item)
         self.assertEqual(self.item(published, 'unaffected-item'),
                          self.item(self.service.current, 'unaffected-item'))
         for name in ('agents', 'links', 'wakes', 'messages'):
