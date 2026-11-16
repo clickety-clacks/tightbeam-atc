@@ -449,6 +449,8 @@ export function sceneSignature(model) {
       ? Object.fromEntries(Object.entries(evidence).map(([name, value])=>{
           if (!value || typeof value!=='object') return [name, value];
           const {observedAt, freshness, unconfirmedSince, ...stable} = value;
+          // Idle-source diagnostics update the evidence panel, not geometry.
+          if (agent && name==='idleFor') delete stable.source;
           return [name, stable];
         })) : evidence;
     return {...rest, ...(agent ? {} : {idleFor, idleSince}), evidence:facts};

@@ -24,6 +24,12 @@ WORK_ITEM_FIELDS = frozenset("""
 WORK_ITEM_SUMMARY_FIELDS = frozenset("""
     holders started attestCounts verdictCounts effectiveCommitRefs landings
 """.split())
+ASSIGNMENT_FIELDS = frozenset("""
+    id subject holderKey holderRole holderFallback openedByUser openedBySession
+    openedAt state outcome closedAt closedByUser closedBySession closedByProcess
+    closingAttestId revocationReason workItemId reviewsAssignmentId holderHarness
+    holderProvider files effectKind derivedStatus rowVersion
+""".split())
 SESSION_FIELDS = frozenset("""
     sessionKey displayName kind orderIndex isBuiltIn adopted ownerUserId origin spawnedBy
     topologyParent handle archetype overrides identityName identityRevision harness provider

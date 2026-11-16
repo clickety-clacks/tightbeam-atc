@@ -25,6 +25,10 @@ class Inventory:
     source: str = ""
     data_revision: int = 0
 
+    @property
+    def needs_source_read(self):
+        return self.observed_at is None
+
     def read(self, rows, *, complete, at, source):
         """A read covers this inventory's entire declared scope.
 
@@ -225,3 +229,222 @@ def merge_value_for_refs(observation, refs, refs_complete=True):
             and all(ref in refs for ref in proof_refs)):
         return True
     return None
+
+
+class ArtifactInventory(Inventory):
+    """Artifact history contributes only a per-item activity maximum."""
+
+    def __init__(self):
+        super().__init__("artifactId")
+        self.activity = {}
+        self.released = False
+
+    def refresh_activity(self, *, replace=False):
+        activity = {} if replace else dict(self.activity)
+        for row in self.rows.values():
+            wid = row.get("workItemId")
+            times = [row.get(key) for key in ("createdAt", "updatedAt")]
+            times = [at for at in times if isinstance(at, (int, float))
+                     and not isinstance(at, bool) and 0 < at < float("inf")]
+            if wid and times:
+                activity[wid] = max(activity.get(wid, 0), *times)
+        self.activity = activity
+
+    def read(self, rows, *, complete, at, source):
+        super().read(rows, complete=complete, at=at, source=source)
+        self.refresh_activity(replace=complete)
+        if complete:
+            self.released = False
+
+    def payload(self, row, *, at, source, policy):
+        if self.released:
+            # The old row may have moved to another item or supplied its
+            # maximum. A complete reread resolves that without an ID ledger.
+            return False
+        accepted = super().payload(row, at=at, source=source, policy=policy)
+        if accepted:
+            self.refresh_activity(replace=True)
+        return accepted
+
+    def release_rows(self):
+        self.rows.clear()
+        self.observations.clear()
+        self.released = True
+
+
+class HistoryInventory(Inventory):
+    """Current facts plus a short raw window, never the full history corpus."""
+
+    def __init__(self, resource):
+        from atc_summary import HISTORY_KEYS, summarize
+        from atc_contributions import AttestFrontier
+        super().__init__(HISTORY_KEYS[resource])
+        self.resource = resource
+        self.keep_ids = set()
+        self.fingerprint = None
+        self.raw_expiry = None
+        self._pruned_keep_ids = None
+        self.folded = summarize(resource, ())
+        self._restored_source = False
+        if resource == "attests":
+            self.attest_frontier = AttestFrontier()
+
+    @property
+    def needs_source_read(self):
+        return self._restored_source or super().needs_source_read
+
+    def restore_attest_contribution(self, contribution):
+        """Restore released facts without completing this scope's discovery.
+
+        A membership read recreates construction rows, not attest observations.
+        Keep the prior actual observation and fold until the already-required
+        scoped read completes. The flag is scheduling state, not confirmation.
+        Never overwrite an observed/partial inventory or an accepted raw row.
+        """
+        if (self.resource != 'attests' or self.observed_at is not None
+                or self.rows or self.folded['count'] or self.fingerprint is not None
+                or contribution.evidence.observed_at is None):
+            return False
+        facts = contribution.evidence.publication()
+        self.folded = contribution.attests.summary()
+        self.attest_frontier = contribution.attests.frontier
+        self.fingerprint = contribution.detail_fingerprint
+        self.complete = facts['complete']
+        self.stale = facts['freshness'] == 'stale'
+        self.observed_at = facts['observedAt']
+        self.confirmed_at = facts['observedAt'] if facts['complete'] else None
+        self.unconfirmed_since = facts.get('unconfirmedSince')
+        self.source = facts['source']
+        self._restored_source = True
+        self.data_revision += 1
+        return True
+
+    def read_fold(self, fold, *, complete, at, source):
+        from atc_summary import summarize
+        previous = self.folded
+        # A notice can establish positive attest facts before any read. A
+        # first partial response cannot overwrite those facts with a subset.
+        first_read = (self.observed_at is None and
+                      not (self.resource == 'attests' and self.data_revision))
+        self.keep_ids = fold.keep_ids
+        super().read(fold.rows.values(), complete=complete, at=at, source=source)
+        self._restored_source = False
+        if complete or first_read:
+            self.fingerprint = fold.fingerprint.hexdigest()
+            self.folded = fold.summary
+            if self.resource == "attests":
+                self.attest_frontier = fold.attest_frontier
+        else:
+            # A partial walk cannot subtract previously established facts or
+            # add its counts to them: the walks overlap. Keep counted evidence
+            # unconfirmed until an authoritative complete walk replaces it.
+            self.folded = previous
+            for name in ("activity", "recentActivity"):
+                values = [v for v in (previous[name], fold.summary[name]) if v is not None]
+                previous[name] = max(values) if values else None
+            for name in ("latest", "authors", "assignmentActivity"):
+                for key, value in fold.summary[name].items():
+                    previous[name][key] = max(previous[name].get(key, 0), value)
+            # Current rows can still establish a newer turn state or mark.
+            current = summarize(self.resource, self.rows.values(), now=at)
+            previous["live"] = current["live"]
+            if self.resource in {"messages", "wakes"}:
+                marks = {str(row[self.key]): row for row in previous["marks"]}
+                marks.update((str(row[self.key]), row) for row in fold.summary["marks"])
+                marks.update((str(row[self.key]), row) for row in current["marks"])
+                field = "at" if self.resource == "messages" else "firedAt"
+                previous["marks"] = sorted(marks.values(), key=lambda row: row[field], reverse=True)
+        self.prune(at, force=True)
+        # Identity of the last source read also pins on-demand detail pages.
+        # Partial completeness remains independent of its text fingerprint.
+        self.fingerprint = fold.fingerprint.hexdigest()
+
+    def prune(self, now, *, force=False):
+        from atc_summary import HISTORY_TIMES
+        if (not force and self.keep_ids == self._pruned_keep_ids
+                and (self.raw_expiry is None or self.raw_expiry > now)):
+            if self.resource in {"messages", "wakes"}:
+                field = "at" if self.resource == "messages" else "firedAt"
+                self.folded["marks"][:] = [row for row in self.folded["marks"]
+                                          if row[field] > now - 300_000]
+            return
+        self._pruned_keep_ids = set(self.keep_ids)
+        self.raw_expiry = None
+        timestamp = HISTORY_TIMES[self.resource]
+        for key, row in list(self.rows.items()):
+            if self.resource == "wakes" and key in self.keep_ids:
+                self.rows[key] = {k: row[k] for k in (
+                    "wakeId", "sessionKey", "creatorSessionKey", "state", "firedAt",
+                    "rowVersion") if k in row}
+                self.observations.pop(key, None)
+                continue
+            at = row.get(timestamp)
+            if isinstance(at, (int, float)) and at + 60_000 > now:
+                self.raw_expiry = min(self.raw_expiry, at + 60_000) if self.raw_expiry is not None else at + 60_000
+            if self.resource == "turns" and row.get("endedAt") is None:
+                if not isinstance(at, (int, float)) or at <= now - 60_000:
+                    self.rows[key] = {k: row[k] for k in (
+                        "seq", "sessionKey", "assignmentId", "wakeId", "createdAt",
+                        "startedAt", "endedAt", "rowVersion") if k in row}
+                    self.observations.pop(key, None)
+                continue
+            if not isinstance(at, (int, float)) or at <= now - 60_000:
+                del self.rows[key]
+                self.observations.pop(key, None)
+        if self.resource in {"messages", "wakes"}:
+            field = "at" if self.resource == "messages" else "firedAt"
+            self.folded["marks"][:] = [row for row in self.folded["marks"]
+                                      if row[field] > now - 300_000]
+
+    def payload(self, row, *, at, source, policy):
+        from atc_summary import HISTORY_TIMES, summarize, apply_attest_notice
+        key = str(row[self.key])
+        old = self.rows.get(key)
+        if self.resource == "attests":
+            if not self.attest_frontier.usable(row):
+                return False
+            if old is not None and old != row:
+                self.invalidate()
+                return False
+            if self.attest_frontier.includes(row):
+                return True
+            revision = self.data_revision
+            if not super().payload(row, at=at, source=source, policy=policy):
+                return False
+            self.attest_frontier = apply_attest_notice(self.folded, self.attest_frontier, row)
+            # A partial read can retain this raw row without counting it in
+            # the held complete fold. Its later notice changes that fold even
+            # if the raw immutable row was already present.
+            if self.data_revision == revision:
+                self.data_revision += 1
+            self.prune(at, force=True)
+            return True
+        timestamp = row.get(HISTORY_TIMES[self.resource])
+        if old is None and (not isinstance(timestamp, (int, float))
+                            or timestamp <= (self.folded["recentActivity"] or 0)):
+            # An old identity may already have been counted and discarded.
+            # The authoritative scoped read resolves it without an ID ledger.
+            return False
+        if not super().payload(row, at=at, source=source, policy=policy):
+            return False
+        if old == self.rows.get(key):
+            return True
+        if old is None:
+            summarize(self.resource, (row,), into=self.folded, now=at)
+        elif self.resource in {"turns", "wakes"}:
+            current = summarize(self.resource, self.rows.values(), now=at)
+            self.folded["live"] = current["live"]
+            if self.resource == "wakes":
+                marks = {str(mark[self.key]): mark for mark in self.folded["marks"]}
+                marks.pop(key, None)
+                marks.update((str(mark[self.key]), mark) for mark in current["marks"])
+                self.folded["marks"] = sorted(marks.values(),
+                                              key=lambda mark: mark["firedAt"], reverse=True)
+            for name in ("activity", "recentActivity"):
+                values = [v for v in (self.folded[name], current[name]) if v is not None]
+                self.folded[name] = max(values) if values else None
+            for aid, when in current["assignmentActivity"].items():
+                self.folded["assignmentActivity"][aid] = max(
+                    self.folded["assignmentActivity"].get(aid, 0), when)
+        self.prune(at, force=True)
+        return True

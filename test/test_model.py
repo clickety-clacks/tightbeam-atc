@@ -69,9 +69,10 @@ class ModelTest(unittest.TestCase):
         self.model.detail("assignments", None, Read([{"id": "assignment", "workItemId": "moved",
             "openedAt": 3}], True, 70, "detail"))
         self.assertNotIn("work", self.model.item_activity())
-        self.assertEqual(60, self.model.item_activity()["moved"])
+        # The destination has no published item fact, so it retains no activity.
+        self.assertNotIn("moved", self.model.item_activity())
         self.read("turns", [{"seq": 2, "assignmentId": "assignment", "endedAt": 80}], "other")
-        self.assertEqual(80, self.model.item_activity()["moved"])
+        self.assertNotIn("moved", self.model.item_activity())
 
     def test_unchanged_activity_does_not_visit_historical_rows(self):
         class CountedRows(dict):

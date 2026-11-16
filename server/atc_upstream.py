@@ -23,6 +23,7 @@ class Read:
     source: str
     error: str | None = None
     page: int | None = None
+    folded: object | None = None
 
 
 # These are the evidence fields shared by the published attest read and feed.
@@ -64,7 +65,7 @@ class PackagedCLI:
             if not isinstance(key, str) or not key or key.startswith("-"):
                 raise ValueError("read requires an assignment identity")
             args = [verb, key]
-        elif verb == "work-item-trace" and set(params) == {"work_item_id"}:
+        elif verb in {"work-item-trace", "work-item-get"} and set(params) == {"work_item_id"}:
             key = params["work_item_id"]
             if not isinstance(key, str) or not key or key.startswith("-"):
                 raise ValueError("read requires a work-item identity")
@@ -125,13 +126,56 @@ class Gateway:
     def command(self, verb, **params):
         # This closed set is the adapter's read interface, not a generic
         # command proxy available to viewers.
-        if verb not in {"assignments", "attests", "role-list", "assignment-get", "artifacts", "work-item-trace"}:
+        if verb not in {"assignments", "attests", "role-list", "assignment-get", "artifacts", "work-item-trace", "work-item-get"}:
             raise ValueError("unsupported read")
         with self.count_lock:
             self.read_count += 1
         return self.cli.read(verb, **params)
 
-    def collection(self, path):
+    def assignment_membership(self, work_item_id, *, include_rows=False):
+        """Existing per-item complete membership, in canonical source order.
+
+        The membership route omits files and corrections. For full rows, join
+        those fields from the existing item trace, preserving direct membership
+        and its order (the trace also includes recursively linked reviews).
+        Neither form is a retained history cache.
+        """
+        source = "cli:work-item-get " + work_item_id
+        try:
+            result = self.command("work-item-get", work_item_id=work_item_id)
+            if result.get("workItem", {}).get("id") != work_item_id:
+                raise ValueError("item membership mismatch")
+            assignments = result["assignments"]
+            if not isinstance(assignments, list):
+                raise ValueError("invalid assignment membership")
+            identities = []
+            seen = set()
+            for row in assignments:
+                if (not isinstance(row, dict) or row.get("workItemId") != work_item_id
+                        or not isinstance(row.get("id"), str) or not row["id"]
+                        or row["id"] in seen):
+                    raise ValueError("invalid assignment member")
+                seen.add(row["id"])
+                identities.append(row if include_rows else {"id": row["id"]})
+            if include_rows and identities:
+                trace = self.command("work-item-trace", work_item_id=work_item_id)
+                if trace.get("workItem", {}).get("id") != work_item_id:
+                    raise ValueError("item trace mismatch")
+                members = {row["id"]: row for row in trace["assignments"]}
+                for row in identities:
+                    member = members[row["id"]]
+                    if (not isinstance(member.get("files"), list)
+                            or not isinstance(member.get("commitRefCorrections"), list)
+                            or any(member.get(key) != row.get(key)
+                                   for key in ("holderKey", "state", "reviewsAssignmentId"))):
+                        raise ValueError("item trace member mismatch")
+                    row.update(files=member["files"],
+                               commitRefCorrections=member["commitRefCorrections"])
+            return Read(identities, True, now_ms(), source)
+        except Exception as error:
+            return Read([], False, now_ms(), source, type(error).__name__)
+
+    def collection(self, path, *, fold=None):
         rows, cursor, seen, page_number = [], None, set(), 0
         try:
             while True:
@@ -147,22 +191,46 @@ class Gateway:
                 items, page = result["items"], result["page"]
                 if not isinstance(items, list) or not all(isinstance(r, dict) for r in items):
                     raise ValueError("invalid collection rows")
-                rows.extend(items)
+                if fold is None:
+                    rows.extend(items)
+                else:
+                    fold.add(items)
                 if cursor is None and page["hasMoreBefore"] is not False:
                     raise ValueError("collection did not start at head")
                 if page["hasMoreAfter"] is False:
                     # Starting at the head and walking forward is complete;
                     # a server unexpectedly returning a tail is not.
-                    return Read(rows, True, now_ms(), path, page=page_number)
+                    return Read(rows, True, now_ms(), path, page=page_number, folded=fold)
                 if page["hasMoreAfter"] is not True:
                     raise ValueError("invalid page completion")
                 cursor = page["newestCursor"]
                 if not cursor or cursor in seen:
                     raise ValueError("collection cursor did not advance")
                 seen.add(cursor)
+                del items, result, page  # Release this page before fetching the next.
         except Exception as error:
             # Keep partial pages, but never expose response bodies or tokens.
-            return Read(rows, False, now_ms(), path, type(error).__name__, page_number)
+            return Read(rows, False, now_ms(), path, type(error).__name__, page_number, fold)
+
+    def read_item_activity(self, session, assignment_items):
+        from atc_summary import ItemActivityFold
+        # Exactly the same head-to-end paginated route as visible turns.
+        return self.collection("/api/sessions/" + quote(session, safe="") + "/turns",
+                               fold=ItemActivityFold(assignment_items))
+
+    def read_current(self, resource, scope=None, *, keep_ids=()):
+        from atc_summary import HistoryFold, HISTORY_KEYS
+        if resource not in HISTORY_KEYS:
+            return self.read(resource, scope)
+        fold = HistoryFold(resource, now_ms(), keep_ids)
+        if resource != "attests":
+            return self.collection("/api/sessions/" + quote(scope, safe="") + "/" + resource,
+                                   fold=fold)
+        result = self.read(resource, scope)
+        fold.add(result.rows)
+        result.rows = []
+        result.folded = fold
+        return result
 
     def read(self, resource, scope=None):
         if resource in {"work-items", "sessions", "decision-requests"}:
