@@ -19,7 +19,7 @@ const context = vm.createContext({THREE, ...tiers, ...windowRules, factValue, kn
   diagramMesh(geometry,color){return new THREE.Mesh(geometry,new THREE.MeshBasicMaterial({color}));},
   layerState:{workItems:false, agents:true},
 });
-const build = page.slice(page.indexOf('function buildItems('), page.indexOf('function buildTieredScene('));
+const build = page.slice(page.indexOf('function* itemSteps('), page.indexOf('function buildTieredScene('));
 const nodeLayer = page.slice(page.indexOf('function nodeLayerOn('),page.indexOf('/* Keep node parents mounted:'));
 vm.runInContext(build + '\n' + nodeLayer, context);
 const open = {id:'orphan', short:'orphan', state:'open', holders:[], stage:0,
