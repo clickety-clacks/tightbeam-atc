@@ -448,7 +448,10 @@ layerCards.addEventListener('click', ev => {
 renderLayerCards();
 
 let firstBoardComplete = false, firstLoadTask = null, firstLoadHeld = false;
-let openingFrameStatus = null;
+let openingFrameStatus = null, completingFirstScene = false;
+// Finish the drawn revision even when the feed is busy. Only the latest
+// accepted scene update waits; ingestion and status continue immediately.
+const firstSceneUpdates = createDeferredUpdateGate(() => !firstBoardComplete && !!firstLoadTask?.pending);
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
 let streamState = 'connecting', streamError = null, startupWarning = null,
     modelEventSource = null, resyncTimer = null, startupStatusChecked = false,
@@ -2366,7 +2369,6 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFir
   let previousHoverScroll = null;
   let savedView = null;
   try {
-    if (!firstBoardComplete) firstLoadTask?.cancel();
     DATA = model;
     agentSamples = nextSamples;
     if (versionChanged){
@@ -2377,7 +2379,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFir
           itemEvidenceNotices.set(itemId, 'The model changed since these notes were loaded. Load the current notes again.');
       }
     }
-    deferredSceneUpdates.run(()=>{
+    deferredSceneUpdates.run(()=>firstSceneUpdates.run(()=>{
       previousHoverKeys = hoverLeaders.map(L => L.key).filter(Boolean);
       previousHoverScroll = captureHoverScroll(hoverLeaders);
       const pose = captureModelPose();
@@ -2421,9 +2423,15 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFir
         openingFrameStatus = null;
         renderModelStatus();
       };
-      if (!firstBoardComplete){
-        firstLoadTask?.cancel();
-        firstLoadTask = createSceneLoad(firstSceneSteps(model), finishScene);
+      if (!firstBoardComplete && !completingFirstScene){
+        firstLoadTask = createSceneLoad(firstSceneSteps(model), () => {
+          if (!firstSceneUpdates.pending) return finishScene();
+          // Reconcile once, synchronously before the first complete draw.
+          // Further feed tasks cannot interleave and restart this catch-up.
+          completingFirstScene = true;
+          try { firstSceneUpdates.flush(); }
+          finally { completingFirstScene = false; }
+        });
         firstLoadTask.hold(firstLoadHeld);
       } else {
         if (sceneChanged){
@@ -2435,7 +2443,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFir
         }
         finishScene();
       }
-    });
+    }));
     lastModel = model;
     if (!viewOnly){ streamState='connected'; streamError=null; spawnWakes(); spawnMessages(); }
     renderModelStatus();

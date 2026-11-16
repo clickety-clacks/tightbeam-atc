@@ -19,3 +19,10 @@ class ProgressiveSceneTest(unittest.TestCase):
             cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_continuous_updates_preserve_progress_and_catch_up(self):
+        result = subprocess.run(
+            [shutil.which("node"), "test/progressive-update-stream.mjs"],
+            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
