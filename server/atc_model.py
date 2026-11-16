@@ -167,10 +167,12 @@ class EvidenceModel:
         self._item_activity_parts = {}
         self._item_activity = {}
         self.retired_item_activity = {}
+        self.discoverable_retired_item_activity = {}
         self.session_activity = {}
         self.session_activity_evidence = {}
         self.activity_refresh = None
         self.retired_activity_revision = 0
+        self._item_activity_retired_revision = None
         self.closed_items = {}
         self.item_contributions = ItemContributions()
         self.closed_revision = 0
@@ -408,18 +410,24 @@ class EvidenceModel:
                                and self.inventories["turns", session].unconfirmed_since is None))
         return marker, unread, assignment_items
 
-    def fold_retired_activity(self, activity):
+    def fold_retired_activity(self, activity, *, discoverable_activity=None):
         work = self.work_items()
+        if discoverable_activity is None:
+            discoverable_activity = activity
         changed = False
-        for wid, at in activity.items():
-            if wid in work and at > self.retired_item_activity.get(wid, 0):
-                self.retired_item_activity[wid] = at
-                changed = True
-        if self.inventory("work-items").complete:
-            for wid in list(self.retired_item_activity):
-                if wid not in work:
-                    del self.retired_item_activity[wid]
+        for values, target in ((activity, self.retired_item_activity),
+                               (discoverable_activity, self.discoverable_retired_item_activity)):
+            for wid, at in values.items():
+                timestamp = latest_time(at)
+                if wid in work and timestamp is not None and timestamp > target.get(wid, 0):
+                    target[wid] = timestamp
                     changed = True
+        if self.inventory("work-items").complete:
+            for target in (self.retired_item_activity, self.discoverable_retired_item_activity):
+                for wid in list(target):
+                    if wid not in work:
+                        del target[wid]
+                        changed = True
         if changed:
             self.retired_activity_revision += 1
 
@@ -427,9 +435,13 @@ class EvidenceModel:
         if at is None:
             at = self.inventory("sessions").observed_at
         assignments = self.inventory("assignments").rows
+        work = self.work_items()
+        assignment_holders = {row.get("holderKey") for row in assignments.values()
+                              if row.get("workItemId") in work and row.get("holderKey")}
         released = {key for key in self.inventories
                     if key[0] in {"turns", "wakes", "messages"} and key[1] not in visible}
         activity = {}
+        discoverable_activity = {}
         for resource, session in released:
             if resource == "turns":
                 self.release_turn_activity(session, at)
@@ -438,9 +450,14 @@ class EvidenceModel:
                     wid = assignments.get(aid, {}).get("workItemId")
                     if wid:
                         activity[wid] = max(activity.get(wid, 0), activity_at)
+                        discoverable_activity[wid] = max(
+                            discoverable_activity.get(wid, 0), activity_at)
                 for wid, activity_at in turn_summary["jobRefActivity"].items():
                     activity[wid] = max(activity.get(wid, 0), activity_at)
-        self.fold_retired_activity(activity)
+                    if session in assignment_holders:
+                        discoverable_activity[wid] = max(
+                            discoverable_activity.get(wid, 0), activity_at)
+        self.fold_retired_activity(activity, discoverable_activity=discoverable_activity)
         for key in released:
             del self.inventories[key]
             self.summaries.pop(key, None)
@@ -485,10 +502,14 @@ class EvidenceModel:
             if wid not in published:
                 del self.closed_items[wid]
                 self.closed_revision += 1
-        for wid in tuple(self.retired_item_activity):
-            if wid not in published:
-                del self.retired_item_activity[wid]
-                self.retired_activity_revision += 1
+        retired_activity_changed = False
+        for values in (self.retired_item_activity, self.discoverable_retired_item_activity):
+            for wid in tuple(values):
+                if wid not in published:
+                    del values[wid]
+                    retired_activity_changed = True
+        if retired_activity_changed:
+            self.retired_activity_revision += 1
         for values in (self.item_assignment_facts, self.item_assignment_summary,
                        self._item_activity,
                        *(part[1] for part in self._item_activity_parts.values())):
@@ -1319,8 +1340,7 @@ class EvidenceModel:
         assignments = self.inventory("assignments")
         versions["assignments"].append(("closed-items", self.closed_revision))
         versions["turns"].append((("assignments", None), assignments.data_revision))
-        versions["turns"].append((("retired-item-activity", None), self.retired_activity_revision))
-        changed = False
+        changed = self._item_activity_retired_revision != self.retired_activity_revision
         for group, revision in versions.items():
             cached = self._item_activity_parts.get(group)
             if cached is not None and cached[0] == revision:
@@ -1356,7 +1376,6 @@ class EvidenceModel:
                         for wid, at in inventory.activity.items():
                             record(wid, at)
             else:
-                activity.update(self.retired_item_activity)
                 for resource, scope in self.inventories:
                     if resource == "turns":
                         turn_summary = self.summary(resource, scope)
@@ -1370,8 +1389,38 @@ class EvidenceModel:
             for _revision, activity in self._item_activity_parts.values():
                 for wid, at in activity.items():
                     combined[wid] = latest_time(combined.get(wid), at)
+            for wid, at in self.retired_item_activity.items():
+                combined[wid] = latest_time(combined.get(wid), at)
             self._item_activity = combined
+            self._item_activity_retired_revision = self.retired_activity_revision
         return self._item_activity
+
+    def discoverable_item_activity(self):
+        """Return current item activity without undiscoverable retired jobRef turns."""
+        self.item_activity()
+        combined = {}
+        for group, (_revision, activity) in self._item_activity_parts.items():
+            if group == "turns":
+                continue
+            for wid, at in activity.items():
+                combined[wid] = latest_time(combined.get(wid), at)
+        discoverable_sessions = {row["sessionKey"] for row in self.active_sessions()}
+        assignments = self.inventory("assignments").rows
+        published = self.work_items()
+        for resource, scope in self.inventories:
+            if resource != "turns" or scope not in discoverable_sessions:
+                continue
+            turn_summary = self.summary(resource, scope)
+            for aid, at in turn_summary["assignmentActivity"].items():
+                wid = assignments.get(aid, {}).get("workItemId")
+                if wid in published:
+                    combined[wid] = latest_time(combined.get(wid), at)
+            for wid, at in turn_summary["jobRefActivity"].items():
+                if wid in published:
+                    combined[wid] = latest_time(combined.get(wid), at)
+        for wid, at in self.discoverable_retired_item_activity.items():
+            combined[wid] = latest_time(combined.get(wid), at)
+        return combined
 
     def snapshot(self, now, *, assignment_source_unavailable=False, eligible_activity_items=None):
         self.next_expiry = None
@@ -1399,6 +1448,7 @@ class EvidenceModel:
             by_item[assignment.get("workItemId")].append(assignment)
 
         item_activity = self.item_activity()
+        discoverable_item_activity = self.discoverable_item_activity()
 
         visible = self.active_sessions()
         ids = {s["sessionKey"]: agent_id(s["sessionKey"]) for s in visible}
@@ -1717,6 +1767,9 @@ class EvidenceModel:
                 closed.append(folded_closed["closedAt"])
             latest_activity = latest_time(item.get("createdAt"), item.get("bodyUpdatedAt"),
                                          item.get("rowVersion"), item_activity.get(wid))
+            discoverable_latest_activity = latest_time(
+                item.get("createdAt"), item.get("bodyUpdatedAt"), item.get("rowVersion"),
+                discoverable_item_activity.get(wid))
             # Public work-item rows currently expose no terminal-state time.
             # Never substitute an assignment's closedAt as an exact item close.
             ended = item["state"] in {"closed", "iceboxed"}
@@ -1735,7 +1788,7 @@ class EvidenceModel:
                 "started": started, "landings": landings,
                 "latestActivityAt": latest_activity,
                 "landingAt": (self.merges.get(wid, {}).get("landingAt") if merged is True else None),
-                "finishedAt": (exact_finish or latest_activity) if ended else None,
+                "finishedAt": (exact_finish or discoverable_latest_activity) if ended else None,
                 "finishedAtApproximate": ended and exact_finish is None,
                 "turns": (item_turns.get(wid, {}) if item_turn_facts["complete"]
                           else (item_turns.get(wid) or None)),

@@ -166,14 +166,23 @@ class ItemActivityFold:
     def __init__(self, assignment_items):
         self.assignment_items = assignment_items
         self.activity = {}
+        self.assignment_activity = {}
+        self.jobref_activity = {}
 
     def add(self, rows):
         for row in rows:
             aid = row.get("assignmentId")
-            wid = self.assignment_items.get(aid) if aid else row.get("jobRef")
+            if aid:
+                wid = self.assignment_items.get(aid)
+                target = self.assignment_activity
+            else:
+                wid = row.get("jobRef")
+                target = self.jobref_activity
             if wid is None:
                 continue
             times = [row.get(key) for key in ("createdAt", "startedAt", "endedAt")]
             recorded = [at for at in times if isinstance(at, (int, float))]
             if recorded:
-                self.activity[wid] = max(self.activity.get(wid, 0), *recorded)
+                timestamp = max(recorded)
+                target[wid] = max(target.get(wid, 0), timestamp)
+                self.activity[wid] = max(self.activity.get(wid, 0), timestamp)

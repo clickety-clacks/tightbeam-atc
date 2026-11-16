@@ -1802,6 +1802,36 @@ class LiveService:
                 and scope not in {row["sessionKey"] for row in self.model.active_sessions()}):
             # A read dispatched before retirement cannot recreate its scope.
             if resource == "turns" and key is not None and self.model.closed_sources_released:
+                from atc_summary import ItemActivityFold
+                assignment_items = {row["id"]: row.get("workItemId") for row in
+                                    self.model.inventory("assignments").rows.values()}
+                if result.folded is not None and hasattr(result.folded, "summary"):
+                    summary = result.folded.summary
+                    assignment_activity = {}
+                    for aid, at in summary["assignmentActivity"].items():
+                        wid = assignment_items.get(aid)
+                        if wid:
+                            assignment_activity[wid] = max(assignment_activity.get(wid, 0), at)
+                    jobref_activity = dict(summary["jobRefActivity"])
+                else:
+                    fold = ItemActivityFold(assignment_items)
+                    fold.add(result.rows)
+                    assignment_activity = fold.assignment_activity
+                    jobref_activity = fold.jobref_activity
+                activity = dict(assignment_activity)
+                for wid, at in jobref_activity.items():
+                    activity[wid] = max(activity.get(wid, 0), at)
+                published = self.model.work_items()
+                assignment_holders = {row.get("holderKey") for row in
+                    self.model.inventory("assignments").rows.values()
+                    if row.get("workItemId") in published and row.get("holderKey")}
+                discoverable = dict(assignment_activity)
+                # A fresh load reads retired session turns when the session
+                # still has an assignment on any in-scope board item.
+                if scope in assignment_holders:
+                    discoverable.update(jobref_activity)
+                self.model.fold_retired_activity(
+                    activity, discoverable_activity=discoverable)
                 if not result.complete:
                     self.read_failures.add(job[:2])
                     self.read_retries[job] = (time.monotonic() + RETRY_MS / 1000, priority)
@@ -1821,21 +1851,34 @@ class LiveService:
                 return True
             if resource == "turns":
                 from atc_summary import ItemActivityFold
-                mapping = {row["id"]: row.get("workItemId") for row in
-                           self.model.inventory("assignments").rows.values()}
-                if result.folded is not None:
-                    activity = {}
-                    for aid, at in result.folded.summary["assignmentActivity"].items():
-                        wid = mapping.get(aid)
+                assignment_items = {row["id"]: row.get("workItemId") for row in
+                                    self.model.inventory("assignments").rows.values()}
+                if result.folded is not None and hasattr(result.folded, "summary"):
+                    summary = result.folded.summary
+                    assignment_activity = {}
+                    for aid, at in summary["assignmentActivity"].items():
+                        wid = assignment_items.get(aid)
                         if wid:
-                            activity[wid] = max(activity.get(wid, 0), at)
-                    for wid, at in result.folded.summary["jobRefActivity"].items():
-                        activity[wid] = max(activity.get(wid, 0), at)
+                            assignment_activity[wid] = max(assignment_activity.get(wid, 0), at)
+                    jobref_activity = dict(summary["jobRefActivity"])
                 else:
-                    fold = ItemActivityFold(mapping)
+                    fold = ItemActivityFold(assignment_items)
                     fold.add(result.rows)
-                    activity = fold.activity
-                self.model.fold_retired_activity(activity)
+                    assignment_activity = fold.assignment_activity
+                    jobref_activity = fold.jobref_activity
+                activity = dict(assignment_activity)
+                for wid, at in jobref_activity.items():
+                    activity[wid] = max(activity.get(wid, 0), at)
+                published = self.model.work_items()
+                assignment_holders = {row.get("holderKey") for row in
+                    self.model.inventory("assignments").rows.values()
+                    if row.get("workItemId") in published and row.get("holderKey")}
+                discoverable = dict(assignment_activity)
+                if scope in assignment_holders:
+                    for wid, at in jobref_activity.items():
+                        discoverable[wid] = max(discoverable.get(wid, 0), at)
+                self.model.fold_retired_activity(
+                    activity, discoverable_activity=discoverable)
             if not result.complete:
                 # Partial late reads carry positive facts, but cannot certify
                 # the final activity of the retired holder.

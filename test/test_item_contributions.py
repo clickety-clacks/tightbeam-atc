@@ -203,6 +203,7 @@ class ItemContributionsTest(unittest.TestCase):
                 model.release_auxiliary_sources()
                 after = model.snapshot(1300)
                 for values in (model.closed_items, model.retired_item_activity,
+                               model.discoverable_retired_item_activity,
                                model.item_assignment_facts, model.item_assignment_summary,
                                model.item_activity(), model.inventory('artifacts').activity,
                                *(part[1] for part in model._item_activity_parts.values())):

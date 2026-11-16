@@ -120,6 +120,67 @@ class SummaryTest(unittest.TestCase):
         ])
 
         self.assertEqual({"assigned-item": 70, "jobref-item": 80}, fold.activity)
+        self.assertEqual({"assigned-item": 70}, fold.assignment_activity)
+        self.assertEqual({"jobref-item": 80}, fold.jobref_activity)
+
+    def test_retired_jobref_only_turn_changes_display_but_not_finish_fallback(self):
+        model = EvidenceModel()
+        item = {
+            "id": "work", "title": "Work", "state": "closed",
+            "createdAt": 10, "rowVersion": 10, "holders": [], "started": False,
+            "attestCounts": {}, "verdictCounts": {}, "effectiveCommitRefs": [], "landings": [],
+        }
+        model.accept("work-items", None, Read([item], True, 10, "test-read"))
+        model.accept("assignments", None, Read([], True, 10, "test-read"))
+        model.accept("sessions", None, Read([
+            {"sessionKey": "author", "state": "active"},
+        ], True, 10, "test-read"))
+        model.accept("turns", "author", Read([
+            {"seq": 1, "sessionKey": "author", "jobRef": "work", "endedAt": 80},
+        ], True, 80, "test-read"))
+        before = model.snapshot(100)["items"][0]
+
+        model.accept("sessions", None, Read([
+            {"sessionKey": "author", "state": "retired"},
+        ], True, 90, "test-read"))
+        model.release_session_histories(set(), at=90)
+        after = model.snapshot(100)["items"][0]
+
+        self.assertEqual(80, before["finishedAt"])
+        self.assertEqual(80, after["latestActivityAt"])
+        self.assertEqual(10, after["finishedAt"])
+        self.assertEqual({"work": 80}, model.retired_item_activity)
+        self.assertEqual({}, model.discoverable_retired_item_activity)
+
+    def test_retired_jobref_turn_is_discoverable_via_another_board_assignment(self):
+        model = EvidenceModel()
+        assigned_item = {
+            "id": "assigned", "title": "Assigned", "state": "open",
+            "createdAt": 10, "rowVersion": 10, "holders": ["agent author"], "started": True,
+            "attestCounts": {}, "verdictCounts": {}, "effectiveCommitRefs": [], "landings": [],
+        }
+        finished_item = {
+            "id": "finished", "title": "Finished", "state": "closed",
+            "createdAt": 10, "rowVersion": 10, "holders": [], "started": False,
+            "attestCounts": {}, "verdictCounts": {}, "effectiveCommitRefs": [], "landings": [],
+        }
+        model.accept("work-items", None, Read([assigned_item, finished_item], True, 10, "test-read"))
+        model.accept("assignments", None, Read([
+            {"id": "assignment", "workItemId": "assigned", "holderKey": "author",
+             "state": "open", "openedAt": 10},
+        ], True, 10, "test-read"))
+        model.accept("turns", "author", Read([
+            {"seq": 1, "sessionKey": "author", "jobRef": "finished", "endedAt": 80},
+        ], True, 80, "test-read"))
+
+        model.release_session_histories(set(), at=90)
+        finished = next(item for item in model.snapshot(100)["items"] if item["id"] == "finished")
+
+        self.assertEqual({"finished": 80}, model.retired_item_activity)
+        self.assertEqual({"finished": 80}, model.discoverable_retired_item_activity)
+        self.assertEqual(80, finished["latestActivityAt"])
+        self.assertEqual(80, finished["finishedAt"])
+        self.assertTrue(finished["finishedAtApproximate"])
 
     def test_retiring_session_preserves_jobref_item_activity(self):
         model = EvidenceModel()
@@ -137,6 +198,7 @@ class SummaryTest(unittest.TestCase):
         model.release_session_histories(set(), at=90)
 
         self.assertEqual({"work": 80}, model.retired_item_activity)
+        self.assertEqual({}, model.discoverable_retired_item_activity)
         self.assertEqual({"work": 80}, model.item_activity())
 
 
