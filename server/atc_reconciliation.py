@@ -39,6 +39,9 @@ class ActiveBackstop:
                 if resource == "turns" and summary["live"]:
                     sessions.add(scope)  # Includes a queued turn.
                 activity(scope, summary["recentActivity"])
+        for part in model.closed_items.values():
+            for author, timestamp in part["summary"]["authors"].items():
+                activity(author, timestamp)
         deadlines = []
         for session, timestamp in recent.items():
             if session in session_scopes and timestamp + RECENT_WINDOW_MS > at:

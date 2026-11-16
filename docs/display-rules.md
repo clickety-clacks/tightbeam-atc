@@ -6,7 +6,11 @@ decisions, made deliberately. `docs/state-review.md` is the analysis behind
 them.
 
 Throughout, **ghosted** means faint and still there — the org stays visible as
-context. Nothing is ever hidden or removed from the scene.
+context. Search and focus do not remove scene members. The separate finished /
+landed window sets membership before these interactions: expired or unknown-time
+window-eligible items are absent, while unfinished orphans and every unaccepted
+failure remain present. An unaccepted failure stays with its holder, on the orphan
+ring when known-unattached, or off the ring with unknown attachment.
 
 ## 1. A search stays in force under a click
 

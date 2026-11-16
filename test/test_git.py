@@ -594,6 +594,33 @@ class CanonicalGitTest(unittest.TestCase):
             self.assertIs(True, resolver.resolve([{"repo": "missing:/retired", "remote": ATC_REMOTE,
                                                   "ref": "refs/heads/main", "commit": landed}]))
 
+    def test_landing_time_is_integration_merge_time_not_check_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, remote, direct, _, _ = self._make_remote(root)
+            def git(*args):
+                return subprocess.run(["git", "-C", str(source), *args], check=True,
+                                      capture_output=True, text=True).stdout.strip()
+            git("switch", "main")
+            git("switch", "-c", "topic")
+            git("commit", "--allow-empty", "-m", "topic work")
+            head = git("rev-parse", "HEAD")
+            git("switch", "main")
+            git("merge", "--no-ff", "topic", "-m", "integrate topic")
+            merge = git("rev-parse", "HEAD")
+            expected = int(git("show", "-s", "--format=%ct", merge)) * 1000
+            git("push", str(remote), "main")
+            resolver = LocalGitResolver(root / "cache", {ATC_REMOTE: remote})
+            for commit in (head, merge):
+                ref = {"repo": "clickety-clacks/tightbeam-atc", "commit": commit}
+                self.assertIs(True, resolver.resolve([ref]))
+                self.assertEqual(expected, resolver.landing_at)
+                self.assertIs(True, resolver.resolve([ref]))
+                self.assertEqual(expected, resolver.landing_at)
+            self.assertIs(True, resolver.resolve([{
+                "repo": "clickety-clacks/tightbeam-atc", "commit": direct}]))
+            self.assertIsNone(resolver.landing_at, "a later unrelated merge is not a landing date")
+
     def _make_remote(self, root, origin=ATC_REMOTE):
         root.mkdir(parents=True, exist_ok=True)
         source = root / "source"

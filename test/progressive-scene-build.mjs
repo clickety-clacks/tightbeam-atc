@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 import {register} from 'node:module';
 import * as THREE from '../web/three.module.js';
 import * as tiers from '../web/work-item-tiers.mjs';
+import * as windowRules from '../web/work-item-window.mjs';
 import {factValue, knownStage, ringMeaning} from '../web/viewer-semantics.mjs';
 import {unknownItemType} from '../web/viewer-unknown-status.mjs';
 import {createSceneLoad} from '../web/render-loop.mjs';
@@ -16,14 +17,22 @@ const {LineSegmentsGeometry}=await import('../web/addons/lines/LineSegmentsGeome
 const {LineSegments2}=await import('../web/addons/lines/LineSegments2.js');
 const page=readFileSync(new URL('../web/index.html',import.meta.url),'utf8');
 const builders=page.slice(page.indexOf('function* groundSteps('),page.indexOf('function restartFirstScene('));
+const now=Date.now();
 const agents=Array.from({length:80},(_,i)=>({id:`agent-${i}`,kind:'coder',parent:i?'agent-0':null,
   evidence:{parent:{status:'known',complete:true}}}));
 const items=Array.from({length:220},(_,i)=>({id:`item-${i}`,short:`item-${i}`,state:'open',stage:2,
-  holders:i%2?[`agent-${i%80}`]:[],assignments:{open:i%2?1:0,terminal:1},
+  latestActivityAt:now-i*windowRules.DAY_MS, holders:i%2?[`agent-${i%80}`]:[],assignments:{open:i%2?1:0,terminal:1},
   evidence:{assignments:{complete:true},stage:{status:'known',complete:true}}}));
+items.push(
+  {...items[0],id:'recent-finished',state:'closed',finishedAt:now},
+  {...items[0],id:'old-finished',state:'closed',finishedAt:now-31*windowRules.DAY_MS},
+  {...items[0],id:'unaccepted-failed',state:'failed'},
+  {...items[0],id:'unknown-holder',holders:null});
 const model={agents,items,links:[{from:'agent-1',to:'agent-2',state:'run'}]};
-function context(){return vm.createContext({THREE,...tiers,factValue,knownStage,ringMeaning,
+function context(){return vm.createContext({THREE,...tiers,...windowRules,factValue,knownStage,ringMeaning,
   unknownItemType,LineMaterial,LineSegmentsGeometry,LineSegments2,AGENT_R:2.2,TETHER_SEGS:8,
+  sceneTime:now,finishedDays:1,renderedItemIds:[],
+  camera:new THREE.PerspectiveCamera(),scene:new THREE.Scene(),
   byId:{},APOS:{},agentMeshes:{},itemMeshes:[],
   groundGroup:new THREE.Group(),itemGroup:new THREE.Group(),tetherGroup:new THREE.Group(),linkGroup:new THREE.Group(),
   T:{stage:[0,1,2,3,4,5,6],arcA:1,arcB:2,orphan:3,tetherSched:4,tetherRun:5,tetherWait:6},
@@ -55,6 +64,11 @@ while(task.pending){
   }
 }
 assert.equal(done,true);
+assert.ok(!partial.itemMeshes.some(m=>m.userData.w?.id==='old-finished'));
+assert.ok(partial.itemMeshes.some(m=>m.userData.w?.id==='recent-finished'));
+assert.ok(partial.itemMeshes.some(m=>m.userData.w?.id==='unaccepted-failed'));
+assert.equal(partial.camera.far,full.camera.far);
+assert.deepEqual([...partial.renderedItemIds],[...full.renderedItemIds]);
 assert.deepEqual(JSON.parse(JSON.stringify(scene(partial))),JSON.parse(JSON.stringify(scene(full))));
 
 // Drawing successive partial boards must not allocate a fresh tether buffer

@@ -158,3 +158,67 @@ Acceptance must also measure realistic active-scope count, achieved active
 confirmation time and read load. If the 30-minute budget cannot be achieved at
 acceptable load, the observed shortfall must be reported; no slower budget is
 silently substituted.
+
+## Item placement time sources
+
+The 0.1.15 source audit above establishes that work-item collection/detail rows
+have no close/icebox timestamp. `WorkItems.trace_result` exposes `JobTrace.build`
+through the read-only `work-item-trace` command; its `causal_event` entries include
+`disposition_transition`, `at`, `seqTiebreak`, `jobRef` and `detail.toState`.
+ATC requests that optional read for closed/iceboxed items when their recorded
+version changes. The latest matching disposition supplies an exact finish time.
+A missing, unavailable or mismatching transition uses the latest recorded item,
+assignment, attributed turn, attest or artifact activity, explicitly approximate.
+Trace reads are limited to items whose `rowVersion` could fall within the maximum
+30-day window: every disposition advances that version, so an older version is a
+safe upper bound. Missing or invalid versions remain eligible. Activity maxima
+are cached by assignment, attest, artifact and turn inventory revisions; unchanged
+publications do not rescan those historical rows. Changed reads or feed payloads
+recompute the maxima, including removals and reassignment.
+A trace failure does not block the core inventory. No trace is read for failed
+placement. The audit is source evidence, not a new live-Gateway observation.
+
+`WorkItems.stamp_version_in_txn` advances `rowVersion` from wall-clock milliseconds
+(or the preceding value plus one within a millisecond); it supplies item-update
+activity, not an exact state-transition time. Assignment `closedAt` remains a
+separate fact and is never called an exact work-item close.
+
+Landing windows use the earliest durable landing `observedAt`. Otherwise the Git
+resolver supplies a commit timestamp only for an identified integration merge:
+the referenced merge itself, or the first first-parent descendant that merges the
+reference from outside its first parent. Direct commits and patch-equivalence
+proofs without an identified merge have unknown landing time. Git-check
+`observedAt` never supplies a window timestamp. Optional date lookup failure
+leaves merge proof intact. Stored Git landing times survive restart.
+
+
+## Failure acceptance in controlled viewer models
+
+Current upstream records do not reliably distinguish a direct operator failure
+or acceptance from a session acting under a user identity, and do not link a
+failure to a structured operator decision. ATC does not infer acceptance from
+reason text, user attribution or a mentioned decision ID. Its production model
+therefore supplies no acceptance evidence; every failed item remains unaccepted.
+No upstream record or API change is implemented here.
+
+Isolated served-model tests exercise acceptance using an ATC viewer evidence
+shape: `failureAcceptance: {complete: true, records: [...]}`. A record identifies
+`id`, `itemId`, `source` (`operator-action` or `operator-decision`), boolean
+`accepted`, and optional epoch-ms `at`. These source labels mean evidence of the
+direct operator action or linked decision, not merely attribution to a user.
+This is a normalized viewer contract, not a claim that today's upstream offers
+such records. Any future upstream mapping requires its own supported contract.
+
+Matching records that both accept and reject are conflicting; no source outranks
+another. Incomplete evidence, missing records, unknown sources and conflicts are
+unaccepted. Detail names the evidence or states its absence/conflict; actual
+conflicts must be returned for product-owner judgment. Current records cannot
+produce a conflicting acceptance case.
+
+For an accepted test-model failure, exact finish time is the later of `failedAt`
+and its first acceptance timestamp. If either timestamp is unknown, the window
+uses `latestActivityAt`, explicitly approximate. Missing approximate time remains
+outside the window. All unaccepted failures are exempt from the window, whether
+landed or not: attached items retain their position, unknown attachment stays off
+the ring with `?`, and known-unattached items use the age ring with a geometric
+cross independent of annotation visibility. Merge/stage evidence is unchanged.

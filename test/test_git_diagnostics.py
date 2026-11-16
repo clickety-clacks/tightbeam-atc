@@ -34,7 +34,7 @@ class GitDiagnosticsTest(unittest.TestCase):
         self.service.merge_jobs.put(None)
         with patch.object(self.resolver, "_run", side_effect=run) as command:
             self.service._git_worker(resolver or self.resolver)
-        _, (_, _, value, _) = self.service.events.get_nowait()
+        _, (_, _, value, _, _landing_at) = self.service.events.get_nowait()
         return value, command.call_count
 
     def command(self, args):

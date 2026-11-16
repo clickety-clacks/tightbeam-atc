@@ -114,6 +114,9 @@ class HttpTest(unittest.TestCase):
         rows = [{"id": str(i), "assignmentId": "assignment", "kind": "progress",
                  "ts": i, "note": "Note " + str(i), "byUser": None, "bySession": None}
                 for i in range(3)]
+        from unittest.mock import Mock
+        self.live.gateway = Mock(read_count=0)
+        self.live.gateway.read.side_effect = lambda resource, scope: Read(rows, True, 1, "test-read")
         self.live.model.accept("attests", "assignment", Read(rows, True, 1, "test-read"))
         self.live._publish()
         status, first = self.request("/api/items/item/evidence?limit=2")
@@ -130,7 +133,12 @@ class HttpTest(unittest.TestCase):
         self.assertIsNone(last["nextOffset"])
         # Only long detail text changes; the next page must still invalidate.
         rows[0]["note"] = "Changed note"
-        self.live.model.accept("attests", "assignment", Read(rows, True, 1, "test-read"))
+        status, mismatch = self.request("/api/items/item/evidence?offset=2&limit=2" + pin)
+        self.assertEqual(409, status)
+        self.assertEqual(first["revision"], mismatch["revision"])
+        event = self.live.events.get_nowait()
+        self.assertEqual("detail-history", event[0])
+        self.live._handle(*event)
         self.live._publish()
         status, mismatch = self.request("/api/items/item/evidence?offset=2&limit=2" + pin)
         self.assertEqual(409, status)
@@ -144,9 +152,119 @@ class HttpTest(unittest.TestCase):
         self.assertEqual("Changed note", restarted["records"][0]["note"])
         self.assertNotIn("Changed note", json.dumps(self.request("/api/model")[1]))
 
+    def test_evidence_page_orders_across_assignments_and_reports_partial_reads(self):
+        from unittest.mock import Mock
+        self.live.model.accept("work-items", None, Read([
+            {"id": "item", "title": "Visible", "state": "open"}], True, 1, "test-read"))
+        self.live.model.accept("assignments", None, Read([
+            {"id": scope, "workItemId": "item", "state": "closed"} for scope in ('a', 'b')],
+            True, 1, "test-read"))
+        rows = {'a': [{'id': '1', 'ts': 1}, {'id': '4', 'ts': 4}],
+                'b': [{'id': '2', 'ts': 2}, {'id': '3', 'ts': 3}]}
+        for scope, records in rows.items():
+            self.live.model.accept("attests", scope, Read(records, True, 1, "test-read"))
+        self.live.gateway = Mock(read_count=0)
+        self.live.gateway.read.side_effect = lambda resource, scope: Read(rows[scope], scope == 'a', 1, "test-read")
+        self.live._publish()
+        status, first = self.request('/api/items/item/evidence?limit=2')
+        self.assertEqual(200, status)
+        self.assertEqual(['1', '2'], [row['id'] for row in first['records']])
+        self.assertEqual(4, first['total'])
+        self.assertFalse(first['complete'])
+        pin = '&generation=' + first['generation'] + '&revision=' + str(first['revision'])
+        status, last = self.request('/api/items/item/evidence?offset=2&limit=2' + pin)
+        self.assertEqual(200, status)
+        self.assertEqual(['3', '4'], [row['id'] for row in last['records']])
+        self.assertIsNone(last['nextOffset'])
+
     def test_reconnect_ignores_last_event_id_and_starts_with_current_full_model(self):
         request = Request(self.url + "/api/events", headers={"Last-Event-ID": "old"})
         with urlopen(request, timeout=3) as response:
             self.assertEqual(b"event: model\n", response.readline())
             model = json.loads(response.readline()[6:])
             self.assertEqual(self.live.snapshot(), model)
+
+    def test_folded_closed_details_keep_order_notes_pins_and_partial_evidence(self):
+        from unittest.mock import Mock
+        assignments = [dict(id=scope, workItemId='item', state=state, holderKey='author',
+                            subject='Detail '+scope)
+                       for scope, state in (('a', 'closed'), ('b', 'open'), ('c', 'closed'))]
+        rows = {scope: [dict(id=scope, ts=at, note='Note '+scope)]
+                for scope, at in (('a', 3), ('b', 1), ('c', 2))}
+        self.live.model.accept('work-items', None, Read([
+            dict(id='item', title='Visible', state='open')], True, 1, 'test-read'))
+        self.live.model.accept('assignments', None, Read(assignments, True, 1, 'test-read'))
+        for scope, records in rows.items():
+            self.live.model.accept('attests', scope, Read(records, True, 1, 'test-read'))
+        partial = set()
+        self.live.gateway = Mock(read_count=0)
+        self.live.gateway.read.side_effect = lambda resource, scope=None: Read(
+            assignments if resource == 'assignments' else rows[scope],
+            (resource, scope) not in partial, 1, 'test-read')
+        self.live.gateway.assignment_membership.side_effect = lambda wid, **kwargs: Read(
+            assignments, ("assignments", None) not in partial, 1, "test-read")
+        self.live._publish()
+        before = self.request('/api/items/item/evidence?limit=2')
+        self.live.model.fold_closed_assignments()
+        for scope in ('a', 'c'):
+            self.live.reads.epochs.pop(('attests', scope), None)
+        self.assertEqual(before, self.request('/api/items/item/evidence?limit=2'))
+        self.live.gateway.assignment_membership.assert_called_once_with('item', include_rows=True)
+        self.assertFalse(any(call.args[0] == 'assignments'
+                             for call in self.live.gateway.read.call_args_list))
+        first = before[1]
+        self.assertEqual(['b', 'c'], [row['id'] for row in first['records']])
+        pin = '&generation=' + first['generation'] + '&revision=' + str(first['revision'])
+        partial.update({('assignments', None), ('attests', 'c')})
+        status, last = self.request('/api/items/item/evidence?offset=2&limit=2'+pin)
+        self.assertEqual(200, status)
+        self.assertFalse(last['complete'])
+        self.assertEqual(['a'], [row['id'] for row in last['records']])
+        self.assertEqual('Note a', last['records'][0]['note'])
+        self.assertEqual({'b'}, set(self.live.model.inventory('assignments').rows))
+        for scope in ('a', 'c'):
+            self.assertNotIn(('attests', scope), self.live.model.inventories)
+            self.assertNotIn(('attests', scope), self.live.reads.epochs)
+
+    def test_changed_folded_detail_reloads_before_serving_a_new_pin(self):
+        from test_service import PublishedReads
+        gateway = PublishedReads()
+        gateway.rows['assignments', None][0]['state'] = 'closed'
+        self.live.gateway = self.live.reads.gateway = gateway
+        self.live.connected = True
+
+        def settle():
+            while self.live.reads.pending or self.live.reads.active:
+                self.live.reads.pump()
+                self.live._handle(*self.live.events.get(timeout=5))
+            self.live._publish()
+
+        self.live.rebuild()
+        settle()
+        self.live.model.fold_closed_assignments()
+        status, first = self.request('/api/items/work/evidence?limit=1')
+        self.assertEqual(200, status)
+        rebuilds = self.live.metrics['rebuilds']
+        gateway.calls.clear()
+        gateway.rows['attests', 'assignment'][0]['note'] = 'Changed detail only'
+        status, mismatch = self.request('/api/items/work/evidence?limit=1')
+        self.assertEqual(409, status)
+        self.assertEqual(first['revision'], mismatch['revision'])
+        event = self.live.events.get_nowait()
+        self.assertEqual('detail-reload', event[0])
+        self.assertNotIn(('attests', 'assignment'), self.live.model.inventories)
+        self.live._handle(*event)
+        settle()
+        self.live.model.fold_closed_assignments()
+        pin = '&generation=' + first['generation'] + '&revision=' + str(first['revision'])
+        self.assertEqual(409, self.request('/api/items/work/evidence?limit=1'+pin)[0])
+        status, fresh = self.request('/api/items/work/evidence?limit=1')
+        self.assertEqual(200, status)
+        self.assertGreater(fresh['revision'], first['revision'])
+        self.assertEqual('Changed detail only', fresh['records'][0]['note'])
+        self.assertEqual(rebuilds, self.live.metrics['rebuilds'])
+        self.assertNotIn(('read', 'assignments', None), gateway.calls)
+        self.assertIn(('membership', 'work'), gateway.calls)
+        self.assertNotIn(('attests', 'assignment'), self.live.model.inventories)
+        gateway.rows['assignments', None][0]['subject'] = 'Changed assignment detail only'
+        self.assertEqual(409, self.request('/api/items/work/evidence?limit=1')[0])
