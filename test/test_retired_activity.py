@@ -72,6 +72,40 @@ class RetiredActivityTest(unittest.TestCase):
             cold._publish()
             self.assertNotIn(('read', 'turns', 'agent s_author'), cold_gateway.calls)
 
+    def test_recovery_retirement_preserves_turn_winner_before_publication_release(self):
+        with patch('atc_service.now_ms', return_value=1000000):
+            gateway = self.gateway(False)
+            warm = self.load(gateway)
+            session = 'agent s_author'
+            source = list(warm.model.session_activity_evidence[session]['source'])
+            self.assertEqual(700000, warm.model.session_activity[session])
+            items = deepcopy(warm.snapshot()['items'])
+            gateway.rows['sessions', None][0]['state'] = 'retired'
+            for _ in range(2):
+                warm.rebuild(recovery=True)
+                self.drain(warm)
+                # The aggregate must survive the recovery commit itself, not
+                # only a subsequent publication's inventory-release pass.
+                self.assertEqual(700000, warm.model.session_activity[session])
+                self.assertEqual(source, warm.model.session_activity_evidence[session]['source'])
+                facts = warm.model.session_activity_facts(
+                    session, warm.model.inventory('sessions').evidence())
+                self.assertFalse(facts['complete'])
+                self.assertEqual('unconfirmed', facts['freshness'])
+                self.assertEqual(1000000, facts['unconfirmedSince'])
+                warm._publish()
+                self.assertEqual([], warm.snapshot()['agents'])
+                self.assertEqual(items, warm.snapshot()['items'])
+                self.assertNotIn(('turns', session), warm.model.inventories)
+            # A genuinely returning current source reconfirms the same winner.
+            gateway.rows['sessions', None][0]['state'] = 'active'
+            warm.rebuild(recovery=True)
+            self.drain(warm)
+            warm._publish()
+            self.assertEqual(700000, warm.model.session_activity[session])
+            self.assertNotIn('_retainedAt', warm.model.session_activity_evidence[session])
+            self.assertTrue(warm.snapshot()['agents'])
+
     def test_unlinked_retired_session_is_not_read_and_exact_finish_wins(self):
         with patch('atc_service.now_ms', return_value=1000000):
             gateway = self.gateway(True)

@@ -191,7 +191,7 @@ class EvidenceModel:
         if self.activity_refresh is not None:
             values, records = self.activity_refresh
             for session, facts in self.session_activity_evidence.items():
-                if ("_retainedAt" in facts and self.session_activity[session] >
+                if ("_retainedAt" in facts and self.session_activity[session] >=
                         values.get(session, -1)):
                     values[session] = self.session_activity[session]
                     records[session] = facts

@@ -151,6 +151,19 @@ class SessionActivityFoldTest(unittest.TestCase):
         self.assertEqual(1200000, model.session_activity_evidence["author"]["_retainedAt"])
         self.assertEqual(["cli:attests winner"], model.session_activity_evidence["author"]["source"])
 
+    def test_refresh_equal_losing_source_cannot_erase_retained_winner(self):
+        model = EvidenceModel()
+        model.fold_session_activity('author', 1000000, 'turn', 'author', self.facts())
+        model.begin_activity_refresh()
+        model.fold_session_activity('author', 1000000, 'attest', 'other', self.facts())
+        model.release_turn_activity('author', 1100000)
+        model.finish_activity_refresh()
+        self.assertEqual(1000000, model.session_activity['author'])
+        self.assertEqual(['/api/sessions/author/turns'],
+                         model.session_activity_evidence['author']['source'])
+        self.assertEqual(1100000, model.session_activity_evidence['author']['_retainedAt'])
+        self.assertFalse(model.session_activity_facts('author', self.facts())['complete'])
+
     def test_resumed_refresh_does_not_reconfirm_a_pre_outage_record(self):
         model = EvidenceModel()
         model.begin_activity_refresh()
