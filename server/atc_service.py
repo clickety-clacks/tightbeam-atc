@@ -1160,6 +1160,13 @@ class LiveService:
             # incomplete after a later recovery cycle finishes successfully.
             self.metrics["bootstrapComplete"] = True
         if cycle["mode"] != "interval" and complete:
+            # Recovery can finish before publication releases retired turn
+            # inventories. Record that scope exit before replacing the activity
+            # fold, or the observed winner is lost before release can mark it.
+            visible = {row["sessionKey"] for row in self.model.active_sessions()}
+            for session in self.model.session_activity_evidence:
+                if session not in visible:
+                    self.model.release_turn_activity(session, now_ms())
             self.model.finish_activity_refresh()
             self.last_complete = self.last_sweep = now_ms()
             self.sweep_remaining = set(self._history_scopes())
