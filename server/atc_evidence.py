@@ -342,7 +342,7 @@ class HistoryInventory(Inventory):
             for name in ("activity", "recentActivity"):
                 values = [v for v in (previous[name], fold.summary[name]) if v is not None]
                 previous[name] = max(values) if values else None
-            for name in ("latest", "authors", "assignmentActivity"):
+            for name in ("latest", "authors", "assignmentActivity", "jobRefActivity"):
                 for key, value in fold.summary[name].items():
                     previous[name][key] = max(previous[name].get(key, 0), value)
             # Current rows can still establish a newer turn state or mark.
@@ -384,7 +384,7 @@ class HistoryInventory(Inventory):
             if self.resource == "turns" and row.get("endedAt") is None:
                 if not isinstance(at, (int, float)) or at <= now - 60_000:
                     self.rows[key] = {k: row[k] for k in (
-                        "seq", "sessionKey", "assignmentId", "wakeId", "createdAt",
+                        "seq", "sessionKey", "assignmentId", "jobRef", "wakeId", "createdAt",
                         "startedAt", "endedAt", "rowVersion") if k in row}
                     self.observations.pop(key, None)
                 continue
@@ -443,8 +443,8 @@ class HistoryInventory(Inventory):
             for name in ("activity", "recentActivity"):
                 values = [v for v in (self.folded[name], current[name]) if v is not None]
                 self.folded[name] = max(values) if values else None
-            for aid, when in current["assignmentActivity"].items():
-                self.folded["assignmentActivity"][aid] = max(
-                    self.folded["assignmentActivity"].get(aid, 0), when)
+            for name in ("assignmentActivity", "jobRefActivity"):
+                for key, when in current[name].items():
+                    self.folded[name][key] = max(self.folded[name].get(key, 0), when)
         self.prune(at, force=True)
         return True
