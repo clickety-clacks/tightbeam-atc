@@ -282,7 +282,7 @@
 <body>
 <div id="topbar">
   <div id="topleft">
-    <div id="hud"><span class="title"><b>Tightbeam</b> · air traffic control · </span><span id="mode" class="sample">connecting…</span></div>
+    <div id="hud"><span class="title"><b>Tightbeam</b> · air traffic control · </span><span id="mode" class="sample">connecting… · loading board (incomplete)</span></div>
     <div id="themehint">/ search · S select · T theme · L legend · C clear notes<span id="inputavailability"></span></div>
   </div>
   <div id="topright">
@@ -325,7 +325,7 @@ import {itemInWindow, itemWindow, windowDescription, failureDescription, DEFAULT
 let finishedDays = DEFAULT_FINISHED_DAYS;
 let renderedItemIds = [];
 let sceneTime = Date.now();
-import { areProgramsValid, createDeferredUpdateGate, createRenderLoop, renderInterval,
+import { areProgramsValid, createDeferredUpdateGate, createRenderLoop, createSceneLoad, renderInterval,
          scheduleVisualChange } from './render-loop.mjs';
 import { unknownItemFacts, unknownItemType, accessibleUnknownDetails } from './viewer-unknown-status.mjs';
 import { agentHintSummary, itemHintSummary } from './viewer-hints.mjs';
@@ -447,6 +447,11 @@ layerCards.addEventListener('click', ev => {
 });
 renderLayerCards();
 
+let firstBoardComplete = false, firstLoadTask = null, firstLoadHeld = false;
+let openingFrameStatus = null, completingFirstScene = false;
+// Finish the drawn revision even when the feed is busy. Only the latest
+// accepted scene update waits; ingestion and status continue immediately.
+const firstSceneUpdates = createDeferredUpdateGate(() => !firstBoardComplete && !!firstLoadTask?.pending);
 let DATA = null, byId = {}, APOS = {}, agentMeshes = {}, itemMeshes = [], pulses = [], msgLines = [];
 let streamState = 'connecting', streamError = null, startupWarning = null,
     modelEventSource = null, resyncTimer = null, startupStatusChecked = false,
@@ -599,6 +604,17 @@ function restingPose(ang){
     .multiplyScalar(Math.cos(.42)).setY(Math.sin(.42)).normalize();
   const {camPos, target} = frameTo(pts, homeTarget(), e);
   return {pos: camPos, target};
+}
+function firstModelPose(ang){
+  // The synchronous loader fitted before replacing its connecting status.
+  // Measure that same chrome for the opening pose, then restore the current
+  // loading status in this turn, before any frame can be drawn.
+  const el = document.getElementById('mode');
+  const saved = {textContent:el.textContent, className:el.className, title:el.title};
+  try {
+    renderModelStatusElement(el, openingFrameStatus);
+    return restingPose(ang);
+  } finally { Object.assign(el, saved); }
 }
 function flyTo(pos, target, after){
   flight = {p0:camera.position.clone(), p1:pos.clone(),
@@ -830,7 +846,10 @@ function applyTheme(){
   renderLegend();
   measureLegend();
   if (typeof renderSwatches === 'function' && tagBox.style.display === 'block') renderSwatches();
-  if (DATA){ buildTieredScene(DATA.agents, DATA.items); buildLinks(DATA.links); applyView(); }
+  if (DATA){
+    if (firstLoadTask?.pending) restartFirstScene();
+    else { buildTieredScene(DATA.agents, DATA.items); buildLinks(DATA.links); applyView(); }
+  }
 }
 
 /* the ghost set is derived from focus alone — never stored independently */
@@ -1550,7 +1569,7 @@ function paintAgentMesh(mesh, a, now=Date.now()){
   mesh.userData.baseStroke.copy(mesh.userData.lineMat.color);
   mesh.userData.flash = flash;
 }
-function buildGround(agents, tierLayout=null){
+function* groundSteps(agents, tierLayout=null){
   disposeGroup(groundGroup); agentMeshes = {}; APOS = {}; byId = {};
   agents.forEach(a=>byId[a.id]=a);
   const children = {};
@@ -1586,7 +1605,7 @@ function buildGround(agents, tierLayout=null){
     APOS[a.id] = new THREE.Vector3(sidePosition?.x ?? 66 + (i%8)*4.6 + fallbackScatter.x*.45,
                                    -4.2, sidePosition?.z ?? 54 + Math.floor(i/8)*4.6 + fallbackScatter.z*.45);
   });
-  agents.forEach(a=>{
+  for (const a of agents){
     const d = DEPTH[a.id] ?? 2;
     const r = AGENT_R * 1.9 * Math.pow(.72, d);
     const col = agentActivityColor(a);
@@ -1608,9 +1627,10 @@ function buildGround(agents, tierLayout=null){
       marker.position.set(.65, .55, 0); m.add(marker);
     }
     groundGroup.add(m); agentMeshes[a.id]=m;
-  });
-  agents.forEach(a=>{
-    if(!parentKnown(a) || !a.parent || !APOS[a.parent]) return;
+    yield;
+  }
+  for (const a of agents){
+    if(!parentKnown(a) || !a.parent || !APOS[a.parent]) continue;
     const p=APOS[a.parent], q=APOS[a.id];
     const mid=p.clone().add(q).multiplyScalar(.5);
     mid.y = Math.min(mid.y + p.distanceTo(q)*.12, -.35);   /* bow toward the surface, never through it */
@@ -1624,14 +1644,19 @@ function buildGround(agents, tierLayout=null){
     const arc = new THREE.Line(geo, new THREE.LineBasicMaterial({vertexColors:true, transparent:true, opacity:.9}));
     arc.userData = {arc:true, from:a.parent, to:a.id};
     groundGroup.add(arc);
-  });
+    yield;
+  }
 }
 
-function buildLinks(links){
+function buildGround(agents, tierLayout=null){
+  for (const step of groundSteps(agents, tierLayout)) {}
+}
+
+function* linkSteps(links){
   disposeGroup(linkGroup);
-  (links||[]).forEach(l=>{
-    if (!APOS[l.from] || !APOS[l.to]) return;
-    if (!byId[l.from] || !byId[l.to]) return;
+  for (const l of links || []){
+    if (!APOS[l.from] || !APOS[l.to]) continue;
+    if (!byId[l.from] || !byId[l.to]) continue;
     const col = l.state === 'run' ? T.tetherRun : T.tetherWait;
     const color = new THREE.Color(col);
     const A = APOS[l.from], B = APOS[l.to];
@@ -1658,16 +1683,21 @@ function buildLinks(links){
     seg.frustumCulled = false;
     seg.userData = {from:l.from, to:l.to, state:l.state, mat:lm, geo:lg};
     linkGroup.add(seg);
-  });
+    yield;
+  }
 }
 
-function buildItems(items, tierLayout=null){
+function buildLinks(links){
+  for (const step of linkSteps(links)) {}
+}
+
+function* itemSteps(items, tierLayout=null){
   const layout = tierLayout || prepareWorkTierLayout(items, Object.values(byId));
   disposeGroup(itemGroup); disposeGroup(tetherGroup); itemMeshes = [];
   const windowNow = Date.now();
   renderedItemIds = [];
-  items.forEach((w,idx)=>{
-    if (!itemInWindow(w, finishedDays, windowNow)) return;
+  for (const [idx, w] of items.entries()){
+    if (!itemInWindow(w, finishedDays, windowNow)) continue;
     renderedItemIds.push(w.id);
     const placement = layout.placements.get(w.id) || null;
     const unfinished = w.state === 'open';
@@ -1784,20 +1814,62 @@ function buildItems(items, tierLayout=null){
         mesh.add(marker);
       }
     }
-  });
+    yield;
+  }
+}
+
+function buildItems(items, tierLayout=null){
+  for (const step of itemSteps(items, tierLayout)) {}
 }
 
 function buildTieredScene(agents, items){
   const tierLayout = prepareWorkTierLayout(items, agents, 2.2, sceneTime);
   buildGround(agents, tierLayout);
   buildItems(items, tierLayout);
+  applyTierReachability(tierLayout);
+  return tierLayout;
+}
+
+function applyTierReachability(tierLayout){
   // All bounded orphans and unknown items must remain reachable without fog.
   const extent = Math.max(tierLayout.outerRadius, ...[...tierLayout.sideItemPositions.values()]
     .filter(p=>p.area==='unknown').map(p=>Math.hypot(p.x,p.z)));
   camera.far = Math.max(500, extent * 10);
   camera.updateProjectionMatrix();
   if (scene.fog){ scene.fog.near = Math.max(T.fogNear, extent * 4); scene.fog.far = Math.max(T.fogFar, extent * 8); }
-  return tierLayout;
+}
+
+function* firstSceneSteps(model){
+  clearHover();
+  disposeGroup(itemGroup); disposeGroup(tetherGroup); disposeGroup(linkGroup);
+  itemMeshes = [];
+  const layout = prepareWorkTierLayout(model.items, model.agents, 2.2, sceneTime);
+  applyTierReachability(layout);
+  yield* groundSteps(model.agents, layout);
+  yield* itemSteps(model.items, layout);
+  yield* linkSteps(model.links);
+}
+function restartFirstScene(){
+  if (!DATA || firstBoardComplete) return;
+  // Rebuild the same accepted revision in the new theme, without another request.
+  firstLoadTask?.cancel();
+  receiveModel(DATA, {rebuildFirst:true});
+}
+function advanceFirstScene(){
+  if (!firstLoadTask?.pending) return;
+  try {
+    if (firstLoadTask.advance() && firstLoadTask.pending){
+      computeHighlight();
+      selectables().forEach(mesh => shadeSelected(mesh, view.selection.has(selKey(mesh))));
+      applyLayerVisibility();
+    }
+  } catch (error){
+    firstLoadTask.cancel();
+    firstBoardComplete = false;
+    streamState = 'stale'; streamError = 'model build failed; board incomplete';
+    renderModelStatus();
+    console.error('ATC: first scene build failed', error);
+  }
 }
 
 /* ---------- wake pulses ---------- */
@@ -2239,7 +2311,7 @@ function restoreViewerModelState(saved){
 }
 function renderModelStatus(now=Date.now()){
   return renderModelStatusElement(document.getElementById('mode'), {
-    model: DATA, streamState, streamError, startupWarning,
+    model: DATA, streamState, streamError, startupWarning, loading: !firstBoardComplete,
   }, now);
 }
 function focusedItemId(){
@@ -2272,15 +2344,18 @@ function refreshModelReferences(model){
   });
   selectables().forEach(mesh=>shadeSelected(mesh, view.selection.has(selKey(mesh))));
 }
-function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], viewOnly=false}={}){
+function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], rebuildFirst=false, viewOnly=false}={}){
   model = prepareModelSnapshot(model, lastModel);
   if (!model){
     streamState='stale'; streamError='invalid model envelope ignored'; renderModelStatus(); return false;
   }
   const acceptedByOrder = fullSnapshot
     ? shouldAcceptSnapshot(model, lastModel) : shouldAcceptModel(model, lastModel);
-  if (!acceptedByOrder && !viewOnly) return false;
+  if (!acceptedByOrder && !viewOnly && !(rebuildFirst && !firstBoardComplete && model.generation === DATA?.generation && model.revision === DATA?.revision)) return false;
   const previous = DATA, previousSignature = lastSceneSignature;
+  if (!previous && !openingFrameStatus){
+    openingFrameStatus = {model:null, streamState, streamError, startupWarning};
+  }
   const previousSamples = agentSamples;
   const previousEvidencePages = new Map(itemEvidencePages);
   const previousEvidenceNotices = new Map(itemEvidenceNotices);
@@ -2304,7 +2379,7 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], viewOnly=f
           itemEvidenceNotices.set(itemId, 'The model changed since these notes were loaded. Load the current notes again.');
       }
     }
-    deferredSceneUpdates.run(()=>{
+    deferredSceneUpdates.run(()=>firstSceneUpdates.run(()=>{
       previousHoverKeys = hoverLeaders.map(L => L.key).filter(Boolean);
       previousHoverScroll = captureHoverScroll(hoverLeaders);
       const pose = captureModelPose();
@@ -2313,32 +2388,29 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], viewOnly=f
       nextSignature = sceneSignature(model) + JSON.stringify([finishedDays, model.items.filter(w=>itemInWindow(w, finishedDays)).map(w=>w.id)]);
       sceneChanged = nextSignature !== previousSignature;
       const firstModel = previousSignature === null;
-      if (sceneChanged){
-        if (!viewOnly || lastRenderedModel?.generation!==model.generation
-            || lastRenderedModel?.revision!==model.revision) sceneTime = Date.now();
-        rebuildWithViewerState(savedView, ()=>{
-          clearHover();
-          buildTieredScene(model.agents, model.items);
-          buildLinks(model.links);
-        }, restoreViewerModelState);
-        migrateViewKeys();
-        pruneWindowSelection();
-        applyView({preserveCamera:!firstModel});
-      } else {
-        refreshModelReferences(model);
-        if (view.focus.stage===1) renderDetail();
-      }
+      if (sceneChanged && (!viewOnly || lastRenderedModel?.generation!==model.generation
+          || lastRenderedModel?.revision!==model.revision)) sceneTime = Date.now();
+      const finishScene = () => {
+        if (sceneChanged){
+          migrateViewKeys();
+          pruneWindowSelection();
+          applyView({preserveCamera:!firstModel || userMoved || view.selection.size > 0});
+        } else {
+          refreshModelReferences(model);
+          if (view.focus.stage===1) renderDetail();
+        }
+
       /* The opening frame is chosen once, only if the viewer has not already
          moved. Later model events never recenter or alter the camera. */
-      if (firstModel && view.framing==='none' && !userMoved && !flight && !orbitUserOwned){
-        const home = restingPose(Math.atan2(camera.position.x, camera.position.z));
+      if (firstModel && view.framing==='none' && !userMoved && !view.selection.size && !flight && !orbitUserOwned){
+        const home = firstModelPose(Math.atan2(camera.position.x, camera.position.z));
         camera.position.copy(home.pos);
         orbitTgt.copy(home.target);
         const d = home.pos.clone().sub(home.target);
         orbitR = Math.hypot(d.x, d.z); orbitH = d.y;
         orbitAngle = Math.atan2(d.x, d.z);
         controls.target.copy(orbitTgt);
-      } else restoreModelPose(pose);
+      } else if (firstBoardComplete) restoreModelPose(pose);
       if (sceneChanged) restoreHoverByKey(previousHoverKeys, previousHoverScroll);
       lastSceneSignature = nextSignature;
       lastRenderedModel = model;
@@ -2347,7 +2419,31 @@ function receiveModel(model, {fullSnapshot=true, upsertedAgentIds=[], viewOnly=f
         deferredSceneSyncError = null;
       }
       pendingSceneRollbackView = null;
-    });
+        firstBoardComplete = true;
+        openingFrameStatus = null;
+        renderModelStatus();
+      };
+      if (!firstBoardComplete && !completingFirstScene){
+        firstLoadTask = createSceneLoad(firstSceneSteps(model), () => {
+          if (!firstSceneUpdates.pending) return finishScene();
+          // Reconcile once, synchronously before the first complete draw.
+          // Further feed tasks cannot interleave and restart this catch-up.
+          completingFirstScene = true;
+          try { firstSceneUpdates.flush(); }
+          finally { completingFirstScene = false; }
+        });
+        firstLoadTask.hold(firstLoadHeld);
+      } else {
+        if (sceneChanged){
+          rebuildWithViewerState(savedView, ()=>{
+            clearHover();
+            buildTieredScene(model.agents, model.items);
+            buildLinks(model.links);
+          }, restoreViewerModelState);
+        }
+        finishScene();
+      }
+    }));
     lastModel = model;
     if (!viewOnly){ streamState='connected'; streamError=null; spawnWakes(); spawnMessages(); }
     renderModelStatus();
@@ -2585,6 +2681,12 @@ window.__atc = {
   get tags(){ return tags; },
   get arrows(){ return arrows; },
   get data(){ return DATA; },
+  get loading(){ return !firstBoardComplete; },
+  holdFirstLoad(value){
+    firstLoadHeld = Boolean(value);
+    firstLoadTask?.hold(firstLoadHeld);
+    requestRender();
+  },
   get apiUp(){ return apiUp; },
   get scene(){ return scene; },
   get camera(){ return camera; },
@@ -4426,6 +4528,20 @@ function activeRenderInterval(controlsChanged){
   return renderInterval({cameraMoving:!!flight || chromeMoving, controlsChanged,
     pulses:pulses.length > 0, messages:msgLines.length > 0});
 }
+function updateTetherEndpoints(geometry, from, to){
+  const start = geometry.attributes.instanceStart;
+  const end = geometry.attributes.instanceEnd;
+  if (start.getX(0) === Math.fround(from.x) && start.getY(0) === Math.fround(from.y) &&
+      start.getZ(0) === Math.fround(from.z) && end.getX(0) === Math.fround(to.x) &&
+      end.getY(0) === Math.fround(to.y) && end.getZ(0) === Math.fround(to.z)) return;
+  // setPositions creates a new interleaved buffer. Replacing it every partial
+  // frame leaves the previous GPU allocation alive until the context ends.
+  start.setXYZ(0, from.x, from.y, from.z);
+  end.setXYZ(0, to.x, to.y, to.z);
+  start.data.needsUpdate = true;
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+}
 function tickFrame(){
   if (renderer.getContext().isContextLost()){
     renderLoop?.pause();
@@ -4464,6 +4580,7 @@ function tickFrame(){
     }
   }
   if (!prepareRenderer()) return 0;
+  advanceFirstScene();
   if (fitQueued){ fitQueued = false; fitViewport(); }
   const t = clock.getElapsedTime();
   if (Math.abs(chromeOff.x - chromeAim.x) > .25 || Math.abs(chromeOff.y - chromeAim.y) > .25){
@@ -4603,7 +4720,7 @@ function tickFrame(){
       ? Math.min(hiRelations.has('tether:' + u.itemMesh.userData.w.id + '|' + u.hid) ? 1 : DIM, endpointF)
       : endpointF;
     u.mat.opacity = (u.state==='hold' ? .22 : .4) * tetherLit;
-    u.geo.setPositions([p.x,p.y,p.z, _end.x,_end.y,_end.z]);
+    updateTetherEndpoints(u.geo, p, _end);
   });
   /* Agent links keep a fixed brightness gradient pointing toward the owner. */
   linkGroup.children.forEach(o=>{
@@ -4647,7 +4764,7 @@ function tickFrame(){
     renderLoop?.pause();
     return 0;
   }
-  return activeRenderInterval(controlsChanged);
+  return firstLoadTask?.pending && !firstLoadTask.held ? 1000 / 60 : activeRenderInterval(controlsChanged);
 }
 /* CSS decides the canvas box; we only match the drawing buffer to it. Passing
    false to setSize leaves the CSS size alone, so the two cannot disagree. */

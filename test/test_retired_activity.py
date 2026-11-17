@@ -63,6 +63,7 @@ class RetiredActivityTest(unittest.TestCase):
                 self.assertEqual(700000, item['finishedAt'])
                 self.assertTrue(item['finishedAtApproximate'])
                 self.assertEqual({'work': 700000}, service.model.retired_item_activity)
+                self.assertEqual({'work': 700000}, service.model.discoverable_retired_item_activity)
                 self.assertFalse(any(scope == 'agent s_author' for resource, scope in service.model.inventories))
                 self.assertNotIn('agent s_author', service.model.inventory('sessions').rows)
             self.assertEqual(1, cold_gateway.calls.count(('read', 'turns', 'agent s_author')))
@@ -105,6 +106,89 @@ class RetiredActivityTest(unittest.TestCase):
             self.assertEqual(700000, warm.model.session_activity[session])
             self.assertNotIn('_retainedAt', warm.model.session_activity_evidence[session])
             self.assertTrue(warm.snapshot()['agents'])
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is required for viewer tests')
+    def test_unassigned_retired_jobref_only_activity_changes_display_not_finished_window(self):
+        now = 40 * 86400000
+        day = 86400000
+        with patch('atc_service.now_ms', return_value=now):
+            gateway = PublishedReads()
+            template = gateway.rows['work-items', None][0]
+            gateway.rows['work-items', None] = [
+                dict(template, id='orphan', title='Orphan', state='open',
+                     createdAt=now - 20 * day, rowVersion=now - 20 * day),
+                dict(template, id='finished', title='Finished', state='closed',
+                     createdAt=now - 2 * day, rowVersion=now - 2 * day),
+            ]
+            gateway.rows['assignments', None] = []
+            gateway.rows['sessions', None] = [dict(sessionKey='agent s_helper', state='active')]
+            gateway.rows['turns', 'agent s_helper'] = [
+                dict(seq=1, sessionKey='agent s_helper', jobRef='orphan', endedAt=now - 3600000),
+                dict(seq=2, sessionKey='agent s_helper', jobRef='finished', endedAt=now - 3600000),
+            ]
+
+            warm = self.load(gateway)
+            before = {item['id']: item for item in warm.snapshot()['items']}
+            self.assertEqual(now - 3600000, before['finished']['finishedAt'])
+            gateway.rows['sessions', None][0]['state'] = 'retired'
+            warm.rebuild(recovery=True)
+            self.drain(warm)
+            warm._publish()
+
+            cold_gateway = deepcopy(gateway)
+            cold = self.load(cold_gateway)
+            warm_items = {item['id']: item for item in warm.snapshot()['items']}
+            cold_items = {item['id']: item for item in cold.snapshot()['items']}
+
+            self.assertEqual(now - 3600000, warm_items['orphan']['latestActivityAt'])
+            self.assertEqual(now - 20 * day, cold_items['orphan']['latestActivityAt'])
+            self.assertEqual([], warm_items['orphan']['holders'])
+            self.assertEqual([], cold_items['orphan']['holders'])
+            self.assertFalse(warm_items['orphan']['started'])
+            self.assertFalse(cold_items['orphan']['started'])
+            self.assertEqual(now - 3600000, warm_items['finished']['latestActivityAt'])
+            self.assertEqual(now - 2 * day, cold_items['finished']['latestActivityAt'])
+            self.assertEqual(now - 2 * day, warm_items['finished']['finishedAt'])
+            self.assertEqual(now - 2 * day, cold_items['finished']['finishedAt'])
+            self.assertTrue(warm_items['finished']['finishedAtApproximate'])
+            self.assertTrue(cold_items['finished']['finishedAtApproximate'])
+            self.assertEqual({}, warm.model.discoverable_retired_item_activity)
+            self.assertEqual({}, cold.model.discoverable_retired_item_activity)
+
+            script = """
+                import {itemInWindow, orphanRadius} from './web/work-item-window.mjs';
+                import {classifyWorkItemPlacement} from './web/work-item-tiers.mjs';
+                const warm=JSON.parse(process.argv[1]);
+                const fresh=JSON.parse(process.argv[2]);
+                const now=Number(process.argv[3]);
+                const visible=items=>items.filter(item=>itemInWindow(item,1,now));
+                const search=items=>visible(items).filter(item=>item.title==='Finished');
+                const warmVisible=visible(warm), freshVisible=visible(fresh);
+                const warmOrphan=warm.find(item=>item.id==='orphan');
+                const freshOrphan=fresh.find(item=>item.id==='orphan');
+                console.log(JSON.stringify({
+                  warmIds:warmVisible.map(item=>item.id), freshIds:freshVisible.map(item=>item.id),
+                  warmCount:warmVisible.length, freshCount:freshVisible.length,
+                  warmSearch:search(warm).map(item=>item.id), freshSearch:search(fresh).map(item=>item.id),
+                  warmTier:classifyWorkItemPlacement(warmOrphan,{}).tier,
+                  freshTier:classifyWorkItemPlacement(freshOrphan,{}).tier,
+                  warmRadius:orphanRadius(warmOrphan,20,80,now),
+                  freshRadius:orphanRadius(freshOrphan,20,80,now)
+                }));
+            """
+            result = subprocess.run([
+                shutil.which('node'), '--input-type=module', '-e', script,
+                json.dumps(list(warm_items.values())), json.dumps(list(cold_items.values())), str(now),
+            ], cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=True)
+            viewer = json.loads(result.stdout)
+            self.assertEqual(['orphan'], viewer['warmIds'])
+            self.assertEqual(viewer['warmIds'], viewer['freshIds'])
+            self.assertEqual(viewer['warmCount'], viewer['freshCount'])
+            self.assertEqual([], viewer['warmSearch'])
+            self.assertEqual(viewer['warmSearch'], viewer['freshSearch'])
+            self.assertEqual('perimeter', viewer['warmTier'])
+            self.assertEqual(viewer['warmTier'], viewer['freshTier'])
+            self.assertLess(viewer['warmRadius'], viewer['freshRadius'])
 
     def test_unlinked_retired_session_is_not_read_and_exact_finish_wins(self):
         with patch('atc_service.now_ms', return_value=1000000):

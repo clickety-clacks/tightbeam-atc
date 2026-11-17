@@ -48,6 +48,7 @@ class ClosedSourceServiceTest(unittest.TestCase):
         self.assertEqual(['unaffected'], [item['id'] for item in service.current['items']])
         for values in (service.model.closed_items, service.model.item_assignment_facts,
                        service.model.item_assignment_summary, service.model.retired_item_activity,
+                       service.model.discoverable_retired_item_activity,
                        service.model.item_activity()):
             self.assertNotIn('work', values)
         self.assertFalse(service.model.item_contributions.entries)
